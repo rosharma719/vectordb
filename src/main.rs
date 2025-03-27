@@ -1,13 +1,15 @@
 mod utils;
 mod vector;
+pub mod payload_storage;
 
-mod tests;
-
-use tests::utilsvector::run_utilsvector_tests;
-use tests::payload::run_payload_tests;
+mod tests {
+    pub mod inverted_index;
+    pub mod utilsvector;
+    pub mod payload;
+}
 
 fn main() {
-    println!("Running internal tests from main...");
-    run_utilsvector_tests();
-    run_payload_tests();
+    tests::utilsvector::run_utilsvector_tests();
+    tests::payload::run_payload_tests();
+    tests::inverted_index::run_inverted_index_tests();
 }

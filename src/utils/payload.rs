@@ -1,16 +1,16 @@
 //! Payload implementation with setter and comparison support
-
 use std::collections::HashMap;
 use crate::utils::errors::DBError;
+use ordered_float::OrderedFloat;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PayloadValue {
     Int(i64),
-    Float(f64),
+    Float(OrderedFloat<f64>),
     Str(String),
     Bool(bool),
     ListInt(Vec<i64>),
-    ListFloat(Vec<f64>),
+    ListFloat(Vec<OrderedFloat<f64>>),
     ListStr(Vec<String>),
     ListBool(Vec<bool>),
 }

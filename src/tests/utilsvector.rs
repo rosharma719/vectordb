@@ -3,12 +3,6 @@ use crate::utils::types::*;
 use crate::vector::metric::*;
 
 
-pub fn run_utilsvector_tests() {
-    println!("Running utilsvector tests...");
-
-    test_distance_metrics();
-    test_error_display();
-}
 
 fn test_distance_metrics() {
     let v1 = vec![1.0, 2.0, 3.0];
@@ -41,4 +35,23 @@ fn test_error_display() {
     assert!(format!("{}", wal).contains("bad header"));
 
     println!("✅ test_error_display passed");
+}
+
+fn test_cosine_distance_exact() {
+    let v1 = vec![1.0, 0.0];
+    let v2 = vec![0.0, 1.0];
+
+    let dist = distance(&v1, &v2, DistanceMetric::Cosine);
+    assert!((dist - 1.0).abs() < 1e-6);
+}
+
+pub fn run_utilsvector_tests() {
+    println!("Running utilsvector tests...");
+
+    test_distance_metrics();
+    test_error_display();
+    test_cosine_distance_exact();
+    // Note: test_distance_vector_length_mismatch_panics() should only be used with #[test] directly
+
+    println!("✅ All utilsvector tests passed");
 }
