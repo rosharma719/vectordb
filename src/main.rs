@@ -4,8 +4,10 @@ mod vector;
 mod tests;
 
 use tests::utilsvector::run_utilsvector_tests;
+use tests::payload::run_payload_tests;
 
 fn main() {
     println!("Running internal tests from main...");
     run_utilsvector_tests();
+    run_payload_tests();
 }

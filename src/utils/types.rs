@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+#![allow(dead_code)]
+
+
 
 /// The unique identifier for a point in the vector database.
 pub type PointId = u64;
@@ -26,17 +28,4 @@ pub enum DistanceMetric {
     Euclidean,
 }
 
-/// Represents a payload — the metadata associated with a point.
-/// Typically a map of string keys to payload values.
-pub type Payload = HashMap<String, PayloadValue>;
 
-
-
-
-
-
-/// TEMP: remove this once payload/schema.rs is implemented
-#[derive(Debug, Clone)]
-pub enum PayloadValue {
-    Placeholder,
-}
