@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use crate::utils::errors::DBError;
 use ordered_float::OrderedFloat;
 
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PayloadValue {
     Int(i64),
@@ -18,11 +20,15 @@ pub enum PayloadValue {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Payload(pub HashMap<String, PayloadValue>);
 
+
+//Wrapper around a HashMap<String, PayloadValue>
 impl Payload {
+    //Setter for key and value
     pub fn set(&mut self, key: &str, value: PayloadValue) {
         self.0.insert(key.to_string(), value);
     }
 
+    //Getter for value given key
     pub fn get(&self, key: &str) -> Option<&PayloadValue> {
         self.0.get(key)
     }
