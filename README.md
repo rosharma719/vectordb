@@ -2,7 +2,7 @@
 
 ## Overview
 
-VectorDB (better name coming soon!) is a lightweight, high-performance in-memory vector search engine designed for efficient similarity search and payload storage. Built with performance and flexibility in mind, it provides robust vector indexing and retrieval capabilities.
+VectorDB (better name coming soon!) is a lightweight, high-performance in-memory vector search engine designed for efficient similarity search and payload storage. 
 
 ## Features
 
@@ -17,11 +17,6 @@ VectorDB (better name coming soon!) is a lightweight, high-performance in-memory
   - Store additional metadata alongside vector embeddings (ints, floats, strings, homogeneous lists)
   - Seamless integration with vector search operations
 
-### Upcoming Features
-- Vector deletion
-- In-place filtering with custom query schema
-- Python API
-
 ## Roadmap
 
 - [x] HNSW Indexing
@@ -29,5 +24,12 @@ VectorDB (better name coming soon!) is a lightweight, high-performance in-memory
 - [x] Inverse Indexing
 - [x] Vector Deletion
 - [ ] In-Place Filtering
-- [ ] Query Schema
+- [ ] Filtering and Query Schema
 - [ ] Python API
+
+## Other potential features
+
+- [ ] Mutable/immutable segmentation
+  - [ ] Compression and quantization for fast immutable segment search
+- [ ] Graph functionality
+- [ ] Generative AI query builder
