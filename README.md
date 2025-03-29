@@ -27,7 +27,7 @@ VectorDB (better name coming soon!) is a lightweight, high-performance in-memory
 - [x] HNSW Indexing
 - [x] Payload Storage
 - [x] Inverse Indexing
-- [ ] Vector Deletion
+- [x] Vector Deletion
 - [ ] In-Place Filtering
 - [ ] Query Schema
 - [ ] Python API
