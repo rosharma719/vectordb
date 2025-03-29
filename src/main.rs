@@ -9,8 +9,10 @@ mod tests {
     pub mod payload;
     pub mod hnsw;
     pub mod segment;
+    pub mod filters; // ✅ Add this line
 
-    pub use segment::run_segment_tests; // ✅ Import the function for clarity
+    pub use segment::run_segment_tests;
+    pub use filters::run_filter_tests; // ✅ Add this line
 }
 
 fn main() {
@@ -18,5 +20,6 @@ fn main() {
     tests::payload::run_payload_tests();
     tests::inverted_index::run_inverted_index_tests();
     tests::hnsw::run_hnsw_tests();
-    tests::run_segment_tests(); // ✅ Fixed function call
+    tests::run_segment_tests();
+    tests::run_filter_tests(); // ✅ Add this line
 }

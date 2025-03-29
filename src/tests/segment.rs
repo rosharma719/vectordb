@@ -2,6 +2,7 @@ use crate::segment::segment::Segment;
 use crate::vector::hnsw::HNSWIndex;
 use crate::utils::types::{DistanceMetric, Vector};
 use crate::utils::payload::{Payload, PayloadValue};
+use crate::payload_storage::filters::Filter;
 
 fn vecf(v: &[f32]) -> Vector {
     v.to_vec()
@@ -86,8 +87,6 @@ fn test_segment_unfiltered_search() {
     );
 }
 
-
-
 fn test_segment_purge_removes_deleted() {
     let hnsw = HNSWIndex::new(DistanceMetric::Euclidean, 16, 50, 16, 2);
     let mut segment = Segment::new(hnsw);
@@ -103,6 +102,32 @@ fn test_segment_purge_removes_deleted() {
     assert!(results.iter().any(|r| r.id == id2));
 }
 
+fn test_segment_post_filter_large_vector_set() {
+    let hnsw = HNSWIndex::new(DistanceMetric::Dot, 16, 50, 16, 2);
+    let mut segment = Segment::new(hnsw);
+
+    // Insert 100 points with labels
+    for i in 0..100 {
+        let mut payload = Payload::default();
+        let label = if i % 2 == 0 { "even" } else { "odd" };
+        payload.set("parity", PayloadValue::Str(label.to_string()));
+        segment.insert(vecf(&[i as f32, 0.0]), Some(payload)).unwrap();
+    }
+
+    // Filter for "even"
+    let filter = Filter::Match {
+        key: "parity".into(),
+        value: PayloadValue::Str("even".into()),
+    };
+
+    let results = segment.post_filter(&vecf(&[0.0, 0.0]), 10, Some(&filter)).unwrap();
+    assert!(results.iter().all(|sp| {
+        let payload = segment.get_payload(sp.id).unwrap();
+        matches!(payload.get("parity"), Some(PayloadValue::Str(s)) if s == "even")
+    }));
+    assert!(results.len() <= 10);
+}
+
 pub fn run_segment_tests() {
     println!("Running segment tests...");
 
@@ -113,6 +138,7 @@ pub fn run_segment_tests() {
     test_segment_unfiltered_search();
     test_segment_purge_removes_deleted();
     test_segment_search_after_partial_deletion();
+    test_segment_post_filter_large_vector_set();
 
     println!("✅ All segment tests passed");
 }
