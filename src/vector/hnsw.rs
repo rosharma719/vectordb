@@ -4,11 +4,18 @@ use crate::utils::types::{PointId, Vector, DistanceMetric, Score};
 use crate::vector::metric::distance;
 use crate::utils::errors::DBError;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ScoredPoint {
     pub id: PointId,
     pub score: Score,
 }
+
+impl PartialEq for ScoredPoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score
+    }
+}
+
 
 impl Eq for ScoredPoint {}
 
@@ -194,4 +201,36 @@ impl HNSWIndex {
         results.truncate(top_k);
         Ok(results)
     }
+
+    pub fn contains(&self, point_id: &PointId) -> bool {
+        self.vectors.contains_key(point_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.vectors.len()
+    }
+
+
+    // Expose vector storage
+    pub fn iter_vectors(&self) -> impl Iterator<Item = (&PointId, &Vector)> {
+        self.vectors.iter()
+    }
+
+    // Expose metric and params
+    pub fn metric(&self) -> DistanceMetric {
+        self.metric
+    }
+    pub fn m(&self) -> usize {
+        self.m
+    }
+    pub fn ef(&self) -> usize {
+        self.ef
+    }
+    pub fn max_level_cap(&self) -> usize {
+        self.max_level_cap
+    }
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
 }
