@@ -23,12 +23,13 @@ VectorDB (better name coming soon!) is a lightweight, high-performance in-memory
 - [x] Payload Storage
 - [x] Inverse Indexing
 - [x] Vector Deletion
-- [ ] In-Place Filtering
-- [ ] Filtering and Query Schema
+- [x] In-Place Filtering
+- [X] Filtering and Query Schema
 - [ ] Python API
 
 ## Other potential features
 
+- [ ] Persistence
 - [ ] Mutable/immutable segmentation
   - [ ] Compression and quantization for fast immutable segment search
 - [ ] Graph functionality

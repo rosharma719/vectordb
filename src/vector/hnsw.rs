@@ -119,6 +119,12 @@ impl HNSWIndex {
         Ok(())
     }
 
+    pub fn add_bidirectional_edge(&mut self, level: usize, a: PointId, b: PointId) {
+        self.layers.entry(level).or_default().entry(a).or_default().push(b);
+        self.layers.entry(level).or_default().entry(b).or_default().push(a);
+    }
+    
+
     fn greedy_search_layer(&self, query: &Vector, entry: PointId, level: usize) -> PointId {
         let mut current = entry;
         let mut changed = true;
@@ -197,7 +203,7 @@ impl HNSWIndex {
         }
 
         let mut results = self.search_layer(query, current, 0, self.ef)?;
-        results.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+        results.sort_by(|a, b: &ScoredPoint| a.score.partial_cmp(&b.score).unwrap());
         results.truncate(top_k);
         Ok(results)
     }
@@ -232,5 +238,10 @@ impl HNSWIndex {
     pub fn dim(&self) -> usize {
         self.dim
     }
+
+    pub fn get_vector(&self, point_id: &PointId) -> Option<&Vector> {
+        self.vectors.get(point_id)
+    }
+    
 
 }

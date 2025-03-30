@@ -9,10 +9,12 @@ mod tests {
     pub mod payload;
     pub mod hnsw;
     pub mod segment;
-    pub mod filters; // ✅ Add this line
+    pub mod filters;
+    pub mod in_place;
 
     pub use segment::run_segment_tests;
-    pub use filters::run_filter_tests; // ✅ Add this line
+    pub use filters::run_filter_tests;
+    pub use in_place::run_in_place_tests;
 }
 
 fn main() {
@@ -21,5 +23,6 @@ fn main() {
     tests::inverted_index::run_inverted_index_tests();
     tests::hnsw::run_hnsw_tests();
     tests::run_segment_tests();
-    tests::run_filter_tests(); // ✅ Add this line
+    tests::run_filter_tests();
+    tests::run_in_place_tests();
 }
