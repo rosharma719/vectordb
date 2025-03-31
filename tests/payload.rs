@@ -1,32 +1,32 @@
-use crate::utils::payload::*;
-use crate::utils::errors::DBError;
+use vectordb::utils::payload::*;
+use vectordb::utils::errors::DBError;
 use ordered_float::OrderedFloat;
 
+#[test]
 fn test_scalar_comparisons() {
-    // Int
     let a = PayloadValue::Int(10);
     let b = PayloadValue::Int(20);
     assert_eq!(a.compare_scalar(ScalarComparisonOp::Lt, &b), Some(true));
 
-    // Float
     let a = PayloadValue::Float(OrderedFloat(1.0));
     let b = PayloadValue::Float(OrderedFloat(1.0));
     assert_eq!(a.compare_scalar(ScalarComparisonOp::Eq, &b), Some(true));
 
-    // Str
     let a = PayloadValue::Str("abc".into());
     let b = PayloadValue::Str("xyz".into());
     assert_eq!(a.compare_scalar(ScalarComparisonOp::Lt, &b), Some(true));
 
-    // Bool
     let a = PayloadValue::Bool(true);
     let b = PayloadValue::Bool(false);
     assert_eq!(a.compare_scalar(ScalarComparisonOp::Neq, &b), Some(true));
 
-    // Mismatched types
-    assert_eq!(a.compare_scalar(ScalarComparisonOp::Eq, &PayloadValue::Str("true".into())), None);
+    assert_eq!(
+        a.compare_scalar(ScalarComparisonOp::Eq, &PayloadValue::Str("true".into())),
+        None
+    );
 }
 
+#[test]
 fn test_list_contains() {
     let ints = PayloadValue::ListInt(vec![1, 2, 3]);
     let floats = PayloadValue::ListFloat(vec![OrderedFloat(0.1), OrderedFloat(0.2)]);
@@ -51,6 +51,7 @@ fn test_list_contains() {
     );
 }
 
+#[test]
 fn test_list_element_compare() {
     let ints = PayloadValue::ListInt(vec![5, 10, 15]);
     let floats = PayloadValue::ListFloat(vec![OrderedFloat(0.1), OrderedFloat(0.5)]);
@@ -75,6 +76,7 @@ fn test_list_element_compare() {
     );
 }
 
+#[test]
 fn test_list_length() {
     let vec = PayloadValue::ListStr(vec!["a".into(), "b".into(), "c".into()]);
 
@@ -88,6 +90,7 @@ fn test_list_length() {
     );
 }
 
+#[test]
 fn test_list_equality() {
     let a = PayloadValue::ListInt(vec![1, 2, 3]);
     let b = PayloadValue::ListInt(vec![1, 2, 3]);
@@ -104,12 +107,14 @@ fn test_list_equality() {
     assert_eq!(a.evaluate_list_query(ListQueryOp::Equals(&wrong_type)), None);
 }
 
+#[test]
 fn test_payload_set_and_get() {
     let mut payload = Payload::default();
     payload.set("flag", PayloadValue::Bool(true));
     assert_eq!(payload.get("flag"), Some(&PayloadValue::Bool(true)));
 }
 
+#[test]
 fn test_payload_compare_field() {
     let mut payload = Payload::default();
     payload.set("x", PayloadValue::Int(42));
@@ -124,6 +129,7 @@ fn test_payload_compare_field() {
     assert!(matches!(wrong_type, Err(DBError::InvalidPayload(_))));
 }
 
+#[test]
 fn test_payload_evaluate_list_field_errors() {
     let mut payload = Payload::default();
     payload.set("tags", PayloadValue::ListStr(vec!["a".into(), "b".into()]));
@@ -147,19 +153,22 @@ fn test_payload_evaluate_list_field_errors() {
     assert!(matches!(wrong_type, Err(DBError::InvalidPayload(_))));
 }
 
+#[test]
 fn test_payload_overwrite() {
     let mut payload = Payload::default();
     payload.set("val", PayloadValue::Int(10));
-    payload.set("val", PayloadValue::Int(20)); // Overwrite
+    payload.set("val", PayloadValue::Int(20));
 
     assert_eq!(payload.get("val"), Some(&PayloadValue::Int(20)));
 }
 
+#[test]
 fn test_payload_default_behavior() {
     let payload = Payload::default();
     assert!(payload.get("missing").is_none());
 }
 
+#[test]
 fn test_list_element_compare_out_of_bounds() {
     let list = PayloadValue::ListInt(vec![1, 2]);
 
@@ -167,30 +176,10 @@ fn test_list_element_compare_out_of_bounds() {
     assert_eq!(result, None);
 }
 
+#[test]
 fn test_list_element_compare_wrong_type() {
     let list = PayloadValue::ListStr(vec!["a".into()]);
 
     let result = list.evaluate_list_query(ListQueryOp::ElementCompare(0, ScalarComparisonOp::Eq, &PayloadValue::Bool(true)));
     assert_eq!(result, None);
-}
-
-pub fn run_payload_tests() {
-    println!("Running payload tests...");
-
-    test_scalar_comparisons();
-    test_list_contains();
-    test_list_element_compare();
-    test_list_length();
-    test_list_equality();
-    test_payload_set_and_get();
-    test_payload_compare_field();
-    test_payload_evaluate_list_field_errors();
-
-    // New tests
-    test_payload_overwrite();
-    test_payload_default_behavior();
-    test_list_element_compare_out_of_bounds();
-    test_list_element_compare_wrong_type();
-
-    println!("✅ All payload tests passed");
 }

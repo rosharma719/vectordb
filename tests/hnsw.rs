@@ -1,12 +1,13 @@
-use crate::utils::types::{DistanceMetric, Vector};
-use crate::vector::hnsw::HNSWIndex;
-use crate::utils::errors::DBError;
+use vectordb::utils::types::{DistanceMetric, Vector};
+use vectordb::vector::hnsw::HNSWIndex;
+use vectordb::utils::errors::DBError;
 
 /// Helper to build a test vector
 fn vecf(v: &[f32]) -> Vector {
     v.to_vec()
 }
 
+#[test]
 fn test_insert_and_basic_search() {
     let mut hnsw = HNSWIndex::new(DistanceMetric::Euclidean, 16, 50, 16, 2);
 
@@ -22,12 +23,14 @@ fn test_insert_and_basic_search() {
     assert!(ids.iter().any(|&id| id == 2 || id == 4));
 }
 
+#[test]
 fn test_empty_search_returns_nothing() {
     let hnsw = HNSWIndex::new(DistanceMetric::Cosine, 16, 50, 16, 2);
     let results = hnsw.search(&vecf(&[0.0, 0.0]), 3).unwrap();
     assert!(results.is_empty());
 }
 
+#[test]
 fn test_insertion_is_idempotent() {
     let mut hnsw = HNSWIndex::new(DistanceMetric::Dot, 16, 50, 16, 2);
 
@@ -40,6 +43,7 @@ fn test_insertion_is_idempotent() {
     assert_eq!(results[0].id, 42);
 }
 
+#[test]
 fn test_search_respects_top_k() {
     let mut hnsw = HNSWIndex::new(DistanceMetric::Euclidean, 16, 50, 16, 2);
 
@@ -56,6 +60,7 @@ fn test_search_respects_top_k() {
     }
 }
 
+#[test]
 fn test_high_dimensional_vectors() {
     let mut hnsw = HNSWIndex::new(DistanceMetric::Cosine, 16, 50, 16, 128);
 
@@ -67,6 +72,7 @@ fn test_high_dimensional_vectors() {
     assert_eq!(results[0].id, 1);
 }
 
+#[test]
 fn test_dimensionality_mismatch_errors() {
     let mut hnsw = HNSWIndex::new(DistanceMetric::Cosine, 16, 50, 16, 3);
 
@@ -86,18 +92,4 @@ fn test_dimensionality_mismatch_errors() {
         }
         other => panic!("Expected VectorLengthMismatch, got: {:?}", other),
     }
-}
-
-
-pub fn run_hnsw_tests() {
-    println!("Running HNSW tests...");
-
-    test_insert_and_basic_search();
-    test_empty_search_returns_nothing();
-    test_insertion_is_idempotent();
-    test_search_respects_top_k();
-    test_high_dimensional_vectors();
-    test_dimensionality_mismatch_errors();
-
-    println!("✅ All HNSW tests passed");
 }

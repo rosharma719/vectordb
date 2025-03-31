@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
-use crate::payload_storage::stores::PayloadIndex;
-use crate::utils::payload::{Payload, PayloadValue};
+use vectordb::payload_storage::stores::PayloadIndex;
+use vectordb::utils::payload::{Payload, PayloadValue};
 use ordered_float::OrderedFloat;
 
-
+#[test]
 fn test_index_insert_and_query() {
     let mut index = PayloadIndex::new();
 
@@ -17,19 +17,25 @@ fn test_index_insert_and_query() {
     index.insert(42, &payload);
     index.insert(43, &payload);
 
-    let q1 = index.query_exact("category", &PayloadValue::Str("fruit".into()));
-    assert_eq!(q1.unwrap(), &HashSet::from([42, 43]));
-
-    let q2 = index.query_exact("rank", &PayloadValue::Int(1));
-    assert_eq!(q2.unwrap(), &HashSet::from([42, 43]));
-
-    let q3 = index.query_exact("confidence", &PayloadValue::Float(OrderedFloat(0.95)));
-    assert_eq!(q3.unwrap(), &HashSet::from([42, 43]));
-
-    let q4 = index.query_exact("active", &PayloadValue::Bool(true));
-    assert_eq!(q4.unwrap(), &HashSet::from([42, 43]));
+    assert_eq!(
+        index.query_exact("category", &PayloadValue::Str("fruit".into())).unwrap(),
+        &HashSet::from([42, 43])
+    );
+    assert_eq!(
+        index.query_exact("rank", &PayloadValue::Int(1)).unwrap(),
+        &HashSet::from([42, 43])
+    );
+    assert_eq!(
+        index.query_exact("confidence", &PayloadValue::Float(OrderedFloat(0.95))).unwrap(),
+        &HashSet::from([42, 43])
+    );
+    assert_eq!(
+        index.query_exact("active", &PayloadValue::Bool(true)).unwrap(),
+        &HashSet::from([42, 43])
+    );
 }
 
+#[test]
 fn test_index_removal() {
     let mut index = PayloadIndex::new();
 
@@ -39,18 +45,19 @@ fn test_index_removal() {
     index.insert(1, &payload);
     index.insert(2, &payload);
 
-    let before = index.query_exact("rank", &PayloadValue::Int(99));
-    assert_eq!(before.unwrap().len(), 2);
+    assert_eq!(index.query_exact("rank", &PayloadValue::Int(99)).unwrap().len(), 2);
 
     index.remove(1, &payload);
-    let after = index.query_exact("rank", &PayloadValue::Int(99));
-    assert_eq!(after.unwrap(), &HashSet::from([2]));
+    assert_eq!(
+        index.query_exact("rank", &PayloadValue::Int(99)).unwrap(),
+        &HashSet::from([2])
+    );
 
     index.remove(2, &payload);
-    let gone = index.query_exact("rank", &PayloadValue::Int(99));
-    assert!(gone.is_none());
+    assert!(index.query_exact("rank", &PayloadValue::Int(99)).is_none());
 }
 
+#[test]
 fn test_non_indexed_types() {
     let mut index = PayloadIndex::new();
 
@@ -60,15 +67,14 @@ fn test_non_indexed_types() {
 
     index.insert(99, &payload);
 
-    // These should not be indexed
     assert!(index.query_exact("list", &PayloadValue::Str("a".into())).is_none());
     assert!(index.query_exact("numbers", &PayloadValue::Int(1)).is_none());
 
-    // Confirm that they aren't present even in `all_for_key`
     assert!(index.all_for_key("list").is_none());
     assert!(index.all_for_key("numbers").is_none());
 }
 
+#[test]
 fn test_all_for_key() {
     let mut index = PayloadIndex::new();
 
@@ -89,7 +95,7 @@ fn test_all_for_key() {
     assert_eq!(all, HashSet::from([1, 2, 3]));
 }
 
-
+#[test]
 fn test_duplicate_inserts_are_idempotent() {
     let mut index = PayloadIndex::new();
 
@@ -103,6 +109,7 @@ fn test_duplicate_inserts_are_idempotent() {
     assert_eq!(result.unwrap(), &HashSet::from([1]));
 }
 
+#[test]
 fn test_insert_same_key_different_values() {
     let mut index = PayloadIndex::new();
 
@@ -115,13 +122,17 @@ fn test_insert_same_key_different_values() {
     index.insert(1, &p1);
     index.insert(2, &p2);
 
-    let a_ids = index.query_exact("group", &PayloadValue::Str("A".into()));
-    let b_ids = index.query_exact("group", &PayloadValue::Str("B".into()));
-
-    assert_eq!(a_ids.unwrap(), &HashSet::from([1]));
-    assert_eq!(b_ids.unwrap(), &HashSet::from([2]));
+    assert_eq!(
+        index.query_exact("group", &PayloadValue::Str("A".into())).unwrap(),
+        &HashSet::from([1])
+    );
+    assert_eq!(
+        index.query_exact("group", &PayloadValue::Str("B".into())).unwrap(),
+        &HashSet::from([2])
+    );
 }
 
+#[test]
 fn test_query_nonexistent_key_or_value() {
     let mut index = PayloadIndex::new();
 
@@ -131,18 +142,4 @@ fn test_query_nonexistent_key_or_value() {
 
     assert!(index.query_exact("nonexistent", &PayloadValue::Str("nope".into())).is_none());
     assert!(index.query_exact("status", &PayloadValue::Str("error".into())).is_none());
-}
-
-pub fn run_inverted_index_tests() {
-    println!("Running inverted index tests...");
-
-    test_index_insert_and_query();
-    test_index_removal();
-    test_non_indexed_types();
-    test_all_for_key();
-    test_duplicate_inserts_are_idempotent();
-    test_insert_same_key_different_values();
-    test_query_nonexistent_key_or_value();
-
-    println!("✅ All inverted index tests passed");
 }
