@@ -92,6 +92,7 @@ impl Segment {
         Ok(())
     }
 
+
     pub fn search(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
         let total_non_deleted = self.hnsw.len() - self.deleted.len();
         if total_non_deleted == 0 {
@@ -182,4 +183,20 @@ impl Segment {
 
         Ok(filtered)
     }
+
+    /// Immutable reference to underlying HNSW index
+    pub fn hnsw(&self) -> &HNSWIndex {
+        &self.hnsw
+    }
+
+    /// Immutable reference to point payloads
+    pub fn payloads(&self) -> &HashMap<PointId, Payload> {
+        &self.payloads
+    }
+
+    pub fn payload_index(&self) -> &PayloadIndex {
+        &self.payload_index
+    }
+    
+
 }

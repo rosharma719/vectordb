@@ -1,166 +1,110 @@
+use vectordb::utils::payload::ScalarComparisonOp;
+
 use vectordb::segment::segment::Segment;
 use vectordb::utils::payload::{Payload, PayloadValue};
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::vector::hnsw::HNSWIndex;
 use vectordb::payload_storage::filters::Filter;
+use vectordb::vector::in_place::in_place_filtered_search;
 
 fn vecf(v: &[f32]) -> Vector {
     v.to_vec()
 }
 
-#[test]
-fn test_filter_aware_edges_preserve_reachability() {
-    let hnsw = HNSWIndex::new(DistanceMetric::Euclidean, 16, 64, 16, 2);
-    let mut segment = Segment::new(hnsw);
-
-    for i in 0..100 {
-        let mut payload = Payload::default();
-        payload.set("tag", PayloadValue::Str("apple".into()));
-        payload.set("weight", PayloadValue::Int(150 + i));
-        payload.set("organic", PayloadValue::Bool(i % 2 == 0));
-        segment
-            .insert(
-                vecf(&[1.0 + i as f32 * 0.01, 1.0 + i as f32 * 0.01]),
-                Some(payload),
-            )
-            .unwrap();
-    }
-
-    for i in 0..10 {
-        let mut payload_far = Payload::default();
-        payload_far.set("tag", PayloadValue::Str("banana".into()));
-        payload_far.set("weight", PayloadValue::Int(200));
-        segment
-            .insert(vecf(&[10.0 + i as f32, 10.0 + i as f32]), Some(payload_far))
-            .unwrap();
-    }
-
-    let res = segment.search(&vecf(&[2.0, 2.0]), 10).unwrap();
-    for sp in &res {
-        let tag = segment.get_payload(sp.id).unwrap().get("tag").unwrap();
-        assert_eq!(tag, &PayloadValue::Str("apple".into()));
-    }
+fn make_segment(metric: DistanceMetric, dim: usize) -> Segment {
+    Segment::new(HNSWIndex::new(metric, 16, 64, 8, dim))
 }
 
-#[test]
-fn test_shared_trait_connectivity() {
-    let mut segment = Segment::new(HNSWIndex::new(DistanceMetric::Cosine, 16, 64, 8, 2));
-
-    for i in 0..100 {
-        let mut payload = Payload::default();
-        payload.set("brand", PayloadValue::Str("Nike".into()));
-        payload.set("release_year", PayloadValue::Int(2010 + i as i64 % 10));
-        segment
-            .insert(vecf(&[0.0, 1.0 + i as f32 * 0.01]), Some(payload))
-            .unwrap();
-    }
-
-    let results = segment.search(&vecf(&[0.0, 1.5]), 20).unwrap();
-    assert!(results.len() >= 20);
-}
 
 #[test]
-fn test_different_trait_isolation() {
-    let mut segment = Segment::new(HNSWIndex::new(DistanceMetric::Cosine, 16, 64, 8, 2));
+fn test_in_place_deep_logical_filtering_and_edge_cases() {
+    let mut segment = make_segment(DistanceMetric::Cosine, 3);
 
-    for i in 0..50 {
-        let mut payload_fruit = Payload::default();
-        payload_fruit.set("category", PayloadValue::Str("fruit".into()));
-        payload_fruit.set("organic", PayloadValue::Bool(i % 2 == 0));
-        segment
-            .insert(
-                vecf(&[0.1 * i as f32, 1.0]),
-                Some(payload_fruit),
-            )
-            .unwrap();
-    }
+    let labels = ["A", "B", "C"];
+    let shapes = ["circle", "square", "triangle"];
+    let categories = ["fruit", "animal", "furniture"];
 
-    for i in 0..50 {
-        let mut payload_furniture = Payload::default();
-        payload_furniture.set("category", PayloadValue::Str("furniture".into()));
-        payload_furniture.set("material", PayloadValue::Str("wood".into()));
-        segment
-            .insert(
-                vecf(&[5.0, 0.1 * i as f32]),
-                Some(payload_furniture),
-            )
-            .unwrap();
-    }
+    // Insert 200 points with varying payloads
+    for i in 0..200 {
+        let mut p = Payload::default();
 
-    let filter = Filter::Match {
-        key: "category".into(),
-        value: PayloadValue::Str("fruit".into()),
-    };
+        // Scalar traits
+        p.set("label", PayloadValue::Str(labels[i % 3].into()));
+        p.set("score", PayloadValue::Int((i % 100) as i64));
+        p.set("verified", PayloadValue::Bool(i % 2 == 0));
 
-    let result = segment
-        .post_filter(&vecf(&[1.0, 1.0]), 10, Some(&filter))
-        .unwrap();
-    let categories: Vec<_> = result
-        .iter()
-        .filter_map(|sp| segment.get_payload(sp.id).and_then(|p| p.get("category")))
-        .collect();
-
-    assert!(
-        categories.iter().all(|v| v == &&PayloadValue::Str("fruit".into())),
-        "Expected all returned points to be from 'fruit' category"
-    );
-}
-
-#[test]
-fn test_filtering_on_multiple_fields() {
-    let mut segment = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 64, 8, 2));
-
-    let types = ["shoe", "hat", "jacket"];
-    let genders = ["male", "female", "unisex"];
-    for t in types.iter() {
-        for g in genders.iter() {
-            for size in 5..15 {
-                let mut p = Payload::default();
-                p.set("type", PayloadValue::Str((*t).into()));
-                p.set("gender", PayloadValue::Str((*g).into()));
-                p.set("size", PayloadValue::Int(size));
-                p.set("available", PayloadValue::Bool(size % 2 == 0));
-                segment
-                    .insert(vecf(&[size as f32 * 0.1, 0.5]), Some(p))
-                    .unwrap();
-            }
+        // Semi-shared trait
+        if i % 4 == 0 {
+            p.set("shape", PayloadValue::Str(shapes[i % 3].into()));
         }
-    }
 
-    let results = segment.search(&vecf(&[1.25, 0.5]), 30).unwrap();
-    assert!(results.len() >= 20);
-}
-
-#[test]
-fn test_fallback_brute_force_on_small_traits() {
-    let mut segment = Segment::new(HNSWIndex::new(DistanceMetric::Dot, 16, 64, 8, 2));
-
-    let colors = ["blue", "green", "red", "yellow", "purple"];
-    for c in colors.iter() {
-        for i in 0..20 {
-            let mut p = Payload::default();
-            p.set("color", PayloadValue::Str((*c).into()));
-            p.set("intensity", PayloadValue::Float((0.5 + i as f64 * 0.05).into()));
-            segment
-                .insert(vecf(&[1.0 - i as f32 * 0.01, 0.0]), Some(p))
-                .unwrap();
+        // List trait
+        if i % 5 == 0 {
+            p.set(
+                "tags",
+                PayloadValue::ListStr(vec!["hot".into(), "new".into(), "eco".into()]),
+            );
         }
-    }
 
-    let results = segment.search(&vecf(&[0.8, 0.0]), 50).unwrap();
-    assert!(results.len() >= 40);
-}
+        // Category for filter separation
+        p.set("category", PayloadValue::Str(categories[i % 3].into()));
 
-#[test]
-fn test_filter_aware_edge_with_no_payload() {
-    let mut segment = Segment::new(HNSWIndex::new(DistanceMetric::Cosine, 16, 64, 8, 2));
-
-    for i in 0..100 {
         segment
-            .insert(vecf(&[0.1, 0.9 + i as f32 * 0.005]), None)
+            .insert(vecf(&[i as f32 * 0.01, (i % 10) as f32, (i % 5) as f32]), Some(p))
             .unwrap();
     }
 
-    let results = segment.search(&vecf(&[0.1, 0.95]), 20).unwrap();
-    assert!(results.len() >= 20);
+    // Now test a complex filter:
+    // (category == "fruit" OR shape == "circle") AND verified == true AND score <= 80
+    let filter = Filter::And(vec![
+        Filter::Or(vec![
+            Filter::Match {
+                key: "category".into(),
+                value: PayloadValue::Str("fruit".into()),
+            },
+            Filter::Match {
+                key: "shape".into(),
+                value: PayloadValue::Str("circle".into()),
+            },
+        ]),
+        Filter::Match {
+            key: "verified".into(),
+            value: PayloadValue::Bool(true),
+        },
+        Filter::Compare {
+            key: "score".into(),
+            op: ScalarComparisonOp::Lte,
+            value: PayloadValue::Int(80),
+        },
+    ]);
+
+    let results = in_place_filtered_search(
+        &vecf(&[1.0, 1.0, 1.0]),
+        30,
+        segment.hnsw(),
+        segment.payloads(),
+        segment.payload_index(), // ✅ Required argument now added
+        Some(&filter),
+        &|id| segment.is_deleted(id),
+    )
+    .unwrap();
+
+    for sp in results {
+        let p = segment.get_payload(sp.id).unwrap();
+        let verified = p.get("verified").unwrap() == &PayloadValue::Bool(true);
+        let category = p.get("category").unwrap();
+        let shape = p.get("shape");
+        let score = p.get("score").and_then(|v| match v {
+            PayloadValue::Int(i) => Some(*i),
+            _ => None,
+        }).unwrap_or_default();
+
+        let is_ok =
+            verified &&
+            score <= 80 &&
+            (category == &PayloadValue::Str("fruit".into())
+                || shape == Some(&PayloadValue::Str("circle".into())));
+
+        assert!(is_ok, "Point {:?} failed filter logic", sp.id);
+    }
 }

@@ -216,6 +216,9 @@ impl HNSWIndex {
         self.vectors.len()
     }
 
+    pub fn layer_neighbors(&self, level: usize, point_id: PointId) -> Option<&Vec<PointId>> {
+        self.layers.get(&level)?.get(&point_id)
+    }
 
     // Expose vector storage
     pub fn iter_vectors(&self) -> impl Iterator<Item = (&PointId, &Vector)> {
@@ -241,6 +244,10 @@ impl HNSWIndex {
 
     pub fn get_vector(&self, point_id: &PointId) -> Option<&Vector> {
         self.vectors.get(point_id)
+    }
+
+    pub fn get_entry_point(&self) -> Option<u64> {
+        self.entry_point
     }
     
 
