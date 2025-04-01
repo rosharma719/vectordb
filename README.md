@@ -11,7 +11,7 @@ VectorDB (better name coming soon!) is a lightweight, high-performance in-memory
   - Optimized approximate nearest neighbor search
   - Supports arbitrarily high-dimensional vector spaces
   - Efficient search with configurable trade-offs between accuracy and performance (user-friendly interface in the works)
-  - Supports common distance metrics (Cosine, Euclidean, Dot)
+  - Supports common distance metrics (Cosine, Euclidean, Dot product similarity)
 
 - **Payload Storage**
   - Store additional metadata alongside vector embeddings (ints, floats, strings, homogeneous lists)

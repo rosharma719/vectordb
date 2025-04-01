@@ -3,9 +3,9 @@ use rand::seq::IteratorRandom;
 
 use crate::payload_storage::stores::PayloadIndex;
 use crate::utils::payload::Payload;
-use crate::utils::types::{PointId, Vector};
+use crate::utils::types::{PointId, Vector, DistanceMetric};
 use crate::utils::errors::DBError;
-use crate::vector::metric::distance;
+use crate::vector::metric::score;
 use crate::payload_storage::filters::{Filter, evaluate_filter};
 use crate::vector::hnsw::{HNSWIndex, ScoredPoint};
 
@@ -56,14 +56,18 @@ pub fn build_filter_aware_edges(
                     .into_iter()
                     .filter_map(|id| {
                         hnsw.get_vector(&id).map(|vec| {
-                            let score = distance(vector, vec, hnsw.metric());
-                            (id, score)
+                            let score = score(vector, vec, hnsw.metric());
+                            let sort_key = match hnsw.metric() {
+                                DistanceMetric::Dot => -score,
+                                _ => score,
+                            };
+                            ScoredPoint { id, raw_score: score, sort_key }
                         })
                     })
                     .collect::<Vec<_>>();
 
-                scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-                extra_neighbors.extend(scored.into_iter().take(4).map(|(id, _)| id));
+                scored.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap_or(std::cmp::Ordering::Equal));
+                extra_neighbors.extend(scored.into_iter().take(4).map(|sp| sp.id));
             }
         }
     }
@@ -81,7 +85,7 @@ pub fn in_place_filtered_search(
     top_k: usize,
     hnsw: &HNSWIndex,
     payloads: &HashMap<PointId, Payload>,
-    payload_index: &PayloadIndex, // <- added this
+    payload_index: &PayloadIndex,
     filter: Option<&Filter>,
     is_deleted: &dyn Fn(PointId) -> bool,
 ) -> Result<Vec<ScoredPoint>, DBError> {
@@ -95,10 +99,16 @@ pub fn in_place_filtered_search(
     let mut current = match hnsw.get_entry_point() {
         Some(id) => {
             if let Some(f) = filter {
-                match payloads.get(&id) {
-                    Some(p) if evaluate_filter(f, p).unwrap_or(false) => id,
-                    _ => find_entry_point_matching_filter(f, payload_index, is_deleted, hnsw)
-                        .unwrap_or(id),
+                if let Some(payload) = payloads.get(&id) {
+                    if evaluate_filter(f, payload)? {
+                        id
+                    } else {
+                        find_entry_point_matching_filter(f, payload_index, is_deleted, hnsw)
+                            .unwrap_or(id)
+                    }
+                } else {
+                    find_entry_point_matching_filter(f, payload_index, is_deleted, hnsw)
+                        .unwrap_or(id)
                 }
             } else {
                 id
@@ -116,19 +126,22 @@ pub fn in_place_filtered_search(
         }
     };
 
-    // Descend top-down
-    for level in (1..=hnsw.max_level_cap()).rev() {
+    for level in (1..=hnsw.current_max_level()).rev() {
         current = greedy_search_layer_with_filter(query, current, level, hnsw, payloads, filter, is_deleted)?;
     }
 
-    // Layer 0 search (filter-aware)
     let mut visited = HashSet::new();
     let mut candidates = BinaryHeap::new();
     let mut results = BinaryHeap::new();
 
-    let dist = distance(query, hnsw.get_vector(&current).unwrap(), hnsw.metric());
-    candidates.push(ScoredPoint { id: current, score: dist });
-    results.push(ScoredPoint { id: current, score: dist });
+    let dist = score(query, hnsw.get_vector(&current).unwrap(), hnsw.metric());
+    let sort_key = match hnsw.metric() {
+        DistanceMetric::Dot => -dist,
+        _ => dist,
+    };
+    let first = ScoredPoint { id: current, raw_score: dist, sort_key };
+    candidates.push(first.clone());
+    results.push(first);
     visited.insert(current);
 
     while let Some(current) = candidates.pop() {
@@ -147,8 +160,12 @@ pub fn in_place_filtered_search(
                     }
                 }
 
-                let d = distance(query, hnsw.get_vector(&neighbor).unwrap(), hnsw.metric());
-                let sp = ScoredPoint { id: neighbor, score: d };
+                let d = score(query, hnsw.get_vector(&neighbor).unwrap(), hnsw.metric());
+                let sort_key = match hnsw.metric() {
+                    DistanceMetric::Dot => -d,
+                    _ => d,
+                };
+                let sp = ScoredPoint { id: neighbor, raw_score: d, sort_key };
                 candidates.push(sp.clone());
                 results.push(sp);
 
@@ -164,7 +181,6 @@ pub fn in_place_filtered_search(
     Ok(res)
 }
 
-/// Greedy top-down filtering
 fn greedy_search_layer_with_filter(
     query: &Vector,
     entry: PointId,
@@ -195,10 +211,19 @@ fn greedy_search_layer_with_filter(
                     }
                 }
 
-                let d_current = distance(query, hnsw.get_vector(&current).unwrap(), hnsw.metric());
-                let d_new = distance(query, hnsw.get_vector(&neighbor).unwrap(), hnsw.metric());
+                let d_current = score(query, hnsw.get_vector(&current).unwrap(), hnsw.metric());
+                let d_new = score(query, hnsw.get_vector(&neighbor).unwrap(), hnsw.metric());
 
-                if d_new < d_current {
+                let s_current = match hnsw.metric() {
+                    DistanceMetric::Dot => -d_current,
+                    _ => d_current,
+                };
+                let s_new = match hnsw.metric() {
+                    DistanceMetric::Dot => -d_new,
+                    _ => d_new,
+                };
+
+                if s_new < s_current {
                     current = neighbor;
                     changed = true;
                 }
@@ -209,7 +234,6 @@ fn greedy_search_layer_with_filter(
     Ok(current)
 }
 
-/// Attempts to retrieve a viable filtered entry point
 fn find_entry_point_matching_filter(
     filter: &Filter,
     payload_index: &PayloadIndex,
@@ -233,6 +257,6 @@ fn find_entry_point_matching_filter(
             None
         }
         Filter::Not(inner) => find_entry_point_matching_filter(inner, payload_index, is_deleted, hnsw),
-        Filter::Compare { .. } => None,
+        Filter::Compare { .. } => None, // Fallback if not indexed
     }
 }
