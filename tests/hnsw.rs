@@ -89,6 +89,41 @@ fn test_all_metrics_consistency() {
 }
 
 
+#[test]
+fn test_hnsw_robust_score_metrics() {
+    // Create 5 vectors in a line with easily predictable order.
+    let vectors = vec![
+        vecf(&[1.0, 0.0, 0.0]),
+        vecf(&[2.0, 0.0, 0.0]),
+        vecf(&[3.0, 0.0, 0.0]),
+        vecf(&[4.0, 0.0, 0.0]),
+        vecf(&[5.0, 0.0, 0.0]),
+    ];
+
+    // Euclidean HNSW
+    let mut hnsw_euclidean = HNSWIndex::new(DistanceMetric::Euclidean, 16, 50, 16, 3);
+    for (id, vec) in vectors.iter().enumerate() {
+        hnsw_euclidean.insert(id as u64, vec.clone()).unwrap();
+    }
+    let results_euclidean = hnsw_euclidean.search(&vecf(&[1.1, 0.0, 0.0]), 1).unwrap();
+    assert_eq!(results_euclidean[0].id, 0);
+
+    // Cosine HNSW
+    let mut hnsw_cosine = HNSWIndex::new(DistanceMetric::Cosine, 16, 50, 16, 3);
+    for (id, vec) in vectors.iter().enumerate() {
+        hnsw_cosine.insert(id as u64, vec.clone()).unwrap();
+    }
+    let results_cosine = hnsw_cosine.search(&vecf(&[4.9, 0.0, 0.0]), 1).unwrap();
+    assert_eq!(results_cosine[0].id, 4);
+
+    // Dot metric HNSW
+    let mut hnsw_dot = HNSWIndex::new(DistanceMetric::Dot, 16, 50, 16, 3);
+    for (id, vec) in vectors.iter().enumerate() {
+        hnsw_dot.insert(id as u64, vec.clone()).unwrap();
+    }
+    let results_dot = hnsw_dot.search(&vecf(&[4.9, 0.0, 0.0]), 1).unwrap();
+    assert_eq!(results_dot[0].id, 4);
+}
 
 
 #[test]

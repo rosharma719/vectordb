@@ -6,13 +6,13 @@ use crate::utils::errors::DBError;
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::{PointId, Vector};
 use crate::vector::hnsw::{HNSWIndex, ScoredPoint};
-use crate::vector::in_place::build_filter_aware_edges;
 
 /// A segment is the core unit that wraps vector storage, indexing, payloads, and deletion.
 pub struct Segment {
     hnsw: HNSWIndex,
     payload_index: PayloadIndex,
     payloads: HashMap<PointId, Payload>,
+    // This set is maintained in parallel with the HNSW deletion set.
     deleted: HashSet<PointId>,
     next_id: PointId,
 }
@@ -24,7 +24,7 @@ impl Segment {
             payload_index: PayloadIndex::new(),
             payloads: HashMap::new(),
             deleted: HashSet::new(),
-            next_id: 0,
+            next_id: 1,
         }
     }
 
@@ -44,11 +44,10 @@ impl Segment {
                 .map(|(k, _)| k.clone())
                 .collect();
 
-            build_filter_aware_edges(
+            self.hnsw.build_filter_aware_edges(
                 point_id,
                 &vector,
                 &p,
-                &mut self.hnsw,
                 &self.payload_index,
                 &self.payloads,
                 &filter_keys,
@@ -68,29 +67,29 @@ impl Segment {
     }
 
     pub fn delete(&mut self, point_id: PointId) -> Result<(), DBError> {
-        if self.deleted.contains(&point_id) {
+        // If the point is already marked as deleted OR is no longer in the index,
+        // treat it as already deleted.
+        if self.deleted.contains(&point_id) || !self.hnsw.contains(&point_id) {
             return Ok(());
         }
-
-        if !self.hnsw.contains(&point_id) {
-            return Err(DBError::NotFound(point_id));
-        }
-
+    
         if let Some(p) = self.payloads.get(&point_id) {
             self.payload_index.remove(point_id, p);
         }
-
+    
         self.deleted.insert(point_id);
-
-        // 💡 Auto-rebuild if too many deletions
+        self.hnsw.mark_deleted(point_id);
+    
+        // Trigger a purge if too many deletions exist.
         let deleted_count = self.deleted.len();
         let total_count = self.hnsw.len();
-        if deleted_count > 20 || deleted_count as f32 / total_count as f32 > 0.1 {
-            self.purge().unwrap();
+        if deleted_count > 20 || (deleted_count as f32 / total_count as f32) > 0.1 {
+            self.purge()?;
         }
-
+    
         Ok(())
     }
+    
 
 
     pub fn search(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
@@ -99,7 +98,9 @@ impl Segment {
             return Err(DBError::SearchError("No active points available to search.".into()));
         }
 
+        // HNSWIndex now internally skips deleted points.
         let candidates = self.hnsw.search(query, top_k * 2)?;
+        // (The following filter is kept as extra safety.)
         let filtered = candidates
             .into_iter()
             .filter(|sp| !self.deleted.contains(&sp.id))
@@ -132,26 +133,51 @@ impl Segment {
             self.hnsw.max_level_cap(),
             self.hnsw.dim(),
         );
-
-        for (&id, vector) in self.hnsw.iter_vectors() {
-            if !self.deleted.contains(&id) {
-                new_hnsw.insert(id, vector.clone())?;
-            }
-        }
-
+    
         let mut new_payload_index = PayloadIndex::new();
-        for (&id, payload) in &self.payloads {
-            if !self.deleted.contains(&id) {
-                new_payload_index.insert(id, payload);
+        let mut new_payloads = HashMap::new();
+    
+        for (&id, vector) in self.hnsw.iter_vectors() {
+            if self.deleted.contains(&id) {
+                continue;
+            }
+    
+            // Reinsert into HNSW
+            new_hnsw.insert(id, vector.clone())?;
+    
+            if let Some(p) = self.payloads.get(&id) {
+                // Reinsert into payload structures
+                new_payload_index.insert(id, p);
+                new_payloads.insert(id, p.clone());
+    
+                // Rebuild filter-aware edges
+                let filter_keys: Vec<String> = p.0
+                    .iter()
+                    .filter(|(_, v)| matches!(v, PayloadValue::Int(_) | PayloadValue::Float(_) | PayloadValue::Str(_) | PayloadValue::Bool(_)))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+    
+                new_hnsw.build_filter_aware_edges(
+                    id,
+                    vector,
+                    p,
+                    &new_payload_index,
+                    &new_payloads,
+                    &filter_keys,
+                )?;
             }
         }
-
+    
+        // Swap in the rebuilt structures
         self.hnsw = new_hnsw;
         self.payload_index = new_payload_index;
+        self.payloads = new_payloads;
+    
         self.deleted.clear();
-
+    
         Ok(())
     }
+     
 
     /// Vector search with logical payload filtering
     pub fn post_filter(
@@ -197,6 +223,4 @@ impl Segment {
     pub fn payload_index(&self) -> &PayloadIndex {
         &self.payload_index
     }
-    
-
 }

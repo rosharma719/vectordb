@@ -1,8 +1,11 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use rand::seq::IteratorRandom;
 use rand::Rng;
 use crate::utils::types::{PointId, Vector, DistanceMetric, Score};
 use crate::vector::metric::score;
 use crate::utils::errors::DBError;
+use crate::payload_storage::stores::PayloadIndex;
+use crate::utils::payload::Payload;
 
 #[derive(Clone, Debug)]
 pub struct ScoredPoint {
@@ -64,6 +67,8 @@ pub struct HNSWIndex {
     level_scale: f64,
     current_max_level: usize,
     dim: usize,
+    // NEW: Maintain a set of deleted point IDs for lazy deletion
+    deleted: HashSet<PointId>,
 }
 
 
@@ -83,6 +88,7 @@ impl HNSWIndex {
             level_scale,
             current_max_level: 0,
             dim,
+            deleted: HashSet::new(),
         }
     }
 
@@ -93,23 +99,32 @@ impl HNSWIndex {
         level
     }
 
-    fn normalize_score(&self, raw: f32) -> f32 {
+    pub fn normalize_score(&self, raw: f32) -> f32 {
         match self.metric {
             DistanceMetric::Cosine | DistanceMetric::Euclidean => raw,
-            DistanceMetric::Dot => -raw,
+            DistanceMetric::Dot => -raw,  // So we can use a min-heap
+        }
+    }
+    
+    /// Mark a point as deleted and, if needed, update the entry point.
+    pub fn mark_deleted(&mut self, point_id: PointId) {
+        self.deleted.insert(point_id);
+        // If the deleted point was the entry point, try to choose a new one.
+        if Some(point_id) == self.entry_point {
+            self.entry_point = self.vectors.keys().find(|&&id| !self.deleted.contains(&id)).cloned();
         }
     }
 
     pub fn insert(&mut self, point_id: PointId, vector: Vector) -> Result<(), DBError> {
-        println!("Inserting point {}", point_id);
+        println!("\n[INSERT] Attempting to insert point: {}", point_id);
     
         if self.vectors.contains_key(&point_id) {
-            println!("Point {} already exists, skipping", point_id);
+            println!("[INSERT] Point {} already exists. Skipping.", point_id);
             return Ok(());
         }
     
         if vector.len() != self.dim {
-            println!("Vector length mismatch for point {}", point_id);
+            println!("[INSERT] Vector length mismatch. Expected {}, got {}.", self.dim, vector.len());
             return Err(DBError::VectorLengthMismatch {
                 expected: self.dim,
                 actual: vector.len(),
@@ -117,42 +132,53 @@ impl HNSWIndex {
         }
     
         let level = self.assign_random_level();
+        println!("[INSERT] Assigned random level {} to point {}", level, point_id);
+    
         let vec = self.maybe_normalize(&vector);
         self.vectors.insert(point_id, vec);
         self.levels.insert(point_id, level);
     
-        // Initialize this point in all levels 0..=level with a self-loop.
+        // Initialize self-links
         for l in 0..=level {
-            let entry = self.layers.entry(l).or_default().entry(point_id).or_insert_with(Vec::new);
-            entry.push(point_id); // Add self-loop
+            self.layers.entry(l).or_default()
+                .entry(point_id).or_insert_with(Vec::new)
+                .push(point_id);
+            println!("[INSERT] Initialized self-link at level {}", l);
         }
     
-        // If this is the first insertion, set the entry point.
         if self.entry_point.is_none() {
-            println!("Setting entry point to {}", point_id);
+            println!("[INSERT] First point. Setting entry point to {} at level {}", point_id, level);
             self.entry_point = Some(point_id);
             self.current_max_level = level;
             return Ok(());
         }
     
-        // For levels above the new point's level, perform greedy search to find a good entry.
-        let mut current_entry = self.entry_point.unwrap();
+        // If the current entry point is deleted, pick a non-deleted candidate.
+        let mut current_entry = if let Some(ep) = self.entry_point {
+            if self.deleted.contains(&ep) {
+                // Find a non-deleted entry in the index.
+                self.vectors.keys().find(|&&id| !self.deleted.contains(&id)).cloned().unwrap_or(ep)
+            } else {
+                ep
+            }
+        } else {
+            point_id
+        };
+    
         for l in ((level + 1)..=self.current_max_level).rev() {
-            println!("Greedy search from level {} for point {}", l, point_id);
+            println!("[INSERT] Greedy search for entry at level {} starting from {}", l, current_entry);
             current_entry = self.greedy_search_layer(&self.vectors[&point_id], current_entry, l);
+            println!("[INSERT] Entry point after greedy search at level {}: {}", l, current_entry);
         }
     
-        // For each level from new_point's level down to 0, do a candidate search and update links.
         for l in (0..=level).rev() {
-            println!("Search layer at level {} for point {}", l, point_id);
-            let candidates = self.search_layer(&self.vectors[&point_id], current_entry, l, self.ef)?;
-            let neighbors: Vec<PointId> = candidates.into_iter().take(self.m).map(|sp| sp.id).collect();
-            println!("Neighbors at level {} for point {}: {:?}", l, point_id, neighbors);
+            println!("[INSERT] Performing search layer at level {}...", l);
+            let use_norm = self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
+            let candidates = self.search_layer(&self.vectors[&point_id], current_entry, l, self.ef, use_norm)?;
+            let neighbors: Vec<PointId> = candidates.iter().take(self.m).map(|sp| sp.id).collect();
+            println!("[INSERT] Found neighbors at level {} for {}: {:?}", l, point_id, neighbors);
     
-            // Link new point with its selected neighbors.
             let layer = self.layers.get_mut(&l).unwrap();
-    
-            // Insert point_id with neighbors + self-loop (if not already present)
             let mut linked = neighbors.clone();
             if !linked.contains(&point_id) {
                 linked.push(point_id);
@@ -166,15 +192,13 @@ impl HNSWIndex {
                 }
             }
     
-            // Update current entry for next lower level (if available).
             if let Some(&best) = neighbors.first() {
                 current_entry = best;
             }
         }
     
-        // Update the global entry point if this point has a new highest level.
         if level > self.current_max_level {
-            println!("Updating entry point to {} at new max level {}", point_id, level);
+            println!("[INSERT] Promoting {} to new entry point at level {}", point_id, level);
             self.entry_point = Some(point_id);
             self.current_max_level = level;
         }
@@ -182,6 +206,114 @@ impl HNSWIndex {
         Ok(())
     }
     
+    
+    pub fn build_filter_aware_edges(
+        &mut self,
+        point_id: PointId,
+        vector: &Vector,
+        payload: &Payload,
+        payload_index: &PayloadIndex,
+        payloads: &HashMap<PointId, Payload>,
+        filter_keys: &[String],
+    ) -> Result<(), DBError> {
+        let query_vector = if self.metric == DistanceMetric::Cosine {
+            self.maybe_normalize(vector)
+        } else {
+            vector.clone()
+        };
+
+        let mut extra_neighbors = HashSet::new();
+        let m = self.m();
+
+        for key in filter_keys {
+            if let Some(value) = payload.get(key) {
+                let mut candidates: Vec<ScoredPoint> = if self.current_max_level() > 0 {
+                    let mut entry = self.get_entry_point().unwrap();
+                    for l in (1..=self.current_max_level()).rev() {
+                        entry = self.greedy_search_layer(&query_vector, entry, l);
+                    }
+                    self.search_layer(&query_vector, entry, 0, self.ef(), self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot)?
+                } else {
+                    self.iter_vectors()
+                        .filter_map(|(&id, vec)| {
+                            if id != point_id && !self.deleted.contains(&id) {
+                                Some(ScoredPoint {
+                                    id,
+                                    raw_score: score(&query_vector, vec, self.metric),
+                                    sort_key: self.normalize_score(score(&query_vector, vec, self.metric)),
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                };
+
+                candidates.sort_by(|a, b| {
+                    if self.metric == DistanceMetric::Dot {
+                        b.raw_score.partial_cmp(&a.raw_score).unwrap()
+                    } else {
+                        a.raw_score.partial_cmp(&b.raw_score).unwrap()
+                    }
+                });
+
+                let post_filtered: Vec<_> = candidates
+                    .into_iter()
+                    .filter(|sp| {
+                        payloads.get(&sp.id)
+                            .and_then(|p| p.get(key))
+                            .map_or(false, |v| v == value)
+                    })
+                    .take(m)
+                    .map(|sp| sp.id)
+                    .collect();
+
+                extra_neighbors.extend(post_filtered);
+
+                if extra_neighbors.len() >= m {
+                    break;
+                }
+
+                if self.current_max_level() == 0 {
+                    if let Some(id_set) = payload_index.query_exact(key, value) {
+                        let mut rng = rand::rng();
+                        let fallback_pool = id_set
+                            .iter()
+                            .filter(|&&id| id != point_id && self.get_vector(&id).is_some())
+                            .copied()
+                            .choose_multiple(&mut rng, 1000);
+
+                        let mut fallback_scored: Vec<_> = fallback_pool
+                            .into_iter()
+                            .filter_map(|id| {
+                                self.get_vector(&id).map(|vec| {
+                                    let raw = score(&query_vector, vec, self.metric);
+                                    (id, raw)
+                                })
+                            })
+                            .collect();
+
+                        fallback_scored.sort_by(|&(_, a), &(_, b)| {
+                            if self.metric == DistanceMetric::Dot {
+                                b.partial_cmp(&a).unwrap()
+                            } else {
+                                a.partial_cmp(&b).unwrap()
+                            }
+                        });
+
+                        extra_neighbors.extend(fallback_scored.into_iter().take(m).map(|(id, _)| id));
+                    }
+                }
+            }
+        }
+
+        extra_neighbors.insert(point_id);
+        for neighbor_id in extra_neighbors {
+            self.add_bidirectional_edge(0, point_id, neighbor_id);
+        }
+
+        Ok(())
+    }
 
 
     pub fn add_bidirectional_edge(&mut self, level: usize, a: PointId, b: PointId) {
@@ -189,64 +321,114 @@ impl HNSWIndex {
         self.layers.entry(level).or_default().entry(b).or_default().push(a);
     }
 
-    fn greedy_search_layer(&self, query: &Vector, entry: PointId, level: usize) -> PointId {
-        println!("Starting greedy search at level {} from entry {}", level, entry);
+    /// Greedy search that now skips deleted points.
+    pub fn greedy_search_layer(&self, query: &Vector, entry: PointId, level: usize) -> PointId {
+        println!("[GREEDY] Start at level {}, from entry {}", level, entry);
         let mut current = entry;
         let mut changed = true;
         while changed {
             changed = false;
             if let Some(neighbors) = self.layers.get(&level).and_then(|l| l.get(&current)) {
                 for &neighbor in neighbors {
+                    if self.deleted.contains(&neighbor) {
+                        continue;
+                    }
                     let d_current = score(query, &self.vectors[&current], self.metric);
                     let d_new = score(query, &self.vectors[&neighbor], self.metric);
                     let s_current = self.normalize_score(d_current);
                     let s_new = self.normalize_score(d_new);
+                    println!(
+                        "[GREEDY] Comparing {} (score {:.4}) to {} (score {:.4})",
+                        current, s_current, neighbor, s_new
+                    );
                     if s_new < s_current {
-                        println!("Found closer neighbor at level {}: {} -> {}", level, current, neighbor);
+                        println!("[GREEDY] Found closer point: {} -> {}", current, neighbor);
                         current = neighbor;
                         changed = true;
                     }
                 }
             }
         }
-        println!("Greedy search finished at {} on level {}", current, level);
+        println!("[GREEDY] Finished at point {} at level {}", current, level);
         current
     }
+    
 
-    fn search_layer(&self, query: &Vector, entry: PointId, level: usize, ef: usize) -> Result<Vec<ScoredPoint>, DBError> {
-        println!("Search layer: level={}, entry={}, ef={}", level, entry, ef);
+    fn search_layer(
+        &self,
+        query: &Vector,
+        entry: PointId,
+        level: usize,
+        ef: usize,
+        normalize: bool,
+    ) -> Result<Vec<ScoredPoint>, DBError> {
         if query.len() != self.dim {
             return Err(DBError::VectorLengthMismatch {
                 expected: self.dim,
                 actual: query.len(),
             });
         }
+    
         let mut visited = HashSet::new();
         let mut candidate_queue = BinaryHeap::new();
         let mut result_set = BinaryHeap::new();
-
-        let entry_distance = score(query, &self.vectors[&entry], self.metric);
-        let entry_score = self.normalize_score(entry_distance);
-        let initial = ScoredPoint { id: entry, raw_score: entry_distance, sort_key: entry_score };
+    
+        // If the entry is deleted, skip it by choosing a non-deleted vector (if possible)
+        let start_entry = if self.deleted.contains(&entry) {
+            self.vectors.keys().find(|&&id| !self.deleted.contains(&id)).cloned().unwrap_or(entry)
+        } else {
+            entry
+        };
+    
+        let entry_distance = score(query, &self.vectors[&start_entry], self.metric);
+        let entry_score = if normalize {
+            self.normalize_score(entry_distance)
+        } else {
+            entry_distance
+        };
+    
+        let initial = ScoredPoint {
+            id: start_entry,
+            raw_score: entry_distance,
+            sort_key: entry_score,
+        };
+    
         candidate_queue.push(initial.clone());
         result_set.push(ResultPoint(initial.clone()));
-        visited.insert(entry);
-
+        visited.insert(start_entry);
+    
+        println!(
+            "[SEARCH_LAYER] Initial score at entry {}: {:.4}",
+            start_entry, entry_score
+        );
+    
         let mut worst_score = result_set.peek().unwrap().0.sort_key;
+    
         while let Some(current) = candidate_queue.peek() {
             if current.sort_key > worst_score {
                 break;
             }
+    
             let current = candidate_queue.pop().unwrap();
             if let Some(neighbors) = self.layers.get(&level).and_then(|l| l.get(&current.id)) {
                 for &neighbor in neighbors {
-                    if !visited.insert(neighbor) {
+                    if self.deleted.contains(&neighbor) || !visited.insert(neighbor) {
                         continue;
                     }
+    
                     let raw = score(query, &self.vectors[&neighbor], self.metric);
-                    let score = self.normalize_score(raw);
-                    if result_set.len() < ef || score < worst_score {
-                        let sp = ScoredPoint { id: neighbor, raw_score: raw, sort_key: score };
+                    let score_val = if normalize {
+                        self.normalize_score(raw)
+                    } else {
+                        raw
+                    };
+    
+                    if result_set.len() < ef || score_val < worst_score {
+                        let sp = ScoredPoint {
+                            id: neighbor,
+                            raw_score: raw,
+                            sort_key: score_val,
+                        };
                         candidate_queue.push(sp.clone());
                         result_set.push(ResultPoint(sp));
                         if result_set.len() > ef {
@@ -259,11 +441,19 @@ impl HNSWIndex {
                 }
             }
         }
+    
         let mut results: Vec<ScoredPoint> = result_set.into_iter().map(|rp| rp.0).collect();
         results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
+    
+        println!(
+            "[SEARCH_LAYER] Done. Returning top {} results: {:?}",
+            results.len(),
+            results.iter().map(|sp| sp.id).collect::<Vec<_>>()
+        );
+    
         Ok(results)
     }
-
+       
     pub fn search(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
         println!("Searching top_k = {}", top_k);
         if self.entry_point.is_none() {
@@ -276,18 +466,37 @@ impl HNSWIndex {
                 actual: query.len(),
             });
         }
-        let normalized_query = self.maybe_normalize(query);
+        
+        let (normalize_query, normalize_score_flag) = match self.metric {
+            DistanceMetric::Cosine => (true, true),
+            DistanceMetric::Dot => (false, true), // invert score but don’t normalize vec
+            DistanceMetric::Euclidean => (false, false),
+        };
+        
+        let query_for_greedy = if normalize_query {
+            self.maybe_normalize(query)
+        } else {
+            query.clone()
+        };
+                
         let mut current = self.entry_point.unwrap();
         for l in (1..=self.current_max_level).rev() {
-            current = self.greedy_search_layer(&normalized_query, current, l);
+            current = self.greedy_search_layer(&query_for_greedy, current, l);
         }
-        let mut results = self.search_layer(query, current, 0, self.ef)?;
+        
+        let final_query = if normalize_query {
+            self.maybe_normalize(query)
+        } else {
+            query.clone()
+        };
+        
+        let mut results = self.search_layer(&final_query, current, 0, self.ef, normalize_score_flag)?;
         results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
         results.truncate(top_k);
         println!("Search complete. Returning {} results", results.len());
         Ok(results)
     }
-
+             
     pub fn contains(&self, point_id: &PointId) -> bool {
         self.vectors.contains_key(point_id)
     }
@@ -325,7 +534,12 @@ impl HNSWIndex {
     }
 
     pub fn get_vector(&self, point_id: &PointId) -> Option<&Vector> {
-        self.vectors.get(point_id)
+        // Optionally, one might return None for deleted points.
+        if self.deleted.contains(point_id) {
+            None
+        } else {
+            self.vectors.get(point_id)
+        }
     }
 
     pub fn get_entry_point(&self) -> Option<u64> {
@@ -344,7 +558,7 @@ impl HNSWIndex {
         self.current_max_level = level;
     }
 
-    fn maybe_normalize(&self, vec: &Vector) -> Vector {
+    pub fn maybe_normalize(&self, vec: &Vector) -> Vector {
         match self.metric {
             DistanceMetric::Cosine => {
                 let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -357,7 +571,4 @@ impl HNSWIndex {
             _ => vec.clone(),
         }
     }
-    
 }
-
-
