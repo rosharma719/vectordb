@@ -6,6 +6,7 @@ use crate::vector::metric::score;
 use crate::utils::errors::DBError;
 use crate::payload_storage::stores::PayloadIndex;
 use crate::utils::payload::Payload;
+use crate::payload_storage::filters::{Filter, evaluate_filter};
 
 #[derive(Clone, Debug)]
 pub struct ScoredPoint {
@@ -167,14 +168,14 @@ impl HNSWIndex {
         
         for l in ((level + 1)..=self.current_max_level).rev() {
             //println!("[INSERT] Greedy search for entry at level {} starting from {}", l, current_entry);
-            current_entry = self.greedy_search_layer(&self.vectors[&point_id], current_entry, l);
+            current_entry = self.greedy_search_layer_unfiltered(&self.vectors[&point_id], current_entry, l);
             //println!("[INSERT] Entry point after greedy search at level {}: {}", l, current_entry);
         }
     
         for l in (0..=level).rev() {
             //println!("[INSERT] Performing search layer at level {}...", l);
             let use_norm = self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
-            let candidates = self.search_layer(&self.vectors[&point_id], current_entry, l, self.ef, use_norm)?;
+            let candidates = self.search_layer_unfiltered(&self.vectors[&point_id], current_entry, l, self.ef, use_norm)?;
             let neighbors: Vec<PointId> = candidates.iter().take(self.m).map(|sp| sp.id).collect();
             //println!("[INSERT] Found neighbors at level {} for {}: {:?}", l, point_id, neighbors);
     
@@ -267,9 +268,9 @@ impl HNSWIndex {
                 let mut candidates: Vec<ScoredPoint> = if self.current_max_level() > 0 {
                     let mut entry = self.get_entry_point().unwrap();
                     for l in (1..=self.current_max_level()).rev() {
-                        entry = self.greedy_search_layer(&query_vector, entry, l);
+                        entry = self.greedy_search_layer_unfiltered(&query_vector, entry, l);
                     }
-                    self.search_layer(&query_vector, entry, 0, self.ef(), self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot)?
+                    self.search_layer_unfiltered(&query_vector, entry, 0, self.ef(), self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot)?
                 } else {
                     self.iter_vectors()
                         .filter_map(|(&id, vec)| {
@@ -329,7 +330,7 @@ impl HNSWIndex {
         self.layers.entry(level).or_default().entry(b).or_default().push(a);
     }
 
-    pub fn greedy_search_layer(&self, query: &Vector, entry: PointId, level: usize) -> PointId {
+    pub fn greedy_search_layer_unfiltered(&self, query: &Vector, entry: PointId, level: usize) -> PointId {
         //println!("[GREEDY] Start at level {}, from entry {}", level, entry);
         let mut current = entry;
         let mut changed = true;
@@ -366,9 +367,57 @@ impl HNSWIndex {
         current
     }
         
+    pub fn greedy_search_layer_with_filter(
+        &self,
+        query: &Vector,
+        entry: PointId,
+        level: usize,
+        payloads: &HashMap<PointId, Payload>,
+        filter: Option<&Filter>,
+    ) -> Result<PointId, DBError> {
+        let mut current = entry;
+        let mut changed = true;
 
+        while changed {
+            changed = false;
+
+            if let Some(neighbors) = self.layer_neighbors(level, current) {
+                for &neighbor in neighbors {
+                    if self.deleted.contains(&neighbor) {
+                        continue;
+                    }
+
+                    if let Some(f) = filter {
+                        let Some(payload) = payloads.get(&neighbor) else { continue; };
+                        if !evaluate_filter(f, payload)? {
+                            continue;
+                        }
+                    }
+
+                    let d_current = score(query, self.get_vector(&current).unwrap(), self.metric);
+                    let d_new = score(query, self.get_vector(&neighbor).unwrap(), self.metric);
+
+                    let s_current = match self.metric {
+                        DistanceMetric::Dot => -d_current,
+                        _ => d_current,
+                    };
+                    let s_new = match self.metric {
+                        DistanceMetric::Dot => -d_new,
+                        _ => d_new,
+                    };
+
+                    if s_new < s_current {
+                        current = neighbor;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        Ok(current)
+    }
     
-    fn search_layer(
+    fn search_layer_unfiltered(
         &self,
         query: &Vector,
         entry: PointId,
@@ -411,7 +460,7 @@ impl HNSWIndex {
         result_set.push(ResultPoint(initial.clone()));
         visited.insert(start_entry);
     
-        //println!("[SEARCH_LAYER] Initial score at entry {}: {:.4}",start_entry, entry_score);
+        //println!("[search_layer_unfiltered] Initial score at entry {}: {:.4}",start_entry, entry_score);
     
         let mut worst_score = result_set.peek().unwrap().0.sort_key;
     
@@ -456,7 +505,7 @@ impl HNSWIndex {
         let mut results: Vec<ScoredPoint> = result_set.into_iter().map(|rp| rp.0).collect();
         results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
     
-        //println!("[SEARCH_LAYER] Done. Returning top {} results: {:?}",results.len(),results.iter().map(|sp| sp.id).collect::<Vec<_>>());
+        //println!("[search_layer_unfiltered] Done. Returning top {} results: {:?}",results.len(),results.iter().map(|sp| sp.id).collect::<Vec<_>>());
     
         Ok(results)
     }
@@ -488,7 +537,7 @@ impl HNSWIndex {
                 
         let mut current = self.entry_point.unwrap();
         for l in (1..=self.current_max_level).rev() {
-            current = self.greedy_search_layer(&query_for_greedy, current, l);
+            current = self.greedy_search_layer_unfiltered(&query_for_greedy, current, l);
         }
         
         let final_query = if normalize_query {
@@ -497,13 +546,148 @@ impl HNSWIndex {
             query.clone()
         };
         
-        let mut results = self.search_layer(&final_query, current, 0, self.ef, normalize_score_flag)?;
+        let mut results = self.search_layer_unfiltered(&final_query, current, 0, self.ef, normalize_score_flag)?;
         results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
         results.truncate(top_k);
         println!("Search complete. Returning {} results", results.len());
         Ok(results)
     }
              
+
+
+    pub fn find_entry_point_matching_filter(
+        &self,
+        filter: &Filter,
+        payload_index: &PayloadIndex,
+        payloads: &HashMap<PointId, Payload>
+    ) -> Option<PointId> {
+        match filter {
+            Filter::Match { key, value } => {
+                payload_index
+                    .query_exact(key, value)?
+                    .iter()
+                    .find(|&&id| !self.deleted.contains(&id) && self.get_vector(&id).is_some())
+                    .copied()
+            }
+            Filter::And(conds) | Filter::Or(conds) => {
+                for cond in conds {
+                    if let Some(id) = self.find_entry_point_matching_filter(cond, payload_index, payloads) {
+                        return Some(id);
+                    }
+                }
+                None
+            }
+            Filter::Not(inner) => self.find_entry_point_matching_filter(inner, payload_index, payloads),
+            Filter::Compare { .. } => None,
+        }
+    }
+
+    pub fn in_place_filtered_search(
+        &self,
+        query: &Vector,
+        top_k: usize,
+        payloads: &HashMap<PointId, Payload>,
+        payload_index: &PayloadIndex,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<ScoredPoint>, DBError> {
+        if query.len() != self.dim {
+            return Err(DBError::VectorLengthMismatch {
+                expected: self.dim,
+                actual: query.len(),
+            });
+        }
+
+        let mut entry = match self.get_entry_point() {
+            Some(id) => {
+                if let Some(f) = filter {
+                    if let Some(payload) = payloads.get(&id) {
+                        if evaluate_filter(f, payload)? {
+                            id
+                        } else {
+                            self.find_entry_point_matching_filter(f, payload_index, payloads).unwrap_or(id)
+                        }
+                    } else {
+                        self.find_entry_point_matching_filter(f, payload_index, payloads).unwrap_or(id)
+                    }
+                } else {
+                    id
+                }
+            }
+            None => {
+                if let Some(f) = filter {
+                    match self.find_entry_point_matching_filter(f, payload_index, payloads) {
+                        Some(id) => id,
+                        None => return Ok(vec![]),
+                    }
+                } else {
+                    return Ok(vec![]);
+                }
+            }
+        };
+
+        for level in (1..=self.current_max_level()).rev() {
+            entry = self.greedy_search_layer_with_filter(query, entry, level, payloads, filter)?;
+        }
+
+        let mut visited = HashSet::new();
+        let mut candidate_queue = BinaryHeap::new();
+        let mut result_set = BinaryHeap::new();
+
+        let dist = score(query, self.get_vector(&entry).unwrap(), self.metric);
+        let sort_key = match self.metric {
+            DistanceMetric::Dot => -dist,
+            _ => dist,
+        };
+        let first = ScoredPoint { id: entry, raw_score: dist, sort_key };
+        candidate_queue.push(first.clone());
+        result_set.push(first);
+        visited.insert(entry);
+
+        let mut worst_score = sort_key;
+
+        while let Some(current) = candidate_queue.pop() {
+            if current.sort_key > worst_score {
+                break;
+            }
+
+            if let Some(neighbors) = self.layer_neighbors(0, current.id) {
+                for &neighbor in neighbors {
+                    if self.deleted.contains(&neighbor) || !visited.insert(neighbor) {
+                        continue;
+                    }
+
+                    let d = score(query, self.get_vector(&neighbor).unwrap(), self.metric);
+                    let sort_key = match self.metric {
+                        DistanceMetric::Dot => -d,
+                        _ => d,
+                    };
+                    let sp = ScoredPoint { id: neighbor, raw_score: d, sort_key };
+
+                    candidate_queue.push(sp.clone());
+
+                    let passes = match filter {
+                        Some(f) => payloads.get(&neighbor).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false)),
+                        None => true,
+                    };
+
+                    if passes {
+                        result_set.push(sp);
+                        if result_set.len() > self.ef {
+                            result_set.pop();
+                        }
+                        if let Some(rp) = result_set.peek() {
+                            worst_score = rp.sort_key;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut res: Vec<ScoredPoint> = result_set.into_sorted_vec();
+        res.truncate(top_k);
+        Ok(res)
+    }
+    
     pub fn contains(&self, point_id: &PointId) -> bool {
         self.vectors.contains_key(point_id)
     }

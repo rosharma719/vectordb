@@ -118,6 +118,36 @@ impl Segment {
         Ok(filtered)
     }
 
+    pub fn search_with_filter(
+        &self,
+        query: &Vector,
+        top_k: usize,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<ScoredPoint>, DBError> {
+        let total_non_deleted = self.hnsw.len() - self.deleted.len();
+        if total_non_deleted == 0 {
+            return Err(DBError::SearchError("No active points available to search.".into()));
+        }
+    
+        let results = self.hnsw.in_place_filtered_search(
+            query,
+            top_k * 2,
+            &self.payloads,
+            &self.payload_index,
+            filter,
+        )?;
+    
+        let filtered: Vec<_> = results
+            .into_iter()
+            .filter(|sp| !self.deleted.contains(&sp.id))
+            .take(top_k)
+            .collect();
+    
+        Ok(filtered)
+    }
+    
+    
+
     /// Internal unfiltered search (used for diagnostics or filtered versions).
     pub fn search_unfiltered(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
         self.hnsw.search(query, top_k)
