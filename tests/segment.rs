@@ -11,67 +11,85 @@ fn vecf(v: &[f32]) -> Vector {
 
 #[test]
 fn test_large_scale_insert_and_search_all_metrics() {
+    use std::time::Instant;
+
     for metric in [DistanceMetric::Euclidean, DistanceMetric::Cosine, DistanceMetric::Dot] {
+        println!("\n\n===========================");
+        println!("STARTING TEST FOR {:?}", metric);
+        println!("===========================\n");
+
         let hnsw = HNSWIndex::new(metric, 16, 50, 16, 3);
         let mut segment = Segment::new(hnsw);
 
         let mut ids = Vec::new();
         let mut vectors = Vec::new();
 
-        for i in 0..1000 {
-            let mut payload = Payload::default();
-            payload.set("index", PayloadValue::Int(i));
-
+        println!("--- INSERTING VECTORS ---\n");
+        for i in 0..10_000 {
             let vec = vecf(&[
                 (i as f32).sin() * 5.0,
                 ((i * 3) as f32).cos() * 3.0,
                 ((i % 7) as f32).sqrt(),
             ]);
+            let mut payload = Payload::default();
+            payload.set("index", PayloadValue::Int(i));
 
             let id = segment.insert(vec.clone(), Some(payload)).unwrap();
             ids.push(id);
             vectors.push((id, vec));
+
+            if i % 1000 == 0 {
+                println!("Inserted {} vectors...", i);
+            }
         }
 
+        println!("\n--- SEARCHING QUERIES ---\n");
         for (expected_id, query) in vectors.iter().take(10) {
             let noisy_query: Vec<f32> = query.iter().map(|x| x + 0.001).collect();
+
+            let now = Instant::now();
             let results = segment.search(&noisy_query, 5).unwrap();
+            let duration = now.elapsed();
+
+            println!(
+                "[{:?}] Search complete in {:?}. Top result: ID {:?}",
+                metric,
+                duration,
+                results[0].id
+            );
 
             if metric == DistanceMetric::Dot {
-                // For Dot, we want to preserve magnitude.
-                // Compute the best candidate among all inserted vectors
+                // For Dot, compute highest dot product manually.
                 let mut best_id = None;
-                let mut best_dot = std::f32::NEG_INFINITY;
-                for (id, vec) in vectors.iter() {
-                    // Note: For dot, we do not normalize.
+                let mut best_dot = f32::NEG_INFINITY;
+                for (id, vec) in &vectors {
                     let dot: f32 = vec.iter().zip(&noisy_query).map(|(a, b)| a * b).sum();
                     if dot > best_dot {
                         best_dot = dot;
                         best_id = Some(*id);
                     }
                 }
-                let expected_dot_id = best_id.expect("at least one vector exists");
-                assert!(
-                    results[0].id == expected_dot_id,
-                    "For Dot metric, expected top candidate id {:?}, but got {:?} for query {:?}",
-                    expected_dot_id,
-                    results[0].id,
-                    noisy_query
+                let expected_dot_id = best_id.expect("At least one vector must exist");
+                assert_eq!(
+                    results[0].id, expected_dot_id,
+                    "For Dot metric, expected ID {:?}, but got {:?}",
+                    expected_dot_id, results[0].id
                 );
             } else {
-                // For Euclidean and Cosine, the inserted vector should be among top results.
                 let found = results.iter().any(|r| r.id == *expected_id);
                 assert!(
                     found,
-                    "Expected ID {:?} not found in top 5 for metric {:?}",
+                    "[{:?}] Expected ID {:?} not in top 5 results for query {:?}",
+                    metric,
                     expected_id,
-                    metric
+                    noisy_query
                 );
             }
         }
+
+        println!("\n✅ Completed tests for {:?}\n", metric);
     }
 }
-
 
 #[test]
 fn test_large_scale_filtered_queries_all_metrics() {

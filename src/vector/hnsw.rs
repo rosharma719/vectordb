@@ -206,7 +206,6 @@ impl HNSWIndex {
         Ok(())
     }
     
-    
     pub fn build_filter_aware_edges(
         &mut self,
         point_id: PointId,
@@ -221,12 +220,50 @@ impl HNSWIndex {
         } else {
             vector.clone()
         };
-
+    
         let mut extra_neighbors = HashSet::new();
         let m = self.m();
-
+    
         for key in filter_keys {
             if let Some(value) = payload.get(key) {
+                // ✅ Try fast exact match via payload index first
+                if let Some(id_set) = payload_index.query_exact(key, value) {
+                    let mut rng = rand::rng();
+                    let sample = id_set
+                        .iter()
+                        .filter(|&&id| id != point_id && self.get_vector(&id).is_some())
+                        .copied()
+                        .choose_multiple(&mut rng, 100); // sample limit
+    
+                    let mut scored: Vec<_> = sample
+                        .into_iter()
+                        .filter_map(|id| {
+                            self.get_vector(&id).map(|vec| {
+                                let raw = score(&query_vector, vec, self.metric);
+                                let sort_key = self.normalize_score(raw);
+                                ScoredPoint { id, raw_score: raw, sort_key }
+                            })
+                        })
+                        .collect();
+    
+                    scored.sort_by(|a, b| {
+                        if self.metric == DistanceMetric::Dot {
+                            b.raw_score.partial_cmp(&a.raw_score).unwrap()
+                        } else {
+                            a.raw_score.partial_cmp(&b.raw_score).unwrap()
+                        }
+                    });
+    
+                    for sp in scored.into_iter().take(m) {
+                        extra_neighbors.insert(sp.id);
+                    }
+    
+                    if extra_neighbors.len() >= m {
+                        break;
+                    }
+                }
+    
+                // ⛔ If fast path didn't yield enough, fallback to filtered vector search
                 let mut candidates: Vec<ScoredPoint> = if self.current_max_level() > 0 {
                     let mut entry = self.get_entry_point().unwrap();
                     for l in (1..=self.current_max_level()).rev() {
@@ -237,10 +274,11 @@ impl HNSWIndex {
                     self.iter_vectors()
                         .filter_map(|(&id, vec)| {
                             if id != point_id && !self.deleted.contains(&id) {
+                                let raw = score(&query_vector, vec, self.metric);
                                 Some(ScoredPoint {
                                     id,
-                                    raw_score: score(&query_vector, vec, self.metric),
-                                    sort_key: self.normalize_score(score(&query_vector, vec, self.metric)),
+                                    raw_score: raw,
+                                    sort_key: self.normalize_score(raw),
                                 })
                             } else {
                                 None
@@ -248,7 +286,7 @@ impl HNSWIndex {
                         })
                         .collect()
                 };
-
+    
                 candidates.sort_by(|a, b| {
                     if self.metric == DistanceMetric::Dot {
                         b.raw_score.partial_cmp(&a.raw_score).unwrap()
@@ -256,8 +294,8 @@ impl HNSWIndex {
                         a.raw_score.partial_cmp(&b.raw_score).unwrap()
                     }
                 });
-
-                let post_filtered: Vec<_> = candidates
+    
+                let filtered: Vec<_> = candidates
                     .into_iter()
                     .filter(|sp| {
                         payloads.get(&sp.id)
@@ -267,54 +305,24 @@ impl HNSWIndex {
                     .take(m)
                     .map(|sp| sp.id)
                     .collect();
-
-                extra_neighbors.extend(post_filtered);
-
+    
+                extra_neighbors.extend(filtered);
+    
                 if extra_neighbors.len() >= m {
                     break;
                 }
-
-                if self.current_max_level() == 0 {
-                    if let Some(id_set) = payload_index.query_exact(key, value) {
-                        let mut rng = rand::rng();
-                        let fallback_pool = id_set
-                            .iter()
-                            .filter(|&&id| id != point_id && self.get_vector(&id).is_some())
-                            .copied()
-                            .choose_multiple(&mut rng, 1000);
-
-                        let mut fallback_scored: Vec<_> = fallback_pool
-                            .into_iter()
-                            .filter_map(|id| {
-                                self.get_vector(&id).map(|vec| {
-                                    let raw = score(&query_vector, vec, self.metric);
-                                    (id, raw)
-                                })
-                            })
-                            .collect();
-
-                        fallback_scored.sort_by(|&(_, a), &(_, b)| {
-                            if self.metric == DistanceMetric::Dot {
-                                b.partial_cmp(&a).unwrap()
-                            } else {
-                                a.partial_cmp(&b).unwrap()
-                            }
-                        });
-
-                        extra_neighbors.extend(fallback_scored.into_iter().take(m).map(|(id, _)| id));
-                    }
-                }
             }
         }
-
-        extra_neighbors.insert(point_id);
+    
+        extra_neighbors.insert(point_id); // self-loop
+    
         for neighbor_id in extra_neighbors {
             self.add_bidirectional_edge(0, point_id, neighbor_id);
         }
-
+    
         Ok(())
     }
-
+    
 
     pub fn add_bidirectional_edge(&mut self, level: usize, a: PointId, b: PointId) {
         self.layers.entry(level).or_default().entry(a).or_default().push(b);
@@ -357,7 +365,7 @@ impl HNSWIndex {
         //println!("[GREEDY] Finished at point {} at level {}", current, level);
         current
     }
-        /// Greedy search that now skips deleted points.
+        
 
     
     fn search_layer(

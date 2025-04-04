@@ -37,21 +37,23 @@ impl Segment {
             self.payload_index.insert(point_id, &p);
             self.payloads.insert(point_id, p.clone());
 
-            // Dynamically extract filterable keys from payload
             let filter_keys: Vec<String> = p.0
                 .iter()
                 .filter(|(_, v)| matches!(v, PayloadValue::Int(_) | PayloadValue::Float(_) | PayloadValue::Str(_) | PayloadValue::Bool(_)))
                 .map(|(k, _)| k.clone())
                 .collect();
 
-            self.hnsw.build_filter_aware_edges(
-                point_id,
-                &vector,
-                &p,
-                &self.payload_index,
-                &self.payloads,
-                &filter_keys,
-            )?;
+            if !filter_keys.is_empty() {
+                self.hnsw.build_filter_aware_edges(
+                    point_id,
+                    &vector,
+                    &p,
+                    &self.payload_index,
+                    &self.payloads,
+                    &filter_keys,
+                )?;
+            }
+
         }
 
         self.next_id += 1;
