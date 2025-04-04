@@ -80,12 +80,18 @@ impl Segment {
         self.deleted.insert(point_id);
         self.hnsw.mark_deleted(point_id);
     
-        // Trigger a purge if too many deletions exist.
         let deleted_count = self.deleted.len();
         let total_count = self.hnsw.len();
-        if deleted_count > 20 || (deleted_count as f32 / total_count as f32) > 0.1 {
+
+        const MIN_DELETIONS_BEFORE_PURGE: usize = 100;
+        const MAX_DELETION_RATIO: f32 = 0.25;
+
+        if deleted_count >= MIN_DELETIONS_BEFORE_PURGE &&
+        (deleted_count as f32 / total_count as f32) >= MAX_DELETION_RATIO {
+            println!("[DELETE] Triggering purge: {}/{} ({:.2}%) deleted", deleted_count, total_count, 100.0 * deleted_count as f32 / total_count as f32);
             self.purge()?;
         }
+
     
         Ok(())
     }

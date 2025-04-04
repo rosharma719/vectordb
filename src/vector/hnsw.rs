@@ -116,7 +116,7 @@ impl HNSWIndex {
     }
 
     pub fn insert(&mut self, point_id: PointId, vector: Vector) -> Result<(), DBError> {
-        println!("\n[INSERT] Attempting to insert point: {}", point_id);
+        //println!("\n[INSERT] Attempting to insert point: {}", point_id);
     
         if self.vectors.contains_key(&point_id) {
             println!("[INSERT] Point {} already exists. Skipping.", point_id);
@@ -132,7 +132,7 @@ impl HNSWIndex {
         }
     
         let level = self.assign_random_level();
-        println!("[INSERT] Assigned random level {} to point {}", level, point_id);
+        //println!("[INSERT] Assigned random level {} to point {}", level, point_id);
     
         let vec = self.maybe_normalize(&vector);
         self.vectors.insert(point_id, vec);
@@ -143,7 +143,7 @@ impl HNSWIndex {
             self.layers.entry(l).or_default()
                 .entry(point_id).or_insert_with(Vec::new)
                 .push(point_id);
-            println!("[INSERT] Initialized self-link at level {}", l);
+            //println!("[INSERT] Initialized self-link at level {}", l);
         }
     
         if self.entry_point.is_none() {
@@ -164,19 +164,19 @@ impl HNSWIndex {
         } else {
             point_id
         };
-    
+        
         for l in ((level + 1)..=self.current_max_level).rev() {
-            println!("[INSERT] Greedy search for entry at level {} starting from {}", l, current_entry);
+            //println!("[INSERT] Greedy search for entry at level {} starting from {}", l, current_entry);
             current_entry = self.greedy_search_layer(&self.vectors[&point_id], current_entry, l);
-            println!("[INSERT] Entry point after greedy search at level {}: {}", l, current_entry);
+            //println!("[INSERT] Entry point after greedy search at level {}: {}", l, current_entry);
         }
     
         for l in (0..=level).rev() {
-            println!("[INSERT] Performing search layer at level {}...", l);
+            //println!("[INSERT] Performing search layer at level {}...", l);
             let use_norm = self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
             let candidates = self.search_layer(&self.vectors[&point_id], current_entry, l, self.ef, use_norm)?;
             let neighbors: Vec<PointId> = candidates.iter().take(self.m).map(|sp| sp.id).collect();
-            println!("[INSERT] Found neighbors at level {} for {}: {:?}", l, point_id, neighbors);
+            //println!("[INSERT] Found neighbors at level {} for {}: {:?}", l, point_id, neighbors);
     
             let layer = self.layers.get_mut(&l).unwrap();
             let mut linked = neighbors.clone();
@@ -321,39 +321,45 @@ impl HNSWIndex {
         self.layers.entry(level).or_default().entry(b).or_default().push(a);
     }
 
-    /// Greedy search that now skips deleted points.
     pub fn greedy_search_layer(&self, query: &Vector, entry: PointId, level: usize) -> PointId {
-        println!("[GREEDY] Start at level {}, from entry {}", level, entry);
+        //println!("[GREEDY] Start at level {}, from entry {}", level, entry);
         let mut current = entry;
         let mut changed = true;
-        while changed {
+        let mut steps = 0;
+    
+        while changed && steps < 1000 {
+            steps += 1;
             changed = false;
             if let Some(neighbors) = self.layers.get(&level).and_then(|l| l.get(&current)) {
                 for &neighbor in neighbors {
                     if self.deleted.contains(&neighbor) {
                         continue;
                     }
+    
                     let d_current = score(query, &self.vectors[&current], self.metric);
                     let d_new = score(query, &self.vectors[&neighbor], self.metric);
                     let s_current = self.normalize_score(d_current);
                     let s_new = self.normalize_score(d_new);
-                    println!(
-                        "[GREEDY] Comparing {} (score {:.4}) to {} (score {:.4})",
-                        current, s_current, neighbor, s_new
-                    );
+    
                     if s_new < s_current {
-                        println!("[GREEDY] Found closer point: {} -> {}", current, neighbor);
                         current = neighbor;
                         changed = true;
+                        break; // exit early if we move
                     }
                 }
             }
         }
-        println!("[GREEDY] Finished at point {} at level {}", current, level);
+    
+        if steps >= 1000 {
+            println!("[GREEDY] WARNING: Reached max steps at level {}, current = {}", level, current);
+        }
+    
+        //println!("[GREEDY] Finished at point {} at level {}", current, level);
         current
     }
-    
+        /// Greedy search that now skips deleted points.
 
+    
     fn search_layer(
         &self,
         query: &Vector,
@@ -397,10 +403,7 @@ impl HNSWIndex {
         result_set.push(ResultPoint(initial.clone()));
         visited.insert(start_entry);
     
-        println!(
-            "[SEARCH_LAYER] Initial score at entry {}: {:.4}",
-            start_entry, entry_score
-        );
+        //println!("[SEARCH_LAYER] Initial score at entry {}: {:.4}",start_entry, entry_score);
     
         let mut worst_score = result_set.peek().unwrap().0.sort_key;
     
@@ -445,11 +448,7 @@ impl HNSWIndex {
         let mut results: Vec<ScoredPoint> = result_set.into_iter().map(|rp| rp.0).collect();
         results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
     
-        println!(
-            "[SEARCH_LAYER] Done. Returning top {} results: {:?}",
-            results.len(),
-            results.iter().map(|sp| sp.id).collect::<Vec<_>>()
-        );
+        //println!("[SEARCH_LAYER] Done. Returning top {} results: {:?}",results.len(),results.iter().map(|sp| sp.id).collect::<Vec<_>>());
     
         Ok(results)
     }

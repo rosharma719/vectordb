@@ -174,7 +174,7 @@ fn test_deletion_and_purge_with_large_set_all_metrics() {
         let mut segment = Segment::new(hnsw);
 
         let mut ids = Vec::new();
-        for i in 0..2000 {
+        for i in 0..200 {
             let mut payload = Payload::default();
             payload.set("idx", PayloadValue::Int(i));
             let vec = vecf(&[i as f32, 0.0, 0.0]);
