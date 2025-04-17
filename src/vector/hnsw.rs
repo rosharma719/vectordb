@@ -112,9 +112,19 @@ impl HNSWIndex {
         self.deleted.insert(point_id);
         // If the deleted point was the entry point, try to choose a new one.
         if Some(point_id) == self.entry_point {
-            self.entry_point = self.vectors.keys().find(|&&id| !self.deleted.contains(&id)).cloned();
+            self.entry_point = self.find_highest_level_entry_point();
         }
+        
     }
+
+    pub fn find_highest_level_entry_point(&self) -> Option<PointId> {
+        self.levels
+            .iter()
+            .filter(|(id, _)| !self.deleted.contains(id) && self.vectors.contains_key(id))
+            .max_by_key(|(_, level)| *level)
+            .map(|(id, _)| *id)
+    }
+    
 
     pub fn insert(&mut self, point_id: PointId, vector: Vector) -> Result<(), DBError> {
         //println!("\n[INSERT] Attempting to insert point: {}", point_id);
@@ -157,14 +167,14 @@ impl HNSWIndex {
         // If the current entry point is deleted, pick a non-deleted candidate.
         let mut current_entry = if let Some(ep) = self.entry_point {
             if self.deleted.contains(&ep) {
-                // Find a non-deleted entry in the index.
-                self.vectors.keys().find(|&&id| !self.deleted.contains(&id)).cloned().unwrap_or(ep)
+                self.find_highest_level_entry_point().unwrap_or(point_id)
             } else {
                 ep
             }
         } else {
-            point_id
+            self.find_highest_level_entry_point().unwrap_or(point_id)
         };
+        
         
         for l in ((level + 1)..=self.current_max_level).rev() {
             //println!("[INSERT] Greedy search for entry at level {} starting from {}", l, current_entry);
@@ -309,7 +319,7 @@ impl HNSWIndex {
     
                 extra_neighbors.extend(filtered);
     
-                if extra_neighbors.len() >= m {
+                if extra_neighbors.len() >= 2*m {
                     break;
                 }
             }
@@ -554,41 +564,83 @@ impl HNSWIndex {
     }
              
 
-
     pub fn find_entry_point_matching_filter(
         &self,
         filter: &Filter,
         payload_index: &PayloadIndex,
-        payloads: &HashMap<PointId, Payload>
+        payloads: &HashMap<PointId, Payload>,
     ) -> Option<PointId> {
+        fn max_level_point<'a>(
+            ids: impl Iterator<Item = &'a PointId>,
+            levels: &HashMap<PointId, usize>,
+            deleted: &HashSet<PointId>,
+            vectors: &HashMap<PointId, Vector>,
+        ) -> Option<PointId> {
+            ids.filter(|&&id| !deleted.contains(&id) && vectors.contains_key(&id))
+                .max_by_key(|&&id| levels.get(&id).copied().unwrap_or(0))
+                .copied()
+        }
+    
         match filter {
             Filter::Match { key, value } => {
                 payload_index
-                    .query_exact(key, value)?
-                    .iter()
-                    .find(|&&id| !self.deleted.contains(&id) && self.get_vector(&id).is_some())
-                    .copied()
+                    .query_exact(key, value)
+                    .and_then(|ids| {
+                        max_level_point(ids.iter(), &self.levels, &self.deleted, &self.vectors)
+                    })
             }
             Filter::And(conds) | Filter::Or(conds) => {
+                let mut best: Option<(PointId, usize)> = None;
+    
                 for cond in conds {
                     if let Some(id) = self.find_entry_point_matching_filter(cond, payload_index, payloads) {
-                        return Some(id);
+                        let level = self.levels.get(&id).copied().unwrap_or(0);
+                        if best.map_or(true, |(_, l)| level > l) {
+                            best = Some((id, level));
+                        }
                     }
                 }
-                None
+    
+                best.map(|(id, _)| id)
             }
             Filter::Not(inner) => self.find_entry_point_matching_filter(inner, payload_index, payloads),
             Filter::Compare { .. } => None,
         }
     }
+    
 
+    fn extract_match_filter(&self, orig: Option<&Filter>) -> Option<Filter> {
+        match orig {
+            None => None,
+            Some(Filter::Match { key, value }) => {
+                Some(Filter::Match { key: key.clone(), value: value.clone() })
+            }
+            Some(Filter::And(conds)) => {
+                let mut keep = Vec::new();
+                for c in conds {
+                    if let Filter::Match { .. } = c {
+                        keep.push(c.clone());
+                    }
+                }
+                match keep.len() {
+                    0 => None,
+                    1 => Some(keep.into_iter().next().unwrap()),
+                    _ => Some(Filter::And(keep)),
+                }
+            }
+            // drop everything else
+            _ => None,
+        }
+    }
+
+    /// REPLACEMENT for your old in_place_filtered_search:
     pub fn in_place_filtered_search(
         &self,
         query: &Vector,
         top_k: usize,
         payloads: &HashMap<PointId, Payload>,
         payload_index: &PayloadIndex,
-        filter: Option<&Filter>,
+        full_filter: Option<&Filter>,
     ) -> Result<Vec<ScoredPoint>, DBError> {
         if query.len() != self.dim {
             return Err(DBError::VectorLengthMismatch {
@@ -597,24 +649,30 @@ impl HNSWIndex {
             });
         }
 
+        // 1) carve out only the Match clauses for graph‐hopping
+        let match_filter = self.extract_match_filter(full_filter);
+
+        // 2) pick the entry point exactly as before
         let mut entry = match self.get_entry_point() {
             Some(id) => {
-                if let Some(f) = filter {
-                    if let Some(payload) = payloads.get(&id) {
-                        if evaluate_filter(f, payload)? {
+                if let Some(f) = full_filter {
+                    if let Some(p) = payloads.get(&id) {
+                        if evaluate_filter(f, p)? {
                             id
                         } else {
-                            self.find_entry_point_matching_filter(f, payload_index, payloads).unwrap_or(id)
+                            self.find_entry_point_matching_filter(f, payload_index, payloads)
+                                .unwrap_or(id)
                         }
                     } else {
-                        self.find_entry_point_matching_filter(f, payload_index, payloads).unwrap_or(id)
+                        self.find_entry_point_matching_filter(f, payload_index, payloads)
+                            .unwrap_or(id)
                     }
                 } else {
                     id
                 }
             }
             None => {
-                if let Some(f) = filter {
+                if let Some(f) = full_filter {
                     match self.find_entry_point_matching_filter(f, payload_index, payloads) {
                         Some(id) => id,
                         None => return Ok(vec![]),
@@ -625,68 +683,82 @@ impl HNSWIndex {
             }
         };
 
+        // 3) greedy‐search down from top level *using only* the equality edges
         for level in (1..=self.current_max_level()).rev() {
-            entry = self.greedy_search_layer_with_filter(query, entry, level, payloads, filter)?;
+            entry = self.greedy_search_layer_with_filter(
+                query,
+                entry,
+                level,
+                payloads,
+                match_filter.as_ref(),
+            )?;
         }
 
+        // 4) now do the ef‐search on level 0, but *only* apply the full filter
+        //    at the moment we push into the result‐heap:
         let mut visited = HashSet::new();
-        let mut candidate_queue = BinaryHeap::new();
-        let mut result_set = BinaryHeap::new();
+        let mut candidate_queue: BinaryHeap<ScoredPoint> = BinaryHeap::new();
+        let mut result_set:  BinaryHeap<ResultPoint>    = BinaryHeap::new();
 
-        let dist = score(query, self.get_vector(&entry).unwrap(), self.metric);
-        let sort_key = match self.metric {
-            DistanceMetric::Dot => -dist,
-            _ => dist,
-        };
-        let first = ScoredPoint { id: entry, raw_score: dist, sort_key };
+        let dist0 = score(query, self.get_vector(&entry).unwrap(), self.metric);
+        let sk0   = if self.metric == DistanceMetric::Dot { -dist0 } else { dist0 };
+        let first = ScoredPoint { id: entry, raw_score: dist0, sort_key: sk0 };
+
         candidate_queue.push(first.clone());
-        result_set.push(first);
+        // only push into result_set if it passes the *full* filter:
+        if full_filter.map_or(true, |f| {
+            payloads.get(&entry).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false))
+        }) {
+            result_set.push(ResultPoint(first));
+        }
         visited.insert(entry);
 
-        let mut worst_score = sort_key;
+        let mut worst = result_set.peek().map(|rp| rp.0.sort_key).unwrap_or(f32::MAX);
 
-        while let Some(current) = candidate_queue.pop() {
-            if current.sort_key > worst_score {
+        while let Some(curr) = candidate_queue.pop() {
+            // if there is *no* filter at all, we can break as soon as we outrun `worst`
+            if full_filter.is_none() && curr.sort_key > worst {
                 break;
             }
 
-            if let Some(neighbors) = self.layer_neighbors(0, current.id) {
-                for &neighbor in neighbors {
-                    if self.deleted.contains(&neighbor) || !visited.insert(neighbor) {
+            if let Some(neighs) = self.layer_neighbors(0, curr.id) {
+                for &nb in neighs {
+                    if self.deleted.contains(&nb) || !visited.insert(nb) {
                         continue;
                     }
 
-                    let d = score(query, self.get_vector(&neighbor).unwrap(), self.metric);
-                    let sort_key = match self.metric {
-                        DistanceMetric::Dot => -d,
-                        _ => d,
-                    };
-                    let sp = ScoredPoint { id: neighbor, raw_score: d, sort_key };
+                    let d   = score(query, self.get_vector(&nb).unwrap(), self.metric);
+                    let sk  = if self.metric == DistanceMetric::Dot { -d } else { d };
+                    let sp  = ScoredPoint { id: nb, raw_score: d, sort_key: sk };
 
                     candidate_queue.push(sp.clone());
 
-                    let passes = match filter {
-                        Some(f) => payloads.get(&neighbor).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false)),
-                        None => true,
-                    };
-
-                    if passes {
-                        result_set.push(sp);
+                    // *now* apply the full filter before pushing to result_set
+                    if full_filter.map_or(true, |f| {
+                        payloads.get(&nb).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false))
+                    }) {
+                        result_set.push(ResultPoint(sp));
                         if result_set.len() > self.ef {
                             result_set.pop();
                         }
-                        if let Some(rp) = result_set.peek() {
-                            worst_score = rp.sort_key;
+                        if result_set.len() >= top_k {
+                            worst = result_set.peek().unwrap().0.sort_key;
                         }
                     }
                 }
             }
         }
 
-        let mut res: Vec<ScoredPoint> = result_set.into_sorted_vec();
-        res.truncate(top_k);
-        Ok(res)
+        // unwrap the inner ScoredPoint and truncate to top_k
+        let mut out = result_set
+            .into_sorted_vec()
+            .into_iter()
+            .map(|rp| rp.0)
+            .collect::<Vec<_>>();
+        out.truncate(top_k);
+        Ok(out)
     }
+    
     
     pub fn contains(&self, point_id: &PointId) -> bool {
         self.vectors.contains_key(point_id)

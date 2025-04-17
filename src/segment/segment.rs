@@ -131,7 +131,7 @@ impl Segment {
     
         let results = self.hnsw.in_place_filtered_search(
             query,
-            top_k * 2,
+            top_k * 4,
             &self.payloads,
             &self.payload_index,
             filter,
