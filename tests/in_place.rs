@@ -27,7 +27,7 @@ fn generate_segment(
     num: usize,
     dim: usize,
 ) -> (Segment, Vec<Vector>) {
-    let hnsw = HNSWIndex::new(metric, 16, 128, 16, dim);
+    let hnsw = HNSWIndex::new(metric, 16, 32, 16, dim);
     let mut segment = Segment::new(hnsw);
     let mut inserted_vecs = Vec::with_capacity(num);
 
@@ -113,17 +113,17 @@ fn benchmark_segment_ops_large() {
         let dt_inp = t2.elapsed();
         println!("[{:?}] in-place-filter={}  took {:?}", metric, res_inp.len(), dt_inp);
 
-        // 3) post-filter
+        // 3) filtered (formerly post-filter)
         let t3 = Instant::now();
-        let res_post = segment.post_filter(query, TOP_K, Some(&filter)).unwrap();
+        let res_post = segment.search_with_filter(query, TOP_K, Some(&filter)).unwrap();
         let dt_post = t3.elapsed();
-        println!("[{:?}] post-filter={}  took {:?}", metric, res_post.len(), dt_post);
+        println!("[{:?}] filtered={}  took {:?}", metric, res_post.len(), dt_post);
 
         // 4) sanity: every returned item matches
         for (name, set) in &[
             ("ground",   &ground),
             ("in-place", &res_inp),
-            ("post",     &res_post),
+            ("filtered", &res_post),
         ] {
             for r in *set {
                 let p = segment.get_payload(r.id).unwrap();
@@ -152,7 +152,7 @@ fn benchmark_segment_ops_large() {
         let missed_post: Vec<_> = truth_ids.difference(&post_ids).cloned().collect();
         if !missed_post.is_empty() {
             failures.push(format!(
-                "[{:?}][post-filter] missed ground-truth ids {:?}",
+                "[{:?}][filtered] missed ground-truth ids {:?}",
                 metric, missed_post
             ));
         }

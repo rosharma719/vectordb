@@ -55,7 +55,24 @@ pub fn bench_insertion(metric: DistanceMetric, size: usize) -> Segment {
     segment
 }
 
-// === Search Benchmark ===
+
+// === Deletion Benchmark ===
+pub fn bench_deletion(segment: &mut Segment, size: usize) {
+    println!("\n❌ Deleting every 7th point...");
+    let start = Instant::now();
+    for i in (0..size).step_by(7) {
+        let _ = segment.delete((i + 1) as u64); // IDs start at 1
+    }
+    println!("Sparse deletion took {:?}", start.elapsed());
+
+    println!("🧹 Full deletion...");
+    let start = Instant::now();
+    for i in 0..size {
+        let _ = segment.delete((i + 1) as u64);
+    }
+    println!("Full deletion (purge) took {:?}", start.elapsed());
+}
+
 pub fn bench_search(segment: &Segment, query: &Vector) {
     println!("\n🔍 Basic search...");
     let start = Instant::now();
@@ -81,7 +98,7 @@ pub fn bench_search(segment: &Segment, query: &Vector) {
 
     println!("🧃 Filtered search...");
     let start = Instant::now();
-    let _ = segment.post_filter(query, 10, Some(&filter)).unwrap();
+    let _ = segment.search_with_filter(query, 10, Some(&filter)).unwrap();
     println!("Filtered search took {:?}", start.elapsed());
 
     let tag_filter = Filter::Compare {
@@ -92,27 +109,9 @@ pub fn bench_search(segment: &Segment, query: &Vector) {
 
     println!("📦 List match search...");
     let start = Instant::now();
-    let _ = segment.post_filter(query, 10, Some(&tag_filter)).unwrap();
+    let _ = segment.search_with_filter(query, 10, Some(&tag_filter)).unwrap();
     println!("List filter took {:?}", start.elapsed());
 }
-
-// === Deletion Benchmark ===
-pub fn bench_deletion(segment: &mut Segment, size: usize) {
-    println!("\n❌ Deleting every 7th point...");
-    let start = Instant::now();
-    for i in (0..size).step_by(7) {
-        let _ = segment.delete((i + 1) as u64); // IDs start at 1
-    }
-    println!("Sparse deletion took {:?}", start.elapsed());
-
-    println!("🧹 Full deletion...");
-    let start = Instant::now();
-    for i in 0..size {
-        let _ = segment.delete((i + 1) as u64);
-    }
-    println!("Full deletion (purge) took {:?}", start.elapsed());
-}
-
 
 #[test]
 fn bench_all_euclidean_100() {

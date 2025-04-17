@@ -134,7 +134,11 @@ fn test_large_scale_filtered_queries_all_metrics() {
             },
         ]);
 
-        let results = segment.post_filter(&vecf(&[1.0, 0.0, 0.0]), 15, Some(&filter)).unwrap();
+        // <- replaced post_filter with search_with_filter here
+        let results = segment
+            .search_with_filter(&vecf(&[1.0, 0.0, 0.0]), 15, Some(&filter))
+            .unwrap();
+
         for r in &results {
             let p = segment.get_payload(r.id).unwrap();
             assert_eq!(p.get("animal").unwrap(), &PayloadValue::Str("dog".into()));
@@ -173,7 +177,12 @@ fn test_list_filters_with_larger_pool_all_metrics() {
             op: ScalarComparisonOp::Eq,
             value: PayloadValue::Str("cheap".into()),
         };
-        let results = segment.post_filter(&vecf(&[0.0, 1.0, 0.0]), 10, Some(&filter)).unwrap();
+
+        // <- replaced post_filter with search_with_filter here
+        let results = segment
+            .search_with_filter(&vecf(&[0.0, 1.0, 0.0]), 10, Some(&filter))
+            .unwrap();
+
         assert!(results.iter().all(|r| {
             let p = segment.get_payload(r.id).unwrap();
             match p.get("tags") {

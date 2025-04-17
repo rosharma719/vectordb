@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::payload_storage::filters::{Filter, evaluate_filter};
+use crate::payload_storage::filters::Filter;
 use crate::payload_storage::stores::PayloadIndex;
 use crate::utils::errors::DBError;
 use crate::utils::payload::{Payload, PayloadValue};
@@ -217,36 +217,6 @@ impl Segment {
     }
      
 
-    /// Vector search with logical payload filtering
-    pub fn post_filter(
-        &self,
-        query: &Vector,
-        top_k: usize,
-        filter: Option<&Filter>,
-    ) -> Result<Vec<ScoredPoint>, DBError> {
-        let total_non_deleted = self.hnsw.len() - self.deleted.len();
-        if total_non_deleted == 0 {
-            return Err(DBError::SearchError("No active points available to search.".into()));
-        }
-
-        let candidates = self.hnsw.search(query, top_k * 4)?;
-
-        let filtered = candidates
-            .into_iter()
-            .filter(|sp| {
-                !self.deleted.contains(&sp.id)
-                    && filter.map_or(true, |f| {
-                        self.payloads
-                            .get(&sp.id)
-                            .map(|p| evaluate_filter(f, p).unwrap_or(false))
-                            .unwrap_or(false)
-                    })
-            })
-            .take(top_k)
-            .collect();
-
-        Ok(filtered)
-    }
 
     /// Immutable reference to underlying HNSW index
     pub fn hnsw(&self) -> &HNSWIndex {
