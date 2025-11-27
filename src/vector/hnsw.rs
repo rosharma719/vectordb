@@ -8,6 +8,8 @@ use crate::payload_storage::stores::PayloadIndex;
 use crate::utils::payload::Payload;
 use crate::payload_storage::filters::{Filter, evaluate_filter};
 
+const VERBOSE: bool = false;
+
 #[derive(Clone, Debug)]
 pub struct ScoredPoint {
     pub id: PointId,
@@ -64,6 +66,7 @@ pub struct HNSWIndex {
     metric: DistanceMetric,
     m: usize,
     ef: usize,
+    ef_construct: usize,
     max_level_cap: usize,
     level_scale: f64,
     current_max_level: usize,
@@ -76,7 +79,9 @@ pub struct HNSWIndex {
 impl HNSWIndex {
     pub fn new(metric: DistanceMetric, m: usize, ef: usize, max_level_cap: usize, dim: usize) -> Self {
         let level_scale = 1.0 / (m as f64).ln();
-        println!("Creating new HNSWIndex with dim {}, M {}, ef {}, max_level_cap {}", dim, m, ef, max_level_cap);
+        if VERBOSE {
+            println!("Creating new HNSWIndex with dim {}, M {}, ef {}, max_level_cap {}", dim, m, ef, max_level_cap);
+        }
         Self {
             layers: HashMap::new(),
             vectors: HashMap::new(),
@@ -85,6 +90,7 @@ impl HNSWIndex {
             metric,
             m,
             ef,
+            ef_construct: ef,
             max_level_cap,
             level_scale,
             current_max_level: 0,
@@ -130,7 +136,9 @@ impl HNSWIndex {
         //println!("\n[INSERT] Attempting to insert point: {}", point_id);
     
         if self.vectors.contains_key(&point_id) {
-            println!("[INSERT] Point {} already exists. Skipping.", point_id);
+            if VERBOSE {
+                println!("[INSERT] Point {} already exists. Skipping.", point_id);
+            }
             return Ok(());
         }
     
@@ -158,7 +166,9 @@ impl HNSWIndex {
         }
     
         if self.entry_point.is_none() {
-            println!("[INSERT] First point. Setting entry point to {} at level {}", point_id, level);
+            if VERBOSE {
+                println!("[INSERT] First point. Setting entry point to {} at level {}", point_id, level);
+            }
             self.entry_point = Some(point_id);
             self.current_max_level = level;
             return Ok(());
@@ -185,7 +195,7 @@ impl HNSWIndex {
         for l in (0..=level).rev() {
             //println!("[INSERT] Performing search layer at level {}...", l);
             let use_norm = self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
-            let candidates = self.search_layer_unfiltered(&self.vectors[&point_id], current_entry, l, self.ef, use_norm)?;
+            let candidates = self.search_layer_unfiltered(&self.vectors[&point_id], current_entry, l, self.ef_construct, use_norm)?;
             let neighbors: Vec<PointId> = candidates.iter().take(self.m).map(|sp| sp.id).collect();
             //println!("[INSERT] Found neighbors at level {} for {}: {:?}", l, point_id, neighbors);
     
@@ -209,7 +219,9 @@ impl HNSWIndex {
         }
     
         if level > self.current_max_level {
-            println!("[INSERT] Promoting {} to new entry point at level {}", point_id, level);
+            if VERBOSE {
+                println!("[INSERT] Promoting {} to new entry point at level {}", point_id, level);
+            }
             self.entry_point = Some(point_id);
             self.current_max_level = level;
         }
@@ -226,6 +238,10 @@ impl HNSWIndex {
         payloads: &HashMap<PointId, Payload>,
         filter_keys: &[String],
     ) -> Result<(), DBError> {
+        // Skip if no payload keys were provided; avoids O(N) fallback when payloads are absent.
+        if filter_keys.is_empty() {
+            return Ok(());
+        }
         let query_vector = if self.metric == DistanceMetric::Cosine {
             self.maybe_normalize(vector)
         } else {
@@ -336,8 +352,16 @@ impl HNSWIndex {
     
 
     pub fn add_bidirectional_edge(&mut self, level: usize, a: PointId, b: PointId) {
-        self.layers.entry(level).or_default().entry(a).or_default().push(b);
-        self.layers.entry(level).or_default().entry(b).or_default().push(a);
+        let layer = self.layers.entry(level).or_default();
+        Self::push_unique(layer.entry(a).or_default(), b);
+        Self::push_unique(layer.entry(b).or_default(), a);
+    }
+
+    #[inline]
+    fn push_unique(vec: &mut Vec<PointId>, val: PointId) {
+        if !vec.contains(&val) {
+            vec.push(val);
+        }
     }
 
     pub fn greedy_search_layer_unfiltered(&self, query: &Vector, entry: PointId, level: usize) -> PointId {
@@ -521,9 +545,9 @@ impl HNSWIndex {
     }
        
     pub fn search(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
-        println!("Searching top_k = {}", top_k);
+        //println!("Searching top_k = {}", top_k);
         if self.entry_point.is_none() {
-            println!("No entry point. Returning empty result.");
+            //println!("No entry point. Returning empty result.");
             return Ok(vec![]);
         }
         if query.len() != self.dim {
@@ -786,6 +810,10 @@ impl HNSWIndex {
 
     pub fn ef(&self) -> usize {
         self.ef
+    }
+
+    pub fn set_ef_construct(&mut self, ef: usize) {
+        self.ef_construct = ef;
     }
 
     pub fn max_level_cap(&self) -> usize {

@@ -228,6 +228,11 @@ impl Segment {
         &self.payloads
     }
 
+    /// Mutable reference to underlying HNSW index (for tuning ef_construct in benches/tests).
+    pub fn hnsw_mut(&mut self) -> &mut HNSWIndex {
+        &mut self.hnsw
+    }
+
     pub fn payload_index(&self) -> &PayloadIndex {
         &self.payload_index
     }

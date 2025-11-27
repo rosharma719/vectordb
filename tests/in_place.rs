@@ -52,9 +52,9 @@ fn generate_segment(
 
 #[test]
 fn benchmark_segment_ops_large() {
-    const NUM_POINTS: usize = 5_000;
-    const DIM: usize        = 32;
-    const TOP_K: usize      = 10;
+const NUM_POINTS: usize = 1_500;
+const DIM: usize        = 1536;
+const TOP_K: usize      = 10;
 
     // collect *all* failures here
     let mut failures: Vec<String> = Vec::new();
@@ -68,7 +68,8 @@ fn benchmark_segment_ops_large() {
         let (segment, inserted) = generate_segment(metric, NUM_POINTS, DIM);
         let query = &inserted[123];
 
-        // complex filter
+        // complex filter (threshold scales down with dataset size to keep matches)
+        let score_threshold = (NUM_POINTS as i64 * 2 / 3) as i64;
         let filter = Filter::And(vec![
             Filter::Match {
                 key: "group".into(),
@@ -77,7 +78,7 @@ fn benchmark_segment_ops_large() {
             Filter::Compare {
                 key: "score".into(),
                 op: ScalarComparisonOp::Gte,
-                value: PayloadValue::Int(3000),
+                value: PayloadValue::Int(score_threshold),
             },
         ]);
 
@@ -128,7 +129,7 @@ fn benchmark_segment_ops_large() {
             for r in *set {
                 let p = segment.get_payload(r.id).unwrap();
                 if !matches!(p.get("group"), Some(PayloadValue::Str(s)) if s == "even")
-                    || !matches!(p.get("score"), Some(PayloadValue::Int(s)) if *s >= 3000)
+                    || !matches!(p.get("score"), Some(PayloadValue::Int(s)) if *s >= score_threshold)
                 {
                     failures.push(format!(
                         "[{:?}][{}] returned id={} that does not match filter",

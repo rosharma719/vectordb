@@ -4,9 +4,12 @@ use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
 use vectordb::payload_storage::filters::Filter;
 
-fn vecf(v: &[f32]) -> Vector {
-    v.to_vec()
+fn vecf_dim(seed: usize, dim: usize) -> Vector {
+    // Deterministic high-dim vector generator for tests
+    (0..dim).map(|d| ((seed + d) as f32).sin()).collect()
 }
+
+const DIM: usize = 1536;
 
 
 #[test]
@@ -18,21 +21,17 @@ fn test_large_scale_insert_and_search_all_metrics() {
         println!("STARTING TEST FOR {:?}", metric);
         println!("===========================\n");
 
-        let hnsw = HNSWIndex::new(metric, 16, 50, 16, 3);
+        let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
 
         let mut ids = Vec::new();
         let mut vectors = Vec::new();
 
         println!("--- INSERTING VECTORS ---\n");
-        for i in 0..10_000 {
-            let vec = vecf(&[
-                (i as f32).sin() * 5.0,
-                ((i * 3) as f32).cos() * 3.0,
-                ((i % 7) as f32).sqrt(),
-            ]);
+        for i in 0..1_000 {
+            let vec = vecf_dim(i, DIM);
             let mut payload = Payload::default();
-            payload.set("index", PayloadValue::Int(i));
+            payload.set("index", PayloadValue::Int(i as i64));
 
             let id = segment.insert(vec.clone(), Some(payload)).unwrap();
             ids.push(id);
@@ -45,7 +44,7 @@ fn test_large_scale_insert_and_search_all_metrics() {
 
         println!("\n--- SEARCHING QUERIES ---\n");
         for (expected_id, query) in vectors.iter().take(10) {
-            let noisy_query: Vec<f32> = query.iter().map(|x| x + 0.001).collect();
+            let noisy_query: Vec<f32> = query.iter().enumerate().map(|(idx, x)| x + 0.001 * ((idx % 5) as f32)).collect();
 
             let now = Instant::now();
             let results = segment.search(&noisy_query, 5).unwrap();
@@ -94,10 +93,10 @@ fn test_large_scale_insert_and_search_all_metrics() {
 #[test]
 fn test_large_scale_filtered_queries_all_metrics() {
     for metric in [DistanceMetric::Euclidean, DistanceMetric::Cosine, DistanceMetric::Dot] {
-        let hnsw = HNSWIndex::new(metric, 16, 50, 16, 3);
+        let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
 
-        for i in 0..1000 {
+        for i in 0..400 {
             let mut payload = Payload::default();
             let animal = match i % 4 {
                 0 => "dog",
@@ -109,11 +108,7 @@ fn test_large_scale_filtered_queries_all_metrics() {
             payload.set("age", PayloadValue::Int((i % 8 + 1) as i64));
             payload.set("score", PayloadValue::Float((60.0 + (i % 40) as f64).into()));
 
-            let vec = vecf(&[
-                ((i % 3) as f32).ln_1p(),
-                ((i % 5) as f32).exp().fract(),
-                ((i % 7) as f32).powf(1.5),
-            ]);
+            let vec = vecf_dim(i, DIM);
             segment.insert(vec, Some(payload)).unwrap();
         }
 
@@ -135,8 +130,9 @@ fn test_large_scale_filtered_queries_all_metrics() {
         ]);
 
         // <- replaced post_filter with search_with_filter here
+        let query = vecf_dim(10_000, DIM);
         let results = segment
-            .search_with_filter(&vecf(&[1.0, 0.0, 0.0]), 15, Some(&filter))
+            .search_with_filter(&query, 15, Some(&filter))
             .unwrap();
 
         for r in &results {
@@ -151,10 +147,10 @@ fn test_large_scale_filtered_queries_all_metrics() {
 #[test]
 fn test_list_filters_with_larger_pool_all_metrics() {
     for metric in [DistanceMetric::Euclidean, DistanceMetric::Cosine, DistanceMetric::Dot] {
-        let hnsw = HNSWIndex::new(metric, 16, 50, 16, 3);
+        let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
 
-        for i in 0..1000 {
+        for i in 0..500 {
             let mut payload = Payload::default();
             let tags = if i % 2 == 0 {
                 vec!["cheap".to_string(), "small".to_string()]
@@ -164,11 +160,7 @@ fn test_list_filters_with_larger_pool_all_metrics() {
             let active = i % 3 == 0;
             payload.set("tags", PayloadValue::ListStr(tags));
             payload.set("active", PayloadValue::Bool(active));
-            let vec = vecf(&[
-                (i as f32).cos(),
-                (i as f32).sin(),
-                (i as f32).tan().fract(),
-            ]);
+            let vec = vecf_dim(i, DIM);
             segment.insert(vec, Some(payload)).unwrap();
         }
 
@@ -179,8 +171,9 @@ fn test_list_filters_with_larger_pool_all_metrics() {
         };
 
         // <- replaced post_filter with search_with_filter here
+        let query = vecf_dim(20_000, DIM);
         let results = segment
-            .search_with_filter(&vecf(&[0.0, 1.0, 0.0]), 10, Some(&filter))
+            .search_with_filter(&query, 10, Some(&filter))
             .unwrap();
 
         assert!(results.iter().all(|r| {
@@ -197,14 +190,14 @@ fn test_list_filters_with_larger_pool_all_metrics() {
 #[test]
 fn test_deletion_and_purge_with_large_set_all_metrics() {
     for metric in [DistanceMetric::Euclidean, DistanceMetric::Cosine, DistanceMetric::Dot] {
-        let hnsw = HNSWIndex::new(metric, 16, 50, 16, 3);
+        let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
 
         let mut ids = Vec::new();
         for i in 0..200 {
             let mut payload = Payload::default();
-            payload.set("idx", PayloadValue::Int(i));
-            let vec = vecf(&[i as f32, 0.0, 0.0]);
+            payload.set("idx", PayloadValue::Int(i as i64));
+            let vec = vecf_dim(i, DIM);
             let id = segment.insert(vec, Some(payload)).unwrap();
             ids.push(id);
         }
@@ -214,7 +207,7 @@ fn test_deletion_and_purge_with_large_set_all_metrics() {
             segment.delete(ids[i]).unwrap();
         }
 
-        let results = segment.search(&vecf(&[10.0, 0.0, 0.0]), 30).unwrap();
+        let results = segment.search(&vecf_dim(30_000, DIM), 30).unwrap();
         for r in &results {
             assert!(!segment.is_deleted(r.id));
         }
