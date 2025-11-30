@@ -497,9 +497,10 @@ impl HNSWIndex {
         //println!("[search_layer_unfiltered] Initial score at entry {}: {:.4}",start_entry, entry_score);
     
         let mut worst_score = result_set.peek().unwrap().0.sort_key;
+        let allow_early_exit = self.metric != DistanceMetric::Dot;
     
         while let Some(current) = candidate_queue.peek() {
-            if current.sort_key > worst_score {
+            if allow_early_exit && current.sort_key > worst_score {
                 break;
             }
     
@@ -516,20 +517,29 @@ impl HNSWIndex {
                     } else {
                         raw
                     };
-    
-                    if result_set.len() < ef || score_val < worst_score {
+
+                    // For Dot we explore broadly (push all neighbors) to avoid getting stuck in local optima.
+                    let push_candidate = self.metric == DistanceMetric::Dot
+                        || result_set.len() < ef
+                        || score_val < worst_score;
+
+                    if push_candidate {
                         let sp = ScoredPoint {
                             id: neighbor,
                             raw_score: raw,
                             sort_key: score_val,
                         };
                         candidate_queue.push(sp.clone());
-                        result_set.push(ResultPoint(sp));
-                        if result_set.len() > ef {
-                            result_set.pop();
-                        }
-                        if let Some(rp) = result_set.peek() {
-                            worst_score = rp.0.sort_key;
+
+                        // Still keep result_set trimmed to ef best items.
+                        if result_set.len() < ef || score_val < worst_score {
+                            result_set.push(ResultPoint(sp));
+                            if result_set.len() > ef {
+                                result_set.pop();
+                            }
+                            if let Some(rp) = result_set.peek() {
+                                worst_score = rp.0.sort_key;
+                            }
                         }
                     }
                 }
@@ -579,14 +589,19 @@ impl HNSWIndex {
         } else {
             query.clone()
         };
-        
-        let mut results = self.search_layer_unfiltered(&final_query, current, 0, self.ef, normalize_score_flag)?;
+        // Ensure beam width is at least top_k to avoid recall loss when top_k > ef.
+        // Dot similarity benefits from a very wide beam to avoid local optima.
+        let ef_search = if self.metric == DistanceMetric::Dot {
+            self.vectors.len().max(top_k)
+        } else {
+            self.ef.max(top_k)
+        };
+        let mut results = self.search_layer_unfiltered(&final_query, current, 0, ef_search, normalize_score_flag)?;
         results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
         results.truncate(top_k);
         println!("Search complete. Returning {} results", results.len());
         Ok(results)
     }
-             
 
     pub fn find_entry_point_matching_filter(
         &self,
@@ -814,6 +829,10 @@ impl HNSWIndex {
 
     pub fn set_ef_construct(&mut self, ef: usize) {
         self.ef_construct = ef;
+    }
+
+    pub fn set_ef_search(&mut self, ef: usize) {
+        self.ef = ef;
     }
 
     pub fn max_level_cap(&self) -> usize {

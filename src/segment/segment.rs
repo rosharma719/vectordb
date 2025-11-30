@@ -107,7 +107,7 @@ impl Segment {
         }
 
         // HNSWIndex now internally skips deleted points.
-        let candidates = self.hnsw.search(query, top_k * 2)?;
+        let candidates = self.hnsw.search(query, top_k)?;
         // (The following filter is kept as extra safety.)
         let filtered = candidates
             .into_iter()
