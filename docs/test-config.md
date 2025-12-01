@@ -23,3 +23,9 @@
   - Averaging: `VECTORDB_RECALL_QUERIES`
   - Quality threshold: `VECTORDB_RECALL_MIN`
   - Reproducibility: `VECTORDB_RECALL_SEED`
+
+## NYTimes 256-d Angular (Hugging Face)
+- Data source: `open-vdb/nytimes-256-angular` dataset; load configs `train` (base vectors), `test` (queries), `neighbors` (ground truth).
+- Files expected under `VECTORDB_NYT_DATA_DIR` (default `data/nytimes-256-angular`): `base.npy`, `queries.npy`, `ground_truth.json`. See README for the download script (requires `HF_TOKEN` with repo read access).
+- Test: `nytimes_256_angular_perf_and_recall` (ignored). Run with `cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocapture`.
+- Knobs: `VECTORDB_NYT_TOPK` (default `20`), `VECTORDB_NYT_EF_SEARCH` (default `128`) or `VECTORDB_NYT_EF_SEARCH_LIST` for sweeps (e.g., `16,32,64,128,256`), `VECTORDB_NYT_QUERIES` (default `1000`), `VECTORDB_NYT_EF_CONSTRUCT` (default `100`), `VECTORDB_NYT_BASE_LIMIT` to cap inserts for faster iteration.

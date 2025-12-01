@@ -2,7 +2,6 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use rand::seq::IteratorRandom;
 use rand::Rng;
 use crate::utils::types::{PointId, Vector, DistanceMetric, Score};
-use crate::vector::metric::score;
 use crate::utils::errors::DBError;
 use crate::payload_storage::stores::PayloadIndex;
 use crate::utils::payload::Payload;
@@ -110,6 +109,26 @@ impl HNSWIndex {
         match self.metric {
             DistanceMetric::Cosine | DistanceMetric::Euclidean => raw,
             DistanceMetric::Dot => -raw,  // So we can use a min-heap
+        }
+    }
+
+    #[inline]
+    fn fast_score(&self, query: &Vector, vec: &Vector) -> f32 {
+        match self.metric {
+            // Vectors/queries are normalized in HNSW for cosine; use dot directly.
+            DistanceMetric::Cosine => {
+                let dot: f32 = query.iter().zip(vec.iter()).map(|(x, y)| x * y).sum();
+                1.0 - dot
+            }
+            DistanceMetric::Dot => query.iter().zip(vec.iter()).map(|(x, y)| x * y).sum(),
+            DistanceMetric::Euclidean => {
+                query
+                    .iter()
+                    .zip(vec.iter())
+                    .map(|(x, y)| (x - y).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+            }
         }
     }
     
@@ -266,7 +285,7 @@ impl HNSWIndex {
                         .into_iter()
                         .filter_map(|id| {
                             self.get_vector(&id).map(|vec| {
-                                let raw = score(&query_vector, vec, self.metric);
+                                let raw = self.fast_score(&query_vector, vec);
                                 let sort_key = self.normalize_score(raw);
                                 ScoredPoint { id, raw_score: raw, sort_key }
                             })
@@ -301,7 +320,7 @@ impl HNSWIndex {
                     self.iter_vectors()
                         .filter_map(|(&id, vec)| {
                             if id != point_id && !self.deleted.contains(&id) {
-                                let raw = score(&query_vector, vec, self.metric);
+                                let raw = self.fast_score(&query_vector, vec);
                                 Some(ScoredPoint {
                                     id,
                                     raw_score: raw,
@@ -379,8 +398,8 @@ impl HNSWIndex {
                         continue;
                     }
     
-                    let d_current = score(query, &self.vectors[&current], self.metric);
-                    let d_new = score(query, &self.vectors[&neighbor], self.metric);
+                    let d_current = self.fast_score(query, &self.vectors[&current]);
+                    let d_new = self.fast_score(query, &self.vectors[&neighbor]);
                     let s_current = self.normalize_score(d_current);
                     let s_new = self.normalize_score(d_new);
     
@@ -428,8 +447,8 @@ impl HNSWIndex {
                         }
                     }
 
-                    let d_current = score(query, self.get_vector(&current).unwrap(), self.metric);
-                    let d_new = score(query, self.get_vector(&neighbor).unwrap(), self.metric);
+                    let d_current = self.fast_score(query, self.get_vector(&current).unwrap());
+                    let d_new = self.fast_score(query, self.get_vector(&neighbor).unwrap());
 
                     let s_current = match self.metric {
                         DistanceMetric::Dot => -d_current,
@@ -477,7 +496,7 @@ impl HNSWIndex {
             entry
         };
     
-        let entry_distance = score(query, &self.vectors[&start_entry], self.metric);
+        let entry_distance = self.fast_score(query, &self.vectors[&start_entry]);
         let entry_score = if normalize {
             self.normalize_score(entry_distance)
         } else {
@@ -511,7 +530,7 @@ impl HNSWIndex {
                         continue;
                     }
     
-                    let raw = score(query, &self.vectors[&neighbor], self.metric);
+                    let raw = self.fast_score(query, &self.vectors[&neighbor]);
                     let score_val = if normalize {
                         self.normalize_score(raw)
                     } else {
@@ -599,7 +618,6 @@ impl HNSWIndex {
         let mut results = self.search_layer_unfiltered(&final_query, current, 0, ef_search, normalize_score_flag)?;
         results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
         results.truncate(top_k);
-        println!("Search complete. Returning {} results", results.len());
         Ok(results)
     }
 
@@ -688,6 +706,24 @@ impl HNSWIndex {
             });
         }
 
+        let (normalize_query, use_normalize_score) = match self.metric {
+            DistanceMetric::Cosine => (true, true),
+            DistanceMetric::Dot => (false, true), // invert score but don’t normalize vec
+            DistanceMetric::Euclidean => (false, false),
+        };
+
+        let query_for_greedy = if normalize_query {
+            self.maybe_normalize(query)
+        } else {
+            query.clone()
+        };
+
+        let query_for_search = if normalize_query {
+            self.maybe_normalize(query)
+        } else {
+            query.clone()
+        };
+
         // 1) carve out only the Match clauses for graph‐hopping
         let match_filter = self.extract_match_filter(full_filter);
 
@@ -725,7 +761,7 @@ impl HNSWIndex {
         // 3) greedy‐search down from top level *using only* the equality edges
         for level in (1..=self.current_max_level()).rev() {
             entry = self.greedy_search_layer_with_filter(
-                query,
+                &query_for_greedy,
                 entry,
                 level,
                 payloads,
@@ -739,8 +775,8 @@ impl HNSWIndex {
         let mut candidate_queue: BinaryHeap<ScoredPoint> = BinaryHeap::new();
         let mut result_set:  BinaryHeap<ResultPoint>    = BinaryHeap::new();
 
-        let dist0 = score(query, self.get_vector(&entry).unwrap(), self.metric);
-        let sk0   = if self.metric == DistanceMetric::Dot { -dist0 } else { dist0 };
+        let dist0 = self.fast_score(&query_for_search, self.get_vector(&entry).unwrap());
+        let sk0   = if use_normalize_score { self.normalize_score(dist0) } else { dist0 };
         let first = ScoredPoint { id: entry, raw_score: dist0, sort_key: sk0 };
 
         candidate_queue.push(first.clone());
@@ -766,8 +802,8 @@ impl HNSWIndex {
                         continue;
                     }
 
-                    let d   = score(query, self.get_vector(&nb).unwrap(), self.metric);
-                    let sk  = if self.metric == DistanceMetric::Dot { -d } else { d };
+                    let d   = self.fast_score(&query_for_search, self.get_vector(&nb).unwrap());
+                    let sk  = if use_normalize_score { self.normalize_score(d) } else { d };
                     let sp  = ScoredPoint { id: nb, raw_score: d, sort_key: sk };
 
                     candidate_queue.push(sp.clone());

@@ -172,3 +172,52 @@ See `docs/test-config.md` for a concise list of default parameters across benchm
 - ef_search = 32  → **0.960**
 - ef_search = 64  → **0.960**
 - ef_search = 128 → **0.988**
+
+## NYTimes (256-d Angular) via Hugging Face
+
+Run an opt-in ignored test that loads the ANN-Benchmarks NYTimes dataset from Hugging Face (dataset repo `open-vdb/nytimes-256-angular`), inserts it, times unfiltered search, and reports recall against the provided ground truth.
+
+1) Download and materialize the dataset (writes to `data/nytimes-256-angular`). Requires a Hugging Face token (`HF_TOKEN`) with repo read access:
+```
+export HF_TOKEN=your_hf_token
+python - <<'PY'
+import os, json, numpy as np, pathlib
+from datasets import load_dataset
+
+token = os.environ["HF_TOKEN"]
+train = load_dataset("open-vdb/nytimes-256-angular", name="train", split="train", token=token)
+test = load_dataset("open-vdb/nytimes-256-angular", name="test", split="test", token=token)
+nbrs = load_dataset("open-vdb/nytimes-256-angular", name="neighbors", split="neighbors", token=token)
+
+def first_list_col(ds):
+    for name in ds.column_names:
+        if isinstance(ds[0][name], (list, tuple)):
+            return name
+    raise RuntimeError(f"no list-like column in {ds.column_names}")
+
+emb_col = first_list_col(train)   # 256-d vectors
+q_col = first_list_col(test)      # 256-d queries
+nbr_col = first_list_col(nbrs)    # ground-truth neighbor ids
+
+out = pathlib.Path("data/nytimes-256-angular"); out.mkdir(parents=True, exist_ok=True)
+np.save(out/"base.npy", np.stack(train[emb_col]).astype("float32"))
+np.save(out/"queries.npy", np.stack(test[q_col]).astype("float32"))
+neighbors_list = nbrs[nbr_col].to_pylist() if hasattr(nbrs[nbr_col], "to_pylist") else list(nbrs[nbr_col])
+with open(out/"ground_truth.json","w") as f:
+    json.dump(neighbors_list, f)
+print("wrote", out, "cols:", emb_col, q_col, nbr_col)
+PY
+```
+
+2) Run the harness (ignored by default); you can sweep ef_search in one run using `VECTORDB_NYT_EF_SEARCH_LIST` to avoid rebuilding:
+```
+cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocapture
+```
+
+ Env knobs:
+- `VECTORDB_NYT_DATA_DIR` (default `data/nytimes-256-angular`)
+- `VECTORDB_NYT_TOPK` (default `20`)
+- `VECTORDB_NYT_EF_SEARCH` (default `128`) or `VECTORDB_NYT_EF_SEARCH_LIST` (e.g., `16,32,64,128,256`) to sweep without rebuilding the index
+- `VECTORDB_NYT_QUERIES` (default `1000`)
+- `VECTORDB_NYT_EF_CONSTRUCT` (default `100`) to tune build beam width
+- `VECTORDB_NYT_BASE_LIMIT` to cap how many base vectors are inserted (useful for quick iteration)

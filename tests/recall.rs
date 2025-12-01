@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::env;
+use std::time::Instant;
 
 use rand::distr::{Distribution, Uniform};
 use rand::rngs::SmallRng;
@@ -123,6 +124,7 @@ fn recall_unfiltered_euclidean() {
         println!("ℹ️  Running sweep entry with ef_search={} (ef_construct={})", ef_search, ef_construct);
 
         let mut avg_recall = 0.0;
+        let mut total_search = 0.0f64;
         for (qi, q) in queries.iter().enumerate() {
             // ground truth via brute force using the exact metric implementation
             let mut brute: Vec<(u64, f32)> = dataset
@@ -133,7 +135,9 @@ fn recall_unfiltered_euclidean() {
             brute.truncate(top_k);
             let truth: HashSet<u64> = brute.iter().map(|(id, _)| *id).collect();
 
+            let start = Instant::now();
             let approx = segment.search(q, top_k).unwrap();
+            total_search += start.elapsed().as_secs_f64();
             let hits = approx.iter().filter(|r| truth.contains(&r.id)).count() as f64;
             let recall = hits / top_k as f64;
             avg_recall += recall;
@@ -147,9 +151,10 @@ fn recall_unfiltered_euclidean() {
             );
         }
         avg_recall /= num_queries as f64;
+        let avg_search_ms = (total_search / num_queries as f64) * 1000.0;
         println!(
-            "✅ [ef_search={}] Average recall over {} queries: {:.3}",
-            ef_search, num_queries, avg_recall
+            "✅ [ef_search={}] Average recall over {} queries: {:.3} | avg search {:.3} ms/query",
+            ef_search, num_queries, avg_recall, avg_search_ms
         );
         summary.push((ef_search, avg_recall));
     }
