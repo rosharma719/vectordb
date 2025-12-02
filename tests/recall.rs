@@ -43,6 +43,7 @@ fn random_vector(rng: &mut SmallRng, dim: usize, noise: f32) -> Vector {
 #[test]
 #[ignore]
 fn recall_unfiltered_euclidean() {
+    let t0 = Instant::now();
     let size = env::var("VECTORDB_RECALL_SIZE")
         .ok()
         .and_then(|v| v.replace('_', "").parse().ok())
@@ -92,6 +93,7 @@ fn recall_unfiltered_euclidean() {
     );
     let mut segment = Segment::new(hnsw);
     segment.hnsw_mut().set_ef_construct(ef_construct);
+    println!("⏱️  Setup in {:?} (initialization)", t0.elapsed());
     for i in 0..size {
         let v = if use_random {
             random_vector(&mut data_rng, dim, 0.0)

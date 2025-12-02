@@ -104,7 +104,7 @@ fn bench_unfiltered_million_scale() {
     let start_insert = Instant::now();
     for i in 0..size {
         segment.insert(generate_vector_dim(i, dim), None).unwrap();
-        if i % 100_000 == 0 && i != 0 {
+        if i % 10_000 == 0 && i != 0 {
             println!("Inserted {} vectors...", i);
         }
     }

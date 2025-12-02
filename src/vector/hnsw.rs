@@ -215,9 +215,10 @@ impl HNSWIndex {
             //println!("[INSERT] Performing search layer at level {}...", l);
             let use_norm = self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
             let candidates = self.search_layer_unfiltered(&self.vectors[&point_id], current_entry, l, self.ef_construct, use_norm)?;
-            let neighbors: Vec<PointId> = candidates.iter().take(self.m).map(|sp| sp.id).collect();
+            // Diverse neighbor selection: skip a candidate if it is closer to any already-picked neighbor than to the query.
+            let neighbors: Vec<PointId> = self.select_diverse_neighbors(&candidates, self.m, use_norm);
             //println!("[INSERT] Found neighbors at level {} for {}: {:?}", l, point_id, neighbors);
-    
+
             let layer = self.layers.get_mut(&l).unwrap();
             let mut linked = neighbors.clone();
             if !linked.contains(&point_id) {
@@ -832,6 +833,43 @@ impl HNSWIndex {
             .collect::<Vec<_>>();
         out.truncate(top_k);
         Ok(out)
+    }
+
+    /// Heuristic neighbor selector that enforces diversity (HNSW heuristic 2).
+    fn select_diverse_neighbors(&self, candidates: &[ScoredPoint], m: usize, normalize_scores: bool) -> Vec<PointId> {
+        let mut result = Vec::with_capacity(m);
+        for cand in candidates {
+            if result.len() >= m {
+                break;
+            }
+            let Some(cand_vec) = self.get_vector(&cand.id) else { continue; };
+            let d_qc = cand.sort_key; // already normalized when requested
+            let mut too_close = false;
+            for &r_id in &result {
+                let Some(r_vec) = self.get_vector(&r_id) else { continue; };
+                let d_cr_raw = self.fast_score(cand_vec, r_vec);
+                let d_cr = if normalize_scores { self.normalize_score(d_cr_raw) } else { d_cr_raw };
+                if d_cr < d_qc {
+                    too_close = true;
+                    break;
+                }
+            }
+            if !too_close {
+                result.push(cand.id);
+            }
+        }
+        // If we selected fewer than m due to the diversity filter, backfill with remaining closest candidates.
+        if result.len() < m {
+            for cand in candidates {
+                if result.len() >= m {
+                    break;
+                }
+                if !result.contains(&cand.id) {
+                    result.push(cand.id);
+                }
+            }
+        }
+        result
     }
     
     

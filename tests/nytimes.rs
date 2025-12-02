@@ -47,6 +47,7 @@ fn ensure_exists(path: &Path) {
 #[test]
 #[ignore]
 fn nytimes_256_angular_perf_and_recall() {
+    let t0 = Instant::now();
     let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
         .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
     let top_k = env::var("VECTORDB_NYT_TOPK")
@@ -92,6 +93,7 @@ fn nytimes_256_angular_perf_and_recall() {
     let queries = load_vectors(&queries_path);
     let ground_truth = load_ground_truth(&truth_path);
     assert_eq!(ground_truth.len(), queries.len(), "ground truth length must match queries");
+    println!("⏱️  Data loaded in {:?}", t0.elapsed());
 
     let dim = base.first().map(|v| v.len()).unwrap_or(0);
     assert_eq!(dim, 256, "expected 256-d vectors");
@@ -111,7 +113,7 @@ fn nytimes_256_angular_perf_and_recall() {
     let start_insert = Instant::now();
     for (i, v) in base.iter().enumerate() {
         segment.insert(v.clone(), None).unwrap();
-        if i != 0 && i % 100_000 == 0 {
+        if i != 0 && i % 10_000 == 0 {
             println!("Inserted {} vectors", i);
         }
     }
@@ -150,6 +152,16 @@ fn nytimes_256_angular_perf_and_recall() {
                 .collect();
             total_targets += truth_set.len();
             hits += approx.iter().filter(|r| truth_set.contains(&r.id)).count();
+            if (qi + 1) % 100 == 0 || qi + 1 == num_queries {
+                let partial_recall = hits as f64 / total_targets.max(1) as f64;
+                println!(
+                    "  progress: query {}/{} (ef_search={}) cumulative recall={:.3}",
+                    qi + 1,
+                    num_queries,
+                    ef_search,
+                    partial_recall
+                );
+            }
         }
         let search_dur = start_search.elapsed();
         let avg_ms = search_dur.as_secs_f64() * 1000.0 / num_queries as f64;
