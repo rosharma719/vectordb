@@ -593,22 +593,20 @@ impl HNSWIndex {
             DistanceMetric::Euclidean => (false, false),
         };
         
-        let query_for_greedy = if normalize_query {
+        // Normalize once when needed and reuse to avoid duplicate work per query.
+        let prepared_query = if normalize_query {
             self.maybe_normalize(query)
         } else {
             query.clone()
         };
-                
+
+        let query_for_greedy = &prepared_query;
         let mut current = self.entry_point.unwrap();
         for l in (1..=self.current_max_level).rev() {
-            current = self.greedy_search_layer_unfiltered(&query_for_greedy, current, l);
+            current = self.greedy_search_layer_unfiltered(query_for_greedy, current, l);
         }
         
-        let final_query = if normalize_query {
-            self.maybe_normalize(query)
-        } else {
-            query.clone()
-        };
+        let final_query = &prepared_query;
         // Ensure beam width is at least top_k to avoid recall loss when top_k > ef.
         // Dot similarity benefits from a very wide beam to avoid local optima.
         let ef_search = if self.metric == DistanceMetric::Dot {
@@ -616,7 +614,7 @@ impl HNSWIndex {
         } else {
             self.ef.max(top_k)
         };
-        let mut results = self.search_layer_unfiltered(&final_query, current, 0, ef_search, normalize_score_flag)?;
+        let mut results = self.search_layer_unfiltered(final_query, current, 0, ef_search, normalize_score_flag)?;
         results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
         results.truncate(top_k);
         Ok(results)
@@ -713,17 +711,15 @@ impl HNSWIndex {
             DistanceMetric::Euclidean => (false, false),
         };
 
-        let query_for_greedy = if normalize_query {
+        // Normalize once when needed and reuse for both greedy descent and ef search.
+        let prepared_query = if normalize_query {
             self.maybe_normalize(query)
         } else {
             query.clone()
         };
 
-        let query_for_search = if normalize_query {
-            self.maybe_normalize(query)
-        } else {
-            query.clone()
-        };
+        let query_for_greedy = &prepared_query;
+        let query_for_search = &prepared_query;
 
         // 1) carve out only the Match clauses for graph‐hopping
         let match_filter = self.extract_match_filter(full_filter);
