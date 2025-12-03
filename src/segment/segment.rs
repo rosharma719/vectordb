@@ -31,6 +31,20 @@ impl Segment {
     /// Insert a new vector and optional payload. Auto-generates ID.
     pub fn insert(&mut self, vector: Vector, payload: Option<Payload>) -> Result<PointId, DBError> {
         let point_id = self.next_id;
+        self.insert_with_id(point_id, vector, payload)
+    }
+
+    /// Insert a vector with a caller-provided ID. Fails if the ID already exists or was deleted.
+    pub fn insert_with_id(
+        &mut self,
+        point_id: PointId,
+        vector: Vector,
+        payload: Option<Payload>,
+    ) -> Result<PointId, DBError> {
+        if self.hnsw.contains(&point_id) || self.payloads.contains_key(&point_id) || self.deleted.contains(&point_id) {
+            return Err(DBError::DuplicatePointId(point_id));
+        }
+
         self.hnsw.insert(point_id, vector.clone())?;
 
         if let Some(p) = payload {
@@ -53,10 +67,12 @@ impl Segment {
                     &filter_keys,
                 )?;
             }
-
         }
 
-        self.next_id += 1;
+        if point_id >= self.next_id {
+            self.next_id = point_id.saturating_add(1);
+        }
+
         Ok(point_id)
     }
 
@@ -90,7 +106,13 @@ impl Segment {
 
         if deleted_count >= MIN_DELETIONS_BEFORE_PURGE &&
         (deleted_count as f32 / total_count as f32) >= MAX_DELETION_RATIO {
-            println!("[DELETE] Triggering purge: {}/{} ({:.2}%) deleted", deleted_count, total_count, 100.0 * deleted_count as f32 / total_count as f32);
+            log::info!(
+                target: "segment",
+                "[DELETE] Triggering purge: {}/{} ({:.2}%) deleted",
+                deleted_count,
+                total_count,
+                100.0 * deleted_count as f32 / total_count as f32
+            );
             self.purge()?;
         }
 

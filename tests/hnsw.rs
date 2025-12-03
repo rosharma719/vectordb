@@ -92,13 +92,9 @@ fn test_all_metrics_consistency() {
 #[test]
 fn test_hnsw_robust_score_metrics() {
     // Create 5 vectors in a line with easily predictable order.
-    let vectors = vec![
-        vecf(&[1.0, 0.0, 0.0]),
-        vecf(&[2.0, 0.0, 0.0]),
-        vecf(&[3.0, 0.0, 0.0]),
-        vecf(&[4.0, 0.0, 0.0]),
-        vecf(&[5.0, 0.0, 0.0]),
-    ];
+    let vectors: Vec<_> = (1..=1000)
+        .map(|i| vecf(&[i as f32, 0.0, 0.0]))
+        .collect();
 
     // Euclidean HNSW
     let mut hnsw_euclidean = HNSWIndex::new(DistanceMetric::Euclidean, 16, 50, 16, 3);
@@ -129,8 +125,8 @@ fn test_large_insertion_and_ranking_accuracy() {
     println!("Created HNSW index with Euclidean metric and dimension 3");
 
     let mut vectors = Vec::new();
-    println!("Inserting 300 sequential vectors");
-    for i in 0..300 {
+    println!("Inserting 1000 sequential vectors");
+    for i in 0..1000 {
         let vec = vecf(&[i as f32, i as f32, i as f32]);
         println!("Inserting vector with ID {}: {:?}", i, vec);
         hnsw.insert(i, vec.clone()).unwrap();

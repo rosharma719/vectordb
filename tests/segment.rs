@@ -3,6 +3,7 @@ use vectordb::vector::hnsw::HNSWIndex;
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
 use vectordb::payload_storage::filters::Filter;
+use vectordb::utils::errors::DBError;
 
 fn vecf_dim(seed: usize, dim: usize) -> Vector {
     // Deterministic high-dim vector generator for tests
@@ -23,11 +24,14 @@ fn test_large_scale_insert_and_search_all_metrics() {
 
         let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
+        segment.hnsw_mut().set_exact_fallback_enabled(false);
+        segment.hnsw_mut().set_exact_fallback_threshold(0);
 
         let mut ids = Vec::new();
         let mut vectors = Vec::new();
 
         println!("--- INSERTING VECTORS ---\n");
+        let insert_start = Instant::now();
         for i in 0..1_000 {
             let vec = vecf_dim(i, DIM);
             let mut payload = Payload::default();
@@ -41,8 +45,16 @@ fn test_large_scale_insert_and_search_all_metrics() {
                 println!("Inserted {} vectors...", i);
             }
         }
+        let insert_elapsed = insert_start.elapsed();
+        println!(
+            "[{:?}] Inserted 1000 vectors in {:?} (~{:.3} ms/insert)",
+            metric,
+            insert_elapsed,
+            insert_elapsed.as_secs_f64() * 1e3 / 1_000.0
+        );
 
         println!("\n--- SEARCHING QUERIES ---\n");
+        let search_start = Instant::now();
         for (expected_id, query) in vectors.iter().take(10) {
             let noisy_query: Vec<f32> = query.iter().enumerate().map(|(idx, x)| x + 0.001 * ((idx % 5) as f32)).collect();
 
@@ -85,6 +97,13 @@ fn test_large_scale_insert_and_search_all_metrics() {
                 );
             }
         }
+        let search_elapsed = search_start.elapsed();
+        println!(
+            "[{:?}] Completed 10 searches in {:?} (~{:.3} ms/query)",
+            metric,
+            search_elapsed,
+            search_elapsed.as_secs_f64() * 1e3 / 10.0
+        );
 
         println!("\n✅ Completed tests for {:?}\n", metric);
     }
@@ -96,7 +115,7 @@ fn test_large_scale_filtered_queries_all_metrics() {
         let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
 
-        for i in 0..400 {
+        for i in 0..512 {
             let mut payload = Payload::default();
             let animal = match i % 4 {
                 0 => "dog",
@@ -150,7 +169,7 @@ fn test_list_filters_with_larger_pool_all_metrics() {
         let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
 
-        for i in 0..500 {
+        for i in 0..512 {
             let mut payload = Payload::default();
             let tags = if i % 2 == 0 {
                 vec!["cheap".to_string(), "small".to_string()]
@@ -194,7 +213,7 @@ fn test_deletion_and_purge_with_large_set_all_metrics() {
         let mut segment = Segment::new(hnsw);
 
         let mut ids = Vec::new();
-        for i in 0..200 {
+        for i in 0..512 {
             let mut payload = Payload::default();
             payload.set("idx", PayloadValue::Int(i as i64));
             let vec = vecf_dim(i, DIM);
@@ -222,4 +241,27 @@ fn test_deletion_and_purge_with_large_set_all_metrics() {
             assert!(segment.get_vector(*id).is_none(), "❌ NOT purged: id = {}", id);
         }
     }
+}
+
+#[test]
+fn test_insert_with_custom_ids_and_auto_ids() {
+    let hnsw = HNSWIndex::new(DistanceMetric::Euclidean, 16, 50, 16, DIM);
+    let mut segment = Segment::new(hnsw);
+
+    let custom_id = 42;
+    let vec_custom = vecf_dim(1, DIM);
+    let returned_id = segment.insert_with_id(custom_id, vec_custom.clone(), None).unwrap();
+    assert_eq!(returned_id, custom_id);
+
+    // Auto IDs should advance past the highest custom ID.
+    let auto_id = segment.insert(vecf_dim(2, DIM), None).unwrap();
+    assert!(auto_id > custom_id, "auto-generated ID should advance past custom IDs");
+
+    // Duplicate custom ID should error.
+    let dup = segment.insert_with_id(custom_id, vecf_dim(3, DIM), None);
+    assert!(matches!(dup, Err(DBError::DuplicatePointId(id)) if id == custom_id));
+
+    // Search should return the custom ID for its vector.
+    let res = segment.search(&vec_custom, 1).unwrap();
+    assert_eq!(res[0].id, custom_id);
 }

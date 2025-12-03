@@ -8,6 +8,7 @@ use crate::utils::payload::Payload;
 use crate::payload_storage::filters::{Filter, evaluate_filter};
 
 const VERBOSE: bool = false;
+const DEFAULT_EXACT_FALLBACK_THRESHOLD: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct ScoredPoint {
@@ -72,14 +73,48 @@ pub struct HNSWIndex {
     dim: usize,
     // NEW: Maintain a set of deleted point IDs for lazy deletion
     deleted: HashSet<PointId>,
+    exact_fallback_enabled: bool,
+    exact_fallback_threshold: usize,
 }
 
 
 impl HNSWIndex {
+    fn exact_scan(&self, query: &Vector, normalize_scores: bool, top_k: usize) -> Vec<ScoredPoint> {
+        let mut brute: Vec<ScoredPoint> = self
+            .iter_vectors()
+            .filter_map(|(&id, vec)| {
+                if self.deleted.contains(&id) {
+                    return None;
+                }
+                let raw = self.fast_score(query, vec);
+                let sort_key = if normalize_scores {
+                    self.normalize_score(raw)
+                } else {
+                    raw
+                };
+                Some(ScoredPoint { id, raw_score: raw, sort_key })
+            })
+            .collect();
+        brute.sort_by(|a, b| {
+            a.sort_key
+                .partial_cmp(&b.sort_key)
+                .unwrap()
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        brute.truncate(top_k);
+        brute
+    }
     pub fn new(metric: DistanceMetric, m: usize, ef: usize, max_level_cap: usize, dim: usize) -> Self {
         let level_scale = 1.0 / (m as f64).ln();
         if VERBOSE {
-            println!("Creating new HNSWIndex with dim {}, M {}, ef {}, max_level_cap {}", dim, m, ef, max_level_cap);
+            log::debug!(
+                target: "vector::hnsw",
+                "Creating new HNSWIndex with dim {}, M {}, ef {}, max_level_cap {}",
+                dim,
+                m,
+                ef,
+                max_level_cap
+            );
         }
         Self {
             layers: HashMap::new(),
@@ -95,6 +130,8 @@ impl HNSWIndex {
             current_max_level: 0,
             dim,
             deleted: HashSet::new(),
+            exact_fallback_enabled: true,
+            exact_fallback_threshold: DEFAULT_EXACT_FALLBACK_THRESHOLD,
         }
     }
 
@@ -156,13 +193,18 @@ impl HNSWIndex {
     
         if self.vectors.contains_key(&point_id) {
             if VERBOSE {
-                println!("[INSERT] Point {} already exists. Skipping.", point_id);
+                log::debug!(target: "vector::hnsw", "[INSERT] Point {} already exists. Skipping.", point_id);
             }
             return Ok(());
         }
-    
+
         if vector.len() != self.dim {
-            println!("[INSERT] Vector length mismatch. Expected {}, got {}.", self.dim, vector.len());
+            log::warn!(
+                target: "vector::hnsw",
+                "[INSERT] Vector length mismatch. Expected {}, got {}.",
+                self.dim,
+                vector.len()
+            );
             return Err(DBError::VectorLengthMismatch {
                 expected: self.dim,
                 actual: vector.len(),
@@ -186,7 +228,7 @@ impl HNSWIndex {
     
         if self.entry_point.is_none() {
             if VERBOSE {
-                println!("[INSERT] First point. Setting entry point to {} at level {}", point_id, level);
+                log::debug!(target: "vector::hnsw", "[INSERT] First point. Setting entry point to {} at level {}", point_id, level);
             }
             self.entry_point = Some(point_id);
             self.current_max_level = level;
@@ -240,7 +282,7 @@ impl HNSWIndex {
     
         if level > self.current_max_level {
             if VERBOSE {
-                println!("[INSERT] Promoting {} to new entry point at level {}", point_id, level);
+                log::debug!(target: "vector::hnsw", "[INSERT] Promoting {} to new entry point at level {}", point_id, level);
             }
             self.entry_point = Some(point_id);
             self.current_max_level = level;
@@ -414,7 +456,7 @@ impl HNSWIndex {
         }
     
         if steps >= 1000 {
-            println!("[GREEDY] WARNING: Reached max steps at level {}, current = {}", level, current);
+            log::warn!(target: "vector::hnsw", "[GREEDY] Reached max steps at level {}, current = {}", level, current);
         }
     
         //println!("[GREEDY] Finished at point {} at level {}", current, level);
@@ -600,6 +642,15 @@ impl HNSWIndex {
             query.clone()
         };
 
+        let collection_size = self.vectors.len() - self.deleted.len();
+        let exact_scan_possible = self.exact_fallback_enabled
+            && collection_size <= self.exact_fallback_threshold;
+
+        // For small collections, optionally fall back to an exact scan for deterministic results.
+        if exact_scan_possible {
+            return Ok(self.exact_scan(&prepared_query, normalize_score_flag, top_k));
+        }
+
         let query_for_greedy = &prepared_query;
         let mut current = self.entry_point.unwrap();
         for l in (1..=self.current_max_level).rev() {
@@ -614,8 +665,14 @@ impl HNSWIndex {
         } else {
             self.ef.max(top_k)
         };
+
         let mut results = self.search_layer_unfiltered(final_query, current, 0, ef_search, normalize_score_flag)?;
-        results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
+        results.sort_by(|a, b| {
+            a.sort_key
+                .partial_cmp(&b.sort_key)
+                .unwrap()
+                .then_with(|| a.id.cmp(&b.id))
+        });
         results.truncate(top_k);
         Ok(results)
     }
@@ -936,6 +993,14 @@ impl HNSWIndex {
 
     pub fn set_current_max_level(&mut self, level: usize) {
         self.current_max_level = level;
+    }
+
+    pub fn set_exact_fallback_enabled(&mut self, enabled: bool) {
+        self.exact_fallback_enabled = enabled;
+    }
+
+    pub fn set_exact_fallback_threshold(&mut self, threshold: usize) {
+        self.exact_fallback_threshold = threshold;
     }
 
     pub fn maybe_normalize(&self, vec: &Vector) -> Vector {

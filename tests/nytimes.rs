@@ -109,10 +109,11 @@ fn nytimes_256_angular_perf_and_recall() {
     ));
     segment.hnsw_mut().set_ef_construct(ef_construct);
 
-    println!("🚀 Inserting {} vectors...", base.len());
+    println!("🚀 Inserting {} vectors with dataset-aligned IDs...", base.len());
     let start_insert = Instant::now();
     for (i, v) in base.iter().enumerate() {
-        segment.insert(v.clone(), None).unwrap();
+        let dataset_id = i as u64; // align with ground-truth neighbor IDs (0-based)
+        segment.insert_with_id(dataset_id, v.clone(), None).unwrap();
         if i != 0 && i % 10_000 == 0 {
             println!("Inserted {} vectors", i);
         }
@@ -146,9 +147,9 @@ fn nytimes_256_angular_perf_and_recall() {
             let truth_set: HashSet<_> = truth
                 .iter()
                 .take(truth_k)
-                // Ground truth IDs are 0-based row indices; our inserts start at 1 in order.
+                // Ground truth IDs are 0-based row indices; we insert with the same IDs.
                 .filter(|&&id| (id as usize) < base.len())
-                .map(|&id| (id as u64) + 1)
+                .map(|&id| id as u64)
                 .collect();
             total_targets += truth_set.len();
             hits += approx.iter().filter(|r| truth_set.contains(&r.id)).count();

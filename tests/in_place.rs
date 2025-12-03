@@ -119,6 +119,13 @@ const TOP_K: usize      = 10;
         let res_post = segment.search_with_filter(query, TOP_K, Some(&filter)).unwrap();
         let dt_post = t3.elapsed();
         println!("[{:?}] filtered={}  took {:?}", metric, res_post.len(), dt_post);
+        println!(
+            "[{:?}] search timings -> unfiltered: {:.3} ms, in-place: {:.3} ms, filtered: {:.3} ms",
+            metric,
+            dt_unf.as_secs_f64() * 1e3,
+            dt_inp.as_secs_f64() * 1e3,
+            dt_post.as_secs_f64() * 1e3
+        );
 
         // 4) sanity: every returned item matches
         for (name, set) in &[

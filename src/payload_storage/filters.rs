@@ -30,7 +30,7 @@ pub fn evaluate_filter(filter: &Filter, payload: &Payload) -> Result<bool, DBErr
                     Ok(actual == value)
                 }
                 None => {
-                    println!("No payload found for key '{}'. Returning false.", key);
+                    log::debug!(target: "filter", "No payload found for key '{}'. Returning false.", key);
                     Ok(false)
                 }
             }
@@ -57,7 +57,7 @@ pub fn evaluate_filter(filter: &Filter, payload: &Payload) -> Result<bool, DBErr
             //println!("Evaluating OR filter with {} conditions.", conditions.len());
             for cond in conditions {
                 if evaluate_filter(cond, payload)? {
-                    println!("Condition passed in OR filter. Returning true.");
+                    log::debug!(target: "filter", "Condition passed in OR filter. Returning true.");
                     return Ok(true);
                 }
             }

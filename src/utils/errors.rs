@@ -10,6 +10,9 @@ pub enum DBError {
     #[error("Point with ID {0} not found")]
     NotFound(PointId),
 
+    #[error("Point with ID {0} already exists")]
+    DuplicatePointId(PointId),
+
     #[error("Vector length mismatch: expected {expected}, got {actual}")]
     VectorLengthMismatch {
         expected: usize,

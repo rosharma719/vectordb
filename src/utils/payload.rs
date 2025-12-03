@@ -53,7 +53,7 @@ impl Payload {
                             ScalarComparisonOp::Eq => {
                                 //println!("Performing Eq comparison between lists.");
                                 let result = l == o;
-                                println!("Result of Eq comparison: {}", result);
+                                log::debug!(target: "payload", "Result of Eq comparison: {}", result);
                                 Ok(result)
                             }
                             ScalarComparisonOp::Neq => {
@@ -63,7 +63,7 @@ impl Payload {
                                 Ok(result)
                             }
                             _ => {
-                                println!("Invalid operation for ListStr.");
+                                log::warn!(target: "payload", "Invalid operation for ListStr.");
                                 Err(DBError::InvalidPayload("Invalid operation for ListStr".into()))
                             }
                         }
@@ -107,7 +107,7 @@ impl Payload {
                 }
             }
             None => {
-                println!("Field '{}' is missing from the payload.", field);
+                log::debug!(target: "payload", "Field '{}' is missing from the payload.", field);
                 Err(DBError::InvalidPayload(format!("Missing field: {field}")))
             }
         }
