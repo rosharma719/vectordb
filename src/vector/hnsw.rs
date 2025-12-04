@@ -312,10 +312,6 @@ impl HNSWIndex {
     
         let mut extra_neighbors = HashSet::new();
         let m = self.m();
-        // Optional toggle: skip the fallback graph search to speed up inserts.
-        let allow_fallback = std::env::var("VECTORDB_FILTER_EDGE_FALLBACK")
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(true);
     
         // Limit how many candidates we sample from the inverted index per key; tie to construction beam.
         let sample_limit: usize = self.ef_construct.max(self.m());
@@ -372,71 +368,16 @@ impl HNSWIndex {
 
                 // ⛔ If the posting list was empty, fall back to unfiltered search to find nearby vectors
                 // and then filter them by this key/value to establish some connectivity.
-                if allow_fallback {
-                    let mut candidates: Vec<ScoredPoint> = if self.current_max_level() > 0 {
-                        let mut entry = self.get_entry_point().unwrap();
-                        for l in (1..=self.current_max_level()).rev() {
-                            entry = self.greedy_search_layer_unfiltered(&query_vector, entry, l);
-                        }
-                        self.search_layer_unfiltered(
-                            &query_vector,
-                            entry,
-                            0,
-                            self.ef(),
-                            self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot,
-                        )?
-                    } else {
-                        self.iter_vectors()
-                            .filter_map(|(&id, vec)| {
-                                if id != point_id && !self.deleted.contains(&id) {
-                                    let raw = self.fast_score(&query_vector, vec);
-                                    Some(ScoredPoint {
-                                        id,
-                                        raw_score: raw,
-                                        sort_key: self.normalize_score(raw),
-                                    })
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect()
-                    };
-
-                    candidates.sort_by(|a, b| {
-                        if self.metric == DistanceMetric::Dot {
-                            b.raw_score.partial_cmp(&a.raw_score).unwrap()
-                        } else {
-                            a.raw_score.partial_cmp(&b.raw_score).unwrap()
-                        }
-                    });
-
-                    let filtered: Vec<_> = candidates
-                        .into_iter()
-                        .filter(|sp| {
-                            payloads
-                                .get(&sp.id)
-                                .and_then(|p| p.get(key))
-                                .map_or(false, |v| v == value)
-                        })
-                        .take(m)
-                        .map(|sp| sp.id)
-                        .collect();
-
-                    extra_neighbors.extend(filtered);
-                }
-
-                if extra_neighbors.len() >= 2 * m {
-                    break;
-                }
             }
         }
     
-        extra_neighbors.insert(point_id); // self-loop
-    
-        for neighbor_id in extra_neighbors {
-            self.add_bidirectional_edge(0, point_id, neighbor_id);
+        // Cap the total number of filter-aware neighbors to avoid blowing up degree.
+        let cap = m.max(1);
+        for neighbor_id in extra_neighbors.into_iter().filter(|id| *id != point_id).take(cap) {
+            // One-way edges from the new point to matches to avoid inflating existing nodes' degree.
+            self.add_one_way_edge(0, point_id, neighbor_id);
         }
-    
+
         Ok(())
     }
     
@@ -445,6 +386,11 @@ impl HNSWIndex {
         let layer = self.layers.entry(level).or_default();
         Self::push_unique(layer.entry(a).or_default(), b);
         Self::push_unique(layer.entry(b).or_default(), a);
+    }
+
+    pub fn add_one_way_edge(&mut self, level: usize, from: PointId, to: PointId) {
+        let layer = self.layers.entry(level).or_default();
+        Self::push_unique(layer.entry(from).or_default(), to);
     }
 
     #[inline]
@@ -856,6 +802,9 @@ impl HNSWIndex {
         let mut visited = HashSet::new();
         let mut candidate_queue: BinaryHeap<ScoredPoint> = BinaryHeap::new();
         let mut result_set:  BinaryHeap<ResultPoint>    = BinaryHeap::new();
+        let log_seed = std::env::var("VECTORDB_LOG_FILTER_SEED")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
 
         let dist0 = self.fast_score(&query_for_search, self.get_vector(&entry).unwrap());
         let sk0   = if use_normalize_score { self.normalize_score(dist0) } else { dist0 };
@@ -908,10 +857,12 @@ impl HNSWIndex {
         if let Some(f) = full_filter {
             collect_match_ids(f, payload_index, &mut seed_ids);
         }
+        let seed_pool_size = seed_ids.len();
+        let mut seeds_added = 0usize;
+        let mut seeds_accepted = 0usize;
         if !seed_ids.is_empty() {
-            let mut added = 0usize;
-            for id in seed_ids {
-                if added >= seed_limit {
+            for id in seed_ids.iter().copied() {
+                if seeds_added >= seed_limit {
                     break;
                 }
                 if self.deleted.contains(&id) || !visited.insert(id) {
@@ -926,8 +877,9 @@ impl HNSWIndex {
                     payloads.get(&id).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false))
                 }) {
                     result_set.push(ResultPoint(sp));
+                    seeds_accepted += 1;
                 }
-                added += 1;
+                seeds_added += 1;
             }
         }
 
@@ -983,6 +935,21 @@ impl HNSWIndex {
             .map(|rp| rp.0)
             .collect::<Vec<_>>();
         out.truncate(top_k);
+
+        if log_seed && full_filter.is_some() {
+            let seeds_in_results = out.iter().filter(|sp| seed_ids.contains(&sp.id)).count();
+            let msg = format!(
+                "[filter_search_seed] seeds_pool={} seeds_added={} seeds_accepted={} seeds_in_results={} final_results={}",
+                seed_pool_size,
+                seeds_added,
+                seeds_accepted,
+                seeds_in_results,
+                out.len()
+            );
+            log::info!(target: "hnsw", "{}", msg);
+            println!("{}", msg);
+        }
+
         Ok(out)
     }
 

@@ -1,5 +1,8 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::thread_local;
+use std::time::{Duration, Instant};
 
 use crate::payload_storage::filters::Filter;
 use crate::payload_storage::stores::PayloadIndex;
@@ -16,6 +19,19 @@ pub struct Segment {
     // This set is maintained in parallel with the HNSW deletion set.
     deleted: HashSet<PointId>,
     next_id: PointId,
+}
+
+#[derive(Default)]
+struct InsertTiming {
+    count: usize,
+    hnsw: Duration,
+    payload_idx: Duration,
+    filter_edges: Duration,
+    total: Duration,
+}
+
+thread_local! {
+    static INSERT_TIMINGS: RefCell<InsertTiming> = RefCell::new(InsertTiming::default());
 }
 
 impl Segment {
@@ -42,15 +58,30 @@ impl Segment {
         vector: Vector,
         payload: Option<Payload>,
     ) -> Result<PointId, DBError> {
+        let log_timing = Self::log_insert_timing();
+        let total_start = if log_timing { Some(Instant::now()) } else { None };
+        let mut last = total_start;
+        let mut hnsw_dur = Duration::from_millis(0);
+        let mut payload_idx_dur = Duration::from_millis(0);
+        let mut filter_edges_dur = Duration::from_millis(0);
+
         if self.hnsw.contains(&point_id) || self.payloads.contains_key(&point_id) || self.deleted.contains(&point_id) {
             return Err(DBError::DuplicatePointId(point_id));
         }
 
         self.hnsw.insert(point_id, vector.clone())?;
+        if let Some(t) = last.as_mut() {
+            hnsw_dur = t.elapsed();
+            *t = Instant::now();
+        }
 
         if let Some(p) = payload {
             self.payload_index.insert(point_id, &p);
             self.payloads.insert(point_id, p.clone());
+            if let Some(t) = last.as_mut() {
+                payload_idx_dur = t.elapsed();
+                *t = Instant::now();
+            }
 
             let filter_keys = Self::filter_keys_for_payload(&p);
 
@@ -63,11 +94,45 @@ impl Segment {
                     &self.payloads,
                     &filter_keys,
                 )?;
+                if let Some(t) = last.as_mut() {
+                    filter_edges_dur = t.elapsed();
+                    *t = Instant::now();
+                }
             }
         }
 
         if point_id >= self.next_id {
             self.next_id = point_id.saturating_add(1);
+        }
+
+        if let Some(start) = total_start {
+            let total = start.elapsed();
+            // Accumulate and log every CHUNK inserts to avoid log spam.
+            const CHUNK: usize = 5000;
+            INSERT_TIMINGS.with(|cell| {
+                let mut s = cell.borrow_mut();
+                s.count += 1;
+                s.hnsw += hnsw_dur;
+                s.payload_idx += payload_idx_dur;
+                s.filter_edges += filter_edges_dur;
+                s.total += total;
+                if s.count % CHUNK == 0 {
+                    let c = s.count as u32;
+                    let msg = format!(
+                        "[insert_timing_chunk] n={} avg_hnsw={:?} avg_payload_idx={:?} avg_filter_edges={:?} avg_total={:?}",
+                        s.count,
+                        s.hnsw / c,
+                        s.payload_idx / c,
+                        s.filter_edges / c,
+                        s.total / c
+                    );
+                    // Log if a logger is configured, and also print so tests with --nocapture see it.
+                    log::info!(target: "segment", "{}", msg);
+                    println!("{}", msg);
+                    // Reset for next chunk
+                    *s = InsertTiming::default();
+                }
+            });
         }
 
         Ok(point_id)
@@ -254,11 +319,18 @@ impl Segment {
         &self.payload_index
     }
 
-    /// Toggle filter-aware edge building via env var. Defaults to true.
+    /// Toggle filter-aware edge building via env var. Defaults to false.
     fn filter_edges_enabled() -> bool {
         env::var("VECTORDB_FILTER_EDGES")
             .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(true)
+            .unwrap_or(false)
+    }
+
+    /// Toggle per-insert timing logs via env var. Defaults to false.
+    fn log_insert_timing() -> bool {
+        env::var("VECTORDB_LOG_INSERT_TIMING")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false)
     }
 
     /// Build the list of payload keys to use for filter-aware edges, honoring an optional allowlist.

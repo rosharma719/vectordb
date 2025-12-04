@@ -34,11 +34,15 @@
   - `VECTORDB_HNM_QUERIES` (default `1000`)
   - `VECTORDB_HNM_BASE_LIMIT` to cap inserts
   - `VECTORDB_HNM_EF_CONSTRUCT` (default `200`)
-  - `VECTORDB_FILTER_EDGES` to toggle filter-aware edge construction (`0`/`false` to disable; default enabled)
-- Filtered search behavior:
-  - Beam seeds are pulled from inverted-index matches for equality filters (AND -> intersection, OR -> union), capped at `ef_search`.
-  - Expansion budget is `ef_search * 4` even when a filter is present to avoid unbounded scans.
-  - If filter-aware edges are disabled, recall depends on seeding plus the unfiltered graph; enable edges for higher recall at the cost of slower inserts.
+  - `VECTORDB_FILTER_EDGES` to toggle filter-aware edge construction (`0`/`false` to disable; default disabled)
+  - `VECTORDB_FILTER_KEYS` to allowlist payload keys (comma list) for filter-aware edges; defaults to all indexable scalars when edges are enabled
+  - `VECTORDB_LOG_FILTER_SEED` to log per-query seeding stats (seed pool/added/accepted/in-results)
+  - `VECTORDB_LOG_INSERT_TIMING` to emit per-5k insert timing chunks (see `segment` target logs/STDOUT)
+  - Filtered search behavior:
+    - Beam seeds are pulled from inverted-index matches for equality filters (AND -> intersection, OR -> union), capped at `ef_search`.
+    - Expansion budget is `ef_search * 4` even when a filter is present to avoid unbounded scans.
+    - Filter-aware insertion adds one-way edges from the new point to at most `m` matches (no bidirectional update) to keep degree bounded.
+    - If filter-aware edges are disabled, recall depends on seeding plus the unfiltered graph; enable edges for higher recall at the cost of slower inserts.
 
 ## NYTimes 256-d Angular (Hugging Face)
 - Data source: `open-vdb/nytimes-256-angular` dataset; load configs `train` (base vectors), `test` (queries), `neighbors` (ground truth).
