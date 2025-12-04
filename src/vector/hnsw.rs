@@ -312,19 +312,35 @@ impl HNSWIndex {
     
         let mut extra_neighbors = HashSet::new();
         let m = self.m();
+        // Optional toggle: skip the fallback graph search to speed up inserts.
+        let allow_fallback = std::env::var("VECTORDB_FILTER_EDGE_FALLBACK")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
     
+        // Limit how many candidates we sample from the inverted index per key; tie to construction beam.
+        let sample_limit: usize = self.ef_construct.max(self.m());
+
         for key in filter_keys {
             if let Some(value) = payload.get(key) {
                 // ✅ Try fast exact match via payload index first
                 if let Some(id_set) = payload_index.query_exact(key, value) {
                     let mut rng = rand::rng();
-                    let sample = id_set
-                        .iter()
-                        .filter(|&&id| id != point_id && self.get_vector(&id).is_some())
-                        .copied()
-                        .choose_multiple(&mut rng, 100); // sample limit
-    
-                    let mut scored: Vec<_> = sample
+                    // If the posting list is small, score all of it; otherwise take a random sample.
+                    let candidates: Vec<_> = if id_set.len() <= sample_limit {
+                        id_set
+                            .iter()
+                            .filter(|&&id| id != point_id && self.get_vector(&id).is_some())
+                            .copied()
+                            .collect()
+                    } else {
+                        id_set
+                            .iter()
+                            .filter(|&&id| id != point_id && self.get_vector(&id).is_some())
+                            .copied()
+                            .choose_multiple(&mut rng, sample_limit)
+                    };
+
+                    let mut scored: Vec<_> = candidates
                         .into_iter()
                         .filter_map(|id| {
                             self.get_vector(&id).map(|vec| {
@@ -334,7 +350,7 @@ impl HNSWIndex {
                             })
                         })
                         .collect();
-    
+
                     scored.sort_by(|a, b| {
                         if self.metric == DistanceMetric::Dot {
                             b.raw_score.partial_cmp(&a.raw_score).unwrap()
@@ -342,62 +358,74 @@ impl HNSWIndex {
                             a.raw_score.partial_cmp(&b.raw_score).unwrap()
                         }
                     });
-    
+
                     for sp in scored.into_iter().take(m) {
                         extra_neighbors.insert(sp.id);
                     }
-    
-                    if extra_neighbors.len() >= m {
-                        break;
-                    }
+
+                // If the inverted-index sample already filled the desired neighbor budget for this key,
+                // skip the fallback search but keep checking other keys.
+                if extra_neighbors.len() >= m {
+                    continue;
                 }
-    
-                // ⛔ If fast path didn't yield enough, fallback to filtered vector search
-                let mut candidates: Vec<ScoredPoint> = if self.current_max_level() > 0 {
-                    let mut entry = self.get_entry_point().unwrap();
-                    for l in (1..=self.current_max_level()).rev() {
-                        entry = self.greedy_search_layer_unfiltered(&query_vector, entry, l);
-                    }
-                    self.search_layer_unfiltered(&query_vector, entry, 0, self.ef(), self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot)?
-                } else {
-                    self.iter_vectors()
-                        .filter_map(|(&id, vec)| {
-                            if id != point_id && !self.deleted.contains(&id) {
-                                let raw = self.fast_score(&query_vector, vec);
-                                Some(ScoredPoint {
-                                    id,
-                                    raw_score: raw,
-                                    sort_key: self.normalize_score(raw),
-                                })
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                };
-    
-                candidates.sort_by(|a, b| {
-                    if self.metric == DistanceMetric::Dot {
-                        b.raw_score.partial_cmp(&a.raw_score).unwrap()
+                }
+
+                // ⛔ If the posting list was empty, fall back to unfiltered search to find nearby vectors
+                // and then filter them by this key/value to establish some connectivity.
+                if allow_fallback {
+                    let mut candidates: Vec<ScoredPoint> = if self.current_max_level() > 0 {
+                        let mut entry = self.get_entry_point().unwrap();
+                        for l in (1..=self.current_max_level()).rev() {
+                            entry = self.greedy_search_layer_unfiltered(&query_vector, entry, l);
+                        }
+                        self.search_layer_unfiltered(
+                            &query_vector,
+                            entry,
+                            0,
+                            self.ef(),
+                            self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot,
+                        )?
                     } else {
-                        a.raw_score.partial_cmp(&b.raw_score).unwrap()
-                    }
-                });
-    
-                let filtered: Vec<_> = candidates
-                    .into_iter()
-                    .filter(|sp| {
-                        payloads.get(&sp.id)
-                            .and_then(|p| p.get(key))
-                            .map_or(false, |v| v == value)
-                    })
-                    .take(m)
-                    .map(|sp| sp.id)
-                    .collect();
-    
-                extra_neighbors.extend(filtered);
-    
-                if extra_neighbors.len() >= 2*m {
+                        self.iter_vectors()
+                            .filter_map(|(&id, vec)| {
+                                if id != point_id && !self.deleted.contains(&id) {
+                                    let raw = self.fast_score(&query_vector, vec);
+                                    Some(ScoredPoint {
+                                        id,
+                                        raw_score: raw,
+                                        sort_key: self.normalize_score(raw),
+                                    })
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    };
+
+                    candidates.sort_by(|a, b| {
+                        if self.metric == DistanceMetric::Dot {
+                            b.raw_score.partial_cmp(&a.raw_score).unwrap()
+                        } else {
+                            a.raw_score.partial_cmp(&b.raw_score).unwrap()
+                        }
+                    });
+
+                    let filtered: Vec<_> = candidates
+                        .into_iter()
+                        .filter(|sp| {
+                            payloads
+                                .get(&sp.id)
+                                .and_then(|p| p.get(key))
+                                .map_or(false, |v| v == value)
+                        })
+                        .take(m)
+                        .map(|sp| sp.id)
+                        .collect();
+
+                    extra_neighbors.extend(filtered);
+                }
+
+                if extra_neighbors.len() >= 2 * m {
                     break;
                 }
             }
@@ -842,11 +870,81 @@ impl HNSWIndex {
         }
         visited.insert(entry);
 
+        // Seed the beam with a few IDs pulled from the inverted index that match equality filters.
+        // This helps reach filtered regions even when the graph lacks filter-aware edges.
+        let seed_limit = self.ef;
+        let mut seed_ids = HashSet::new();
+        fn collect_match_ids(filter: &Filter, idx: &PayloadIndex, out: &mut HashSet<PointId>) {
+            match filter {
+                Filter::Match { key, value } => {
+                    if let Some(ids) = idx.query_exact(key, value) {
+                        out.extend(ids.iter().copied());
+                    }
+                }
+                Filter::And(parts) => {
+                    // For AND, intersect the matches to keep the seed set tight.
+                    let mut local: Option<HashSet<PointId>> = None;
+                    for p in parts {
+                        let mut subset = HashSet::new();
+                        collect_match_ids(p, idx, &mut subset);
+                        if let Some(acc) = &mut local {
+                            acc.retain(|id| subset.contains(id));
+                        } else {
+                            local = Some(subset);
+                        }
+                    }
+                    if let Some(s) = local {
+                        out.extend(s);
+                    }
+                }
+                Filter::Or(parts) => {
+                    for p in parts {
+                        collect_match_ids(p, idx, out);
+                    }
+                }
+                Filter::Not(_) | Filter::Compare { .. } => {}
+            }
+        }
+        if let Some(f) = full_filter {
+            collect_match_ids(f, payload_index, &mut seed_ids);
+        }
+        if !seed_ids.is_empty() {
+            let mut added = 0usize;
+            for id in seed_ids {
+                if added >= seed_limit {
+                    break;
+                }
+                if self.deleted.contains(&id) || !visited.insert(id) {
+                    continue;
+                }
+                let Some(vec) = self.get_vector(&id) else { continue; };
+                let d = self.fast_score(&query_for_search, vec);
+                let sk = if use_normalize_score { self.normalize_score(d) } else { d };
+                let sp = ScoredPoint { id, raw_score: d, sort_key: sk };
+                candidate_queue.push(sp.clone());
+                if full_filter.map_or(true, |f| {
+                    payloads.get(&id).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false))
+                }) {
+                    result_set.push(ResultPoint(sp));
+                }
+                added += 1;
+            }
+        }
+
         let mut worst = result_set.peek().map(|rp| rp.0.sort_key).unwrap_or(f32::MAX);
 
+        let max_expansions = self.ef.saturating_mul(4);
+        let mut expansions = 0usize;
+
         while let Some(curr) = candidate_queue.pop() {
-            // if there is *no* filter at all, we can break as soon as we outrun `worst`
-            if full_filter.is_none() && curr.sort_key > worst {
+            expansions += 1;
+            if expansions >= max_expansions {
+                break;
+            }
+            // Once we already have top_k passing the filter, stop exploring candidates
+            // that are worse than our current worst. This restores the usual early-exit
+            // even when a filter is present.
+            if result_set.len() >= top_k && curr.sort_key > worst {
                 break;
             }
 

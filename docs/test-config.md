@@ -28,7 +28,17 @@
 - Data source: EfficientNet-encoded H&M clothes (≈105k vectors, dim=2048), cosine metric. Tarball: https://storage.googleapis.com/ann-filtered-benchmark/datasets/hnm.tgz.
 - Files expected under `VECTORDB_HNM_DATA_DIR` (default `data/hnm`): `vectors.npy`, `payloads.jsonl`, `tests.jsonl`.
 - Test: `hnm_filtered_cosine_recall` (ignored). Run with `cargo test --release hnm_filtered_cosine_recall -- --ignored --nocapture`.
-- Knobs: `VECTORDB_HNM_TOPK` (defaults to dataset truth length), `VECTORDB_HNM_EF_SEARCH_LIST` (comma list; default `64,128,256`), `VECTORDB_HNM_QUERIES` (default `200`), `VECTORDB_HNM_BASE_LIMIT` to cap inserts, `VECTORDB_HNM_EF_CONSTRUCT` (default `200`).
+- Knobs:
+  - `VECTORDB_HNM_TOPK` (defaults to dataset truth length)
+  - `VECTORDB_HNM_EF_SEARCH_LIST` (comma list; default `64,128,256`)
+  - `VECTORDB_HNM_QUERIES` (default `1000`)
+  - `VECTORDB_HNM_BASE_LIMIT` to cap inserts
+  - `VECTORDB_HNM_EF_CONSTRUCT` (default `200`)
+  - `VECTORDB_FILTER_EDGES` to toggle filter-aware edge construction (`0`/`false` to disable; default enabled)
+- Filtered search behavior:
+  - Beam seeds are pulled from inverted-index matches for equality filters (AND -> intersection, OR -> union), capped at `ef_search`.
+  - Expansion budget is `ef_search * 4` even when a filter is present to avoid unbounded scans.
+  - If filter-aware edges are disabled, recall depends on seeding plus the unfiltered graph; enable edges for higher recall at the cost of slower inserts.
 
 ## NYTimes 256-d Angular (Hugging Face)
 - Data source: `open-vdb/nytimes-256-angular` dataset; load configs `train` (base vectors), `test` (queries), `neighbors` (ground truth).

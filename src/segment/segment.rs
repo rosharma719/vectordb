@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::env;
 
 use crate::payload_storage::filters::Filter;
 use crate::payload_storage::stores::PayloadIndex;
@@ -51,13 +52,9 @@ impl Segment {
             self.payload_index.insert(point_id, &p);
             self.payloads.insert(point_id, p.clone());
 
-            let filter_keys: Vec<String> = p.0
-                .iter()
-                .filter(|(_, v)| matches!(v, PayloadValue::Int(_) | PayloadValue::Float(_) | PayloadValue::Str(_) | PayloadValue::Bool(_)))
-                .map(|(k, _)| k.clone())
-                .collect();
+            let filter_keys = Self::filter_keys_for_payload(&p);
 
-            if !filter_keys.is_empty() {
+            if !filter_keys.is_empty() && Self::filter_edges_enabled() {
                 self.hnsw.build_filter_aware_edges(
                     point_id,
                     &vector,
@@ -211,20 +208,18 @@ impl Segment {
                 new_payloads.insert(id, p.clone());
     
                 // Rebuild filter-aware edges
-                let filter_keys: Vec<String> = p.0
-                    .iter()
-                    .filter(|(_, v)| matches!(v, PayloadValue::Int(_) | PayloadValue::Float(_) | PayloadValue::Str(_) | PayloadValue::Bool(_)))
-                    .map(|(k, _)| k.clone())
-                    .collect();
-    
-                new_hnsw.build_filter_aware_edges(
-                    id,
-                    vector,
-                    p,
-                    &new_payload_index,
-                    &new_payloads,
-                    &filter_keys,
-                )?;
+                let filter_keys = Self::filter_keys_for_payload(p);
+
+                if Self::filter_edges_enabled() {
+                    new_hnsw.build_filter_aware_edges(
+                        id,
+                        vector,
+                        p,
+                        &new_payload_index,
+                        &new_payloads,
+                        &filter_keys,
+                    )?;
+                }
             }
         }
     
@@ -257,5 +252,38 @@ impl Segment {
 
     pub fn payload_index(&self) -> &PayloadIndex {
         &self.payload_index
+    }
+
+    /// Toggle filter-aware edge building via env var. Defaults to true.
+    fn filter_edges_enabled() -> bool {
+        env::var("VECTORDB_FILTER_EDGES")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true)
+    }
+
+    /// Build the list of payload keys to use for filter-aware edges, honoring an optional allowlist.
+    fn filter_keys_for_payload(payload: &Payload) -> Vec<String> {
+        let allow: Option<HashSet<String>> = env::var("VECTORDB_FILTER_KEYS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            });
+
+        payload
+            .0
+            .iter()
+            .filter(|(k, v)| {
+                matches!(
+                    v,
+                    PayloadValue::Int(_) | PayloadValue::Float(_) | PayloadValue::Str(_) | PayloadValue::Bool(_)
+                ) && allow
+                    .as_ref()
+                    .map_or(true, |set| set.contains(*k))
+            })
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 }

@@ -230,14 +230,14 @@ fn hnm_filtered_cosine_recall() {
     let queries_cap = env::var("VECTORDB_HNM_QUERIES")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(200usize);
+        .unwrap_or(1000usize);
     let base_cap = env::var("VECTORDB_HNM_BASE_LIMIT")
         .ok()
         .and_then(|v| v.parse().ok());
     let ef_construct = env::var("VECTORDB_HNM_EF_CONSTRUCT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(200usize);
+        .unwrap_or(100usize);
 
     let vectors_path = Path::new(&data_dir).join("vectors.npy");
     let payloads_path = Path::new(&data_dir).join("payloads.jsonl");
