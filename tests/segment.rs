@@ -42,7 +42,7 @@ fn test_large_scale_insert_and_search_all_metrics() {
             vectors.push((id, vec));
 
             if i % 1000 == 0 {
-                println!("Inserted {} vectors...", i);
+                println!("Inserted {} vectors... (+{:?})", i, insert_start.elapsed());
             }
         }
         let insert_elapsed = insert_start.elapsed();

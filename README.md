@@ -35,45 +35,17 @@ Logging uses `log` targets (e.g., `vector::hnsw`, `segment`, `payload`, `filter`
 
 ---
 
-## NYTimes (256-D Angular) Results
+## H&M (2048-D Cosine) Filtered Recall
 
-### Download the dataset (from Hugging Face)
-Requires an `HF_TOKEN` with repo read access for `open-vdb/nytimes-256-angular`:
-```
-export HF_TOKEN=your_hf_token
-python - <<'PY'
-import os, json, numpy as np, pathlib
-from datasets import load_dataset
+- Download the dataset (`vectors.npy`, `payloads.jsonl`, `tests.jsonl`) — see `docs/data-download.md` for CLI commands.
+- Place the files under `data/hnm` (or override with `VECTORDB_HNM_DATA_DIR`).
+- Run the harness:
+  ```
+  cargo test --release hnm_filtered_cosine_recall -- --ignored --nocapture
+  ```
+- Knobs: `VECTORDB_HNM_TOPK` (defaults to truth length), `VECTORDB_HNM_EF_SEARCH_LIST` (comma list, default `64,128,256`), `VECTORDB_HNM_QUERIES` (default `200`), `VECTORDB_HNM_BASE_LIMIT` (cap inserts), `VECTORDB_HNM_EF_CONSTRUCT` (default `200`).
 
-token = os.environ["HF_TOKEN"]
-train = load_dataset("open-vdb/nytimes-256-angular", name="train", split="train", token=token)
-test = load_dataset("open-vdb/nytimes-256-angular", name="test", split="test", token=token)
-nbrs = load_dataset("open-vdb/nytimes-256-angular", name="neighbors", split="neighbors", token=token)
-
-def first_list_col(ds):
-    for name in ds.column_names:
-        if isinstance(ds[0][name], (list, tuple)):
-            return name
-    raise RuntimeError(f"no list-like column in {ds.column_names}")
-
-emb_col = first_list_col(train)
-q_col = first_list_col(test)
-nbr_col = first_list_col(nbrs)
-
-out = pathlib.Path("data/nytimes-256-angular"); out.mkdir(parents=True, exist_ok=True)
-np.save(out/"base.npy", np.stack(train[emb_col]).astype("float32"))
-np.save(out/"queries.npy", np.stack(test[q_col]).astype("float32"))
-neighbors_list = nbrs[nbr_col].to_pylist() if hasattr(nbrs[nbr_col], "to_pylist") else list(nbrs[nbr_col])
-with open(out/"ground_truth.json","w") as f:
-    json.dump(neighbors_list, f)
-print("wrote", out, "cols:", emb_col, q_col, nbr_col)
-PY
-```
-
-### Run the harness
-```
-cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocapture
-```
+---
 
 ### Filtering & Payloads
 - Schema: schema-agnostic; payloads are per-point key/value maps. Missing fields simply evaluate to false for match/compare checks.
@@ -86,6 +58,17 @@ cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocaptur
 - Indexing: simple inverted index on indexable scalar types (int/float/str/bool) for fast equality matching; lists are not indexed.
 - Filter-aware search: `search_with_filter` uses in-graph filter-aware entry selection and in-place filtering during HNSW search (see `HNSWIndex::in_place_filtered_search`).
 
+
+## NYTimes (256-D Angular) Results
+
+### Download the dataset (from Hugging Face)
+Requires an `HF_TOKEN` with repo read access for `open-vdb/nytimes-256-angular` (see `docs/data-download.md` for CLI commands).
+
+### Run the harness
+```
+cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocapture
+```
+
 ### Recall with ef_construct = 200  
 **Recall / Latency (ms/query):**
 - 16 → 0.757, 0.352  
@@ -93,9 +76,6 @@ cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocaptur
 - 64 → 0.869, 0.874  
 - 128 → 0.904, 1.493  
 - 256 → 0.923, 2.760  
-
-**Insert Performance:**  
-Inserted **290,000 vectors** in **624.16 s** (~2.152 ms/insert)
 
 ---
 
@@ -115,13 +95,13 @@ Test: `nytimes_256_angular_perf_and_recall ... ok`
 **(Euclidean, dim=1536, top_k=20, ef_construct=100, m=16, ef_search=64)**
 
 ### 20,000 vectors
-- Insert: **18.01 s**  
+- Insert: **18.01 s** (~1.1k vec/s)  
 - Search: **0.723 ms/query**
 
 ### 100,000 vectors
-- Insert: **112.82 s**  
+- Insert: **112.82 s** (~0.9k vec/s)  
 - Search: **0.926 ms/query**
 
 ### 1,000,000 vectors
-- Insert: **1312.07 s**  
+- Insert: **1312.07 s** (~0.76k vec/s)  
 - Search: **1.165 ms/query**

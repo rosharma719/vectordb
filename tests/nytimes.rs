@@ -114,8 +114,8 @@ fn nytimes_256_angular_perf_and_recall() {
     for (i, v) in base.iter().enumerate() {
         let dataset_id = i as u64; // align with ground-truth neighbor IDs (0-based)
         segment.insert_with_id(dataset_id, v.clone(), None).unwrap();
-        if i != 0 && i % 10_000 == 0 {
-            println!("Inserted {} vectors", i);
+        if i != 0 && i % 1000 == 0 {
+            println!("Inserted {} vectors (+{:?})", i, start_insert.elapsed());
         }
     }
     let insert_dur = start_insert.elapsed();

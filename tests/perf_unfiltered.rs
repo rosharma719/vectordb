@@ -22,6 +22,9 @@ fn bench_unfiltered_large_scale() {
     let start_insert = Instant::now();
     for i in 0..size {
         segment.insert(generate_vector_dim(i, dim), None).unwrap();
+        if i != 0 && i % 1000 == 0 {
+            println!("Inserted {} vectors... (+{:?})", i, start_insert.elapsed());
+        }
     }
     let insert_dur = start_insert.elapsed();
     println!("✅ Inserted {} vectors in {:?}", size, insert_dur);
@@ -66,8 +69,8 @@ fn bench_unfiltered_param_scale() {
     let start_insert = Instant::now();
     for i in 0..size {
         segment.insert(generate_vector_dim(i, dim), None).unwrap();
-        if i % 10_000 == 0 && i != 0 {
-            println!("Inserted {} vectors...", i);
+        if i != 0 && i % 1000 == 0 {
+            println!("Inserted {} vectors... (+{:?})", i, start_insert.elapsed());
         }
     }
     let insert_dur = start_insert.elapsed();
@@ -104,8 +107,8 @@ fn bench_unfiltered_million_scale() {
     let start_insert = Instant::now();
     for i in 0..size {
         segment.insert(generate_vector_dim(i, dim), None).unwrap();
-        if i % 10_000 == 0 && i != 0 {
-            println!("Inserted {} vectors...", i);
+        if i != 0 && i % 1000 == 0 {
+            println!("Inserted {} vectors... (+{:?})", i, start_insert.elapsed());
         }
     }
     let insert_dur = start_insert.elapsed();

@@ -1,3 +1,5 @@
 /target
 # Local datasets (NYTimes benchmark)
 data/nytimes-256-angular/
+# All datasets
+data/

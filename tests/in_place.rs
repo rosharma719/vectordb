@@ -26,8 +26,9 @@ fn generate_segment(
     metric: DistanceMetric,
     num: usize,
     dim: usize,
+    ef_construct: usize,
 ) -> (Segment, Vec<Vector>) {
-    let hnsw = HNSWIndex::new(metric, 16, 32, 16, dim);
+    let hnsw = HNSWIndex::new(metric, 16, ef_construct, 16, dim);
     let mut segment = Segment::new(hnsw);
     let mut inserted_vecs = Vec::with_capacity(num);
 
@@ -38,6 +39,9 @@ fn generate_segment(
         let payload = make_payload(group, i as i64);
         segment.insert(vec.clone(), Some(payload)).unwrap();
         inserted_vecs.push(vec);
+        if i != 0 && i % 1000 == 0 {
+            println!("[{:?}] Inserted {} vectors... (+{:?})", metric, i, start.elapsed());
+        }
     }
     let took = start.elapsed();
     println!(
@@ -51,10 +55,13 @@ fn generate_segment(
 }
 
 #[test]
+#[ignore]
 fn benchmark_segment_ops_large() {
-const NUM_POINTS: usize = 1_500;
+const NUM_POINTS: usize = 20_000;
 const DIM: usize        = 1536;
 const TOP_K: usize      = 10;
+const EF_CONSTRUCT: usize = 100;
+const EF_SWEEP: &[usize] = &[32, 64, 128];
 
     // collect *all* failures here
     let mut failures: Vec<String> = Vec::new();
@@ -65,7 +72,7 @@ const TOP_K: usize      = 10;
         DistanceMetric::Dot,
     ] {
         println!("\n=== Testing metric {:?} ===", metric);
-        let (segment, inserted) = generate_segment(metric, NUM_POINTS, DIM);
+        let (mut segment, inserted) = generate_segment(metric, NUM_POINTS, DIM, EF_CONSTRUCT);
         let query = &inserted[123];
 
         // complex filter (threshold scales down with dataset size to keep matches)
@@ -102,67 +109,56 @@ const TOP_K: usize      = 10;
         ground.truncate(TOP_K);
         let truth_ids: HashSet<_> = ground.iter().map(|r| r.id).collect();
 
-        // 1) unfiltered
-        let t1 = Instant::now();
-        let res_unf = segment.search(query, TOP_K).unwrap();
-        let dt_unf = t1.elapsed();
-        println!("[{:?}] unfiltered={}  took {:?}", metric, res_unf.len(), dt_unf);
+        for &ef in EF_SWEEP {
+            segment.hnsw_mut().set_ef_search(ef.max(TOP_K));
 
-        // 2) in-place
-        let t2 = Instant::now();
-        let res_inp = segment.search_with_filter(query, TOP_K, Some(&filter)).unwrap();
-        let dt_inp = t2.elapsed();
-        println!("[{:?}] in-place-filter={}  took {:?}", metric, res_inp.len(), dt_inp);
+            // 1) unfiltered
+            let t1 = Instant::now();
+            let res_unf = segment.search(query, TOP_K).unwrap();
+            let dt_unf = t1.elapsed();
 
-        // 3) filtered (formerly post-filter)
-        let t3 = Instant::now();
-        let res_post = segment.search_with_filter(query, TOP_K, Some(&filter)).unwrap();
-        let dt_post = t3.elapsed();
-        println!("[{:?}] filtered={}  took {:?}", metric, res_post.len(), dt_post);
-        println!(
-            "[{:?}] search timings -> unfiltered: {:.3} ms, in-place: {:.3} ms, filtered: {:.3} ms",
-            metric,
-            dt_unf.as_secs_f64() * 1e3,
-            dt_inp.as_secs_f64() * 1e3,
-            dt_post.as_secs_f64() * 1e3
-        );
+            // 2) in-place
+            let t2 = Instant::now();
+            let res_inp = segment.search_with_filter(query, TOP_K, Some(&filter)).unwrap();
+            let dt_inp = t2.elapsed();
 
-        // 4) sanity: every returned item matches
-        for (name, set) in &[
-            ("ground",   &ground),
-            ("in-place", &res_inp),
-            ("filtered", &res_post),
-        ] {
-            for r in *set {
-                let p = segment.get_payload(r.id).unwrap();
-                if !matches!(p.get("group"), Some(PayloadValue::Str(s)) if s == "even")
-                    || !matches!(p.get("score"), Some(PayloadValue::Int(s)) if *s >= score_threshold)
-                {
-                    failures.push(format!(
-                        "[{:?}][{}] returned id={} that does not match filter",
-                        metric, name, r.id
-                    ));
+            // sanity: every returned item matches
+            for (name, set) in &[
+                ("ground",   &ground),
+                ("in-place", &res_inp),
+            ] {
+                for r in *set {
+                    let p = segment.get_payload(r.id).unwrap();
+                    if !matches!(p.get("group"), Some(PayloadValue::Str(s)) if s == "even")
+                        || !matches!(p.get("score"), Some(PayloadValue::Int(s)) if *s >= score_threshold)
+                    {
+                        failures.push(format!(
+                            "[{:?}][{}][ef={}] returned id={} that does not match filter",
+                            metric, name, ef, r.id
+                        ));
+                    }
                 }
             }
-        }
 
-        // 5) compare to truth
-        let in_ids:  HashSet<_> = res_inp.iter().map(|r| r.id).collect();
-        let missed_in: Vec<_> = truth_ids.difference(&in_ids).cloned().collect();
-        if !missed_in.is_empty() {
-            failures.push(format!(
-                "[{:?}][in-place] missed ground-truth ids {:?}",
-                metric, missed_in
-            ));
-        }
+            // compare to truth
+            let in_ids:  HashSet<_> = res_inp.iter().map(|r| r.id).collect();
+            let missed_in: Vec<_> = truth_ids.difference(&in_ids).cloned().collect();
+            if !missed_in.is_empty() {
+                failures.push(format!(
+                    "[{:?}][in-place][ef={}] missed ground-truth ids {:?}",
+                    metric, ef, missed_in
+                ));
+            }
 
-        let post_ids: HashSet<_> = res_post.iter().map(|r| r.id).collect();
-        let missed_post: Vec<_> = truth_ids.difference(&post_ids).cloned().collect();
-        if !missed_post.is_empty() {
-            failures.push(format!(
-                "[{:?}][filtered] missed ground-truth ids {:?}",
-                metric, missed_post
-            ));
+            println!(
+                "[{:?}][ef_search={}] unfiltered: {:.3} ms ({}), in-place-filter: {:.3} ms ({})",
+                metric,
+                ef,
+                dt_unf.as_secs_f64() * 1e3,
+                res_unf.len(),
+                dt_inp.as_secs_f64() * 1e3,
+                res_inp.len()
+            );
         }
 
         println!("[{:?}] ✅ done.", metric);

@@ -20,9 +20,15 @@
   - Difficulty: `VECTORDB_RECALL_NOISE` (higher = harder), dataset toggle (random vs sinusoidal)
   - Beam: `VECTORDB_RECALL_EF_SEARCH`
   - Target: `VECTORDB_RECALL_TOPK`
-  - Averaging: `VECTORDB_RECALL_QUERIES`
-  - Quality threshold: `VECTORDB_RECALL_MIN`
-  - Reproducibility: `VECTORDB_RECALL_SEED`
+- Averaging: `VECTORDB_RECALL_QUERIES`
+- Quality threshold: `VECTORDB_RECALL_MIN`
+- Reproducibility: `VECTORDB_RECALL_SEED`
+
+## H&M 2048-d Cosine (Filtered Recall)
+- Data source: EfficientNet-encoded H&M clothes (≈105k vectors, dim=2048), cosine metric. Tarball: https://storage.googleapis.com/ann-filtered-benchmark/datasets/hnm.tgz.
+- Files expected under `VECTORDB_HNM_DATA_DIR` (default `data/hnm`): `vectors.npy`, `payloads.jsonl`, `tests.jsonl`.
+- Test: `hnm_filtered_cosine_recall` (ignored). Run with `cargo test --release hnm_filtered_cosine_recall -- --ignored --nocapture`.
+- Knobs: `VECTORDB_HNM_TOPK` (defaults to dataset truth length), `VECTORDB_HNM_EF_SEARCH_LIST` (comma list; default `64,128,256`), `VECTORDB_HNM_QUERIES` (default `200`), `VECTORDB_HNM_BASE_LIMIT` to cap inserts, `VECTORDB_HNM_EF_CONSTRUCT` (default `200`).
 
 ## NYTimes 256-d Angular (Hugging Face)
 - Data source: `open-vdb/nytimes-256-angular` dataset; load configs `train` (base vectors), `test` (queries), `neighbors` (ground truth).
