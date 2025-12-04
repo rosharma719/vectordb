@@ -3,3 +3,6 @@
 data/nytimes-256-angular/
 # All datasets
 data/
+# Local logs
+logs/
+*.log

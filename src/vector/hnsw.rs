@@ -297,7 +297,7 @@ impl HNSWIndex {
         vector: &Vector,
         payload: &Payload,
         payload_index: &PayloadIndex,
-        payloads: &HashMap<PointId, Payload>,
+        _payloads: &HashMap<PointId, Payload>,
         filter_keys: &[String],
     ) -> Result<(), DBError> {
         // Skip if no payload keys were provided; avoids O(N) fallback when payloads are absent.
@@ -313,8 +313,8 @@ impl HNSWIndex {
         let mut extra_neighbors = HashSet::new();
         let m = self.m();
     
-        // Limit how many candidates we sample from the inverted index per key; tie to construction beam.
-        let sample_limit: usize = self.ef_construct.max(self.m());
+        // Limit how many candidates we sample from the inverted index per key; tie to ef_search.
+        let sample_limit: usize = self.ef.max(self.m());
 
         for key in filter_keys {
             if let Some(value) = payload.get(key) {
