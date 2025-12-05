@@ -51,3 +51,11 @@
 - Files expected under `VECTORDB_NYT_DATA_DIR` (default `data/nytimes-256-angular`): `base.npy`, `queries.npy`, `ground_truth.json`. See README for the download script (requires `HF_TOKEN` with repo read access).
 - Test: `nytimes_256_angular_perf_and_recall` (ignored). Run with `cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocapture`.
 - Knobs: `VECTORDB_NYT_TOPK` (default `20`), `VECTORDB_NYT_EF_SEARCH` (default `128`) or `VECTORDB_NYT_EF_SEARCH_LIST` for sweeps (default `32,64,128,256,512`), `VECTORDB_NYT_QUERIES` (default `1000`), `VECTORDB_NYT_EF_CONSTRUCT` (default `100`), `VECTORDB_NYT_BASE_LIMIT` to cap inserts for faster iteration.
+
+### HNSW Query-Time Knobs (Unfiltered Search)
+- `VECTORDB_SEARCH_EXPANSION_MULT` — Multiplier for the default expansion cap: cap = `ef_search * mult` (floor at `ef_search`). Default `4`.
+- `VECTORDB_SEARCH_EXPANSION_CAP` — Absolute expansion cap; if set to a positive number, it overrides the multiplier-derived cap. `0`/unset = use the multiplier.
+- `VECTORDB_DISABLE_EARLY_EXIT` — `1/true` disables early-exit. Default: early-exit enabled.
+- `VECTORDB_EARLY_EXIT_PATIENCE` — Require this many consecutive “best pending is worse than current worst” checks before early-exit triggers. Default `0` (exit on first worse pending).
+- `VECTORDB_LOG_UNFILTERED_SEARCH` — `1` to emit `[unfiltered_search_stats]` (visited/expanded/util/best/worst).
+- `VECTORDB_LOG_UNFILTERED_EVERY` — Emit stats every N queries. Default `1000`; raise to reduce log volume.

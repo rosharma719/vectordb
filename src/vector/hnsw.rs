@@ -33,6 +33,10 @@ thread_local! {
 static LOG_UNFILTERED_SEARCH: OnceLock<bool> = OnceLock::new();
 static UNFILTERED_LOG_CHUNK: OnceLock<usize> = OnceLock::new();
 static FILTER_SEED_LOG_CHUNK: OnceLock<usize> = OnceLock::new();
+static DISABLE_EARLY_EXIT: OnceLock<bool> = OnceLock::new();
+static SEARCH_EXPANSION_MULT: OnceLock<usize> = OnceLock::new();
+static SEARCH_EXPANSION_CAP: OnceLock<Option<usize>> = OnceLock::new();
+static EARLY_EXIT_PATIENCE: OnceLock<usize> = OnceLock::new();
 
 fn log_unfiltered_enabled() -> bool {
     *LOG_UNFILTERED_SEARCH.get_or_init(|| {
@@ -67,6 +71,45 @@ fn filter_seed_log_chunk() -> usize {
             .and_then(|v| v.replace('_', "").parse::<usize>().ok())
             .filter(|&v| v > 0)
             .unwrap_or(100)
+    })
+}
+
+fn disable_early_exit() -> bool {
+    *DISABLE_EARLY_EXIT.get_or_init(|| {
+        std::env::var("VECTORDB_DISABLE_EARLY_EXIT")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    })
+}
+
+fn search_expansion_multiplier() -> usize {
+    *SEARCH_EXPANSION_MULT.get_or_init(|| {
+        std::env::var("VECTORDB_SEARCH_EXPANSION_MULT")
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(4)
+    })
+}
+
+fn search_expansion_cap_override() -> Option<usize> {
+    SEARCH_EXPANSION_CAP
+        .get_or_init(|| {
+            std::env::var("VECTORDB_SEARCH_EXPANSION_CAP")
+                .ok()
+                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+                // Treat 0 as "no cap" to allow unbounded expansion for experiments.
+                .and_then(|v| if v == 0 { None } else { Some(v) })
+        })
+        .clone()
+}
+
+fn early_exit_patience() -> usize {
+    *EARLY_EXIT_PATIENCE.get_or_init(|| {
+        std::env::var("VECTORDB_EARLY_EXIT_PATIENCE")
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+            .unwrap_or(0)
     })
 }
 
@@ -806,7 +849,8 @@ impl HNSWIndex {
         let mut result_set = BinaryHeap::new();
         let mut expanded = 0usize;
         // Allow a wider expansion budget than ef to avoid early cutoff; mirrors filtered search budget.
-        let expansion_cap = ef.saturating_mul(4).max(ef);
+        let expansion_cap = search_expansion_cap_override()
+            .or_else(|| Some(ef.saturating_mul(search_expansion_multiplier()).max(ef)));
 
         // If the entry is deleted, skip it by choosing a non-deleted vector (if possible)
         let start_entry = if self.deleted.contains(&entry) {
@@ -835,11 +879,20 @@ impl HNSWIndex {
         //println!("[search_layer_unfiltered] Initial score at entry {}: {:.4}",start_entry, entry_score);
 
         let mut worst_score = result_set.peek().unwrap().0.sort_key;
-        let allow_early_exit = self.metric != DistanceMetric::Dot;
+        let allow_early_exit = self.metric != DistanceMetric::Dot && !disable_early_exit();
+        let patience_limit = if allow_early_exit { early_exit_patience() } else { 0 };
+        let mut no_improve_streak = 0usize;
 
         while let Some(current) = candidate_queue.peek() {
-            if allow_early_exit && result_set.len() >= ef && current.sort_key > worst_score {
-                break;
+            if allow_early_exit && result_set.len() >= ef {
+                if current.sort_key > worst_score {
+                    no_improve_streak += 1;
+                } else {
+                    no_improve_streak = 0;
+                }
+                if no_improve_streak > patience_limit {
+                    break;
+                }
             }
 
             let current = candidate_queue.pop().unwrap();
@@ -885,8 +938,12 @@ impl HNSWIndex {
             }
 
             // Guard against runaway expansion; treat as a backstop, not the primary stop signal.
-            if self.metric != DistanceMetric::Dot && expanded >= expansion_cap {
-                break;
+            if self.metric != DistanceMetric::Dot {
+                if let Some(cap) = expansion_cap {
+                    if expanded >= cap {
+                        break;
+                    }
+                }
             }
         }
 

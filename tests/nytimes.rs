@@ -33,6 +33,37 @@ fn ensure_exists(path: &Path) {
     );
 }
 
+fn read_search_caps_from_env() -> (bool, usize, Option<usize>) {
+    let disable_early_exit = env::var("VECTORDB_DISABLE_EARLY_EXIT")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+    let expansion_mult = env::var("VECTORDB_SEARCH_EXPANSION_MULT")
+        .ok()
+        .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(4);
+    let expansion_cap = env::var("VECTORDB_SEARCH_EXPANSION_CAP")
+        .ok()
+        .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+        .and_then(|v| if v == 0 { None } else { Some(v) });
+    (disable_early_exit, expansion_mult, expansion_cap)
+}
+
+fn log_search_caps() {
+    let (disable_early_exit, expansion_mult, expansion_cap) = read_search_caps_from_env();
+    let patience = env::var("VECTORDB_EARLY_EXIT_PATIENCE")
+        .ok()
+        .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+        .unwrap_or(0);
+    let cap_display = expansion_cap
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    println!(
+        "⚙️  Query-time knobs: early_exit_disabled={} early_exit_patience={} expansion_mult={} expansion_cap={}",
+        disable_early_exit, patience, expansion_mult, cap_display
+    );
+}
+
 /// Uses the ANN-Benchmarks NYTimes 256-d Angular dataset from Hugging Face.
 /// Requires local files:
 ///   base.npy, queries.npy, ground_truth.json in data/nytimes-256-angular (by default).
@@ -77,6 +108,7 @@ fn run_nytimes_perf_and_recall(persist_path: Option<String>, skip_recall: bool) 
     ensure_exists(&base_path);
     ensure_exists(&queries_path);
     ensure_exists(&truth_path);
+    log_search_caps();
 
     println!(
         "\n📚 Loading NYTimes dataset from {} (top_k={}, ef_search_list={:?}, max_queries={}, base_cap={:?}, ef_construct={})",
@@ -220,6 +252,7 @@ fn run_nytimes_recall_only(persist_path: &str) {
     let truth_path = Path::new(&data_dir).join("ground_truth.json");
     ensure_exists(&queries_path);
     ensure_exists(&truth_path);
+    log_search_caps();
 
     let queries = load_vectors(&queries_path);
     let ground_truth = load_ground_truth(&truth_path);

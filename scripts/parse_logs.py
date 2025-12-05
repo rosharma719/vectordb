@@ -25,15 +25,24 @@ RECALL_STATS_RE = re.compile(
 EDGE_AGG_RE = re.compile(
     r"\[filter_edges_agg\] n=(\d+) cum_n=(\d+) samples=(\d+) scored=(\d+) added=(\d+) total_ms=([\d\.]+) bool_ms=([\d\.]+) str_ms=([\d\.]+) int_ms=([\d\.]+) float_ms=([\d\.]+)"
 )
+UNFILTERED_RE = re.compile(
+    r"\[unfiltered_search_stats\] n=(\d+) ef_search=(\d+)\.\.(\d+) "
+    r"visited\(min/p50/p90/p99/max\)=([-\d\.]+)/([-\d\.]+)/([-\d\.]+)/([-\d\.]+)/([-\d\.]+) "
+    r"expanded=([-\d\.]+)/([-\d\.]+)/([-\d\.]+)/([-\d\.]+)/([-\d\.]+) "
+    r"util%=([-\d\.]+)/([-\d\.]+)/([-\d\.]+)/([-\d\.]+)/([-\d\.]+) "
+    r"best_score=([-\d\.]+)/([-\d\.]+)/([-\d\.]+)/([-\d\.]+)/([-\d\.]+) "
+    r"worst_score=([-\d\.]+)/([-\d\.]+)/([-\d\.]+)/([-\d\.]+)/([-\d\.]+)"
+)
 
 
 def parse_log(path: Path):
     if not path.is_file():
-        return [], defaultdict(list), {}, []
+        return [], defaultdict(list), {}, [], []
     inserts = []
     seeds_by_ef = defaultdict(list)
     recall_by_ef = {}
     edge_aggs = []
+    unfiltered = []
     last_inserted_time = None
     current_ef = None
     insert_chunk_idx = 0
@@ -103,9 +112,30 @@ def parse_log(path: Path):
                     "float_ms": float(m.group(10)),
                 }
             )
+        elif m := UNFILTERED_RE.search(line):
+            unfiltered.append(
+                {
+                    "n": int(m.group(1)),
+                    "ef_min": int(m.group(2)),
+                    "ef_max": int(m.group(3)),
+                    "visited_min": float(m.group(4)),
+                    "visited_p50": float(m.group(5)),
+                    "visited_p90": float(m.group(6)),
+                    "visited_p99": float(m.group(7)),
+                    "visited_max": float(m.group(8)),
+                    "expanded_min": float(m.group(9)),
+                    "expanded_p50": float(m.group(10)),
+                    "expanded_p90": float(m.group(11)),
+                    "expanded_p99": float(m.group(12)),
+                    "expanded_max": float(m.group(13)),
+                    "util_p50": float(m.group(15)),
+                    "best_p50": float(m.group(17)),
+                    "worst_p50": float(m.group(25)),
+                }
+            )
 
     inserts = sorted(inserts, key=lambda r: r["idx"])
-    return inserts, seeds_by_ef, recall_by_ef, edge_aggs
+    return inserts, seeds_by_ef, recall_by_ef, edge_aggs, unfiltered
 
 
 def render_table(title: str, headers, rows) -> str:
@@ -193,6 +223,32 @@ def summarize_edges(edge_aggs):
     return rows
 
 
+def summarize_unfiltered(unfiltered):
+    rows = []
+    for u in unfiltered:
+        ef_range = f"{u['ef_min']}..{u['ef_max']}"
+        rows.append(
+            {
+                "ef_range": ef_range,
+                "n": u["n"],
+                "visited_min": int(u["visited_min"]),
+                "visited_p50": int(u["visited_p50"]),
+                "visited_p90": int(u["visited_p90"]),
+                "visited_p99": int(u["visited_p99"]),
+                "visited_max": int(u["visited_max"]),
+                "expanded_min": int(u["expanded_min"]),
+                "expanded_p50": int(u["expanded_p50"]),
+                "expanded_p90": int(u["expanded_p90"]),
+                "expanded_p99": int(u["expanded_p99"]),
+                "expanded_max": int(u["expanded_max"]),
+                "util_p50": f"{u['util_p50']:.1f}",
+                "best_score_p50": f"{u['best_p50']:.4f}",
+                "worst_score_p50": f"{u['worst_p50']:.4f}",
+            }
+        )
+    return rows
+
+
 def main():
     if len(sys.argv) != 2:
         print(__doc__)
@@ -202,7 +258,7 @@ def main():
         print(f"Log not found: {path}")
         sys.exit(1)
 
-    inserts, seeds_by_ef, recall_by_ef, edge_aggs = parse_log(path)
+    inserts, seeds_by_ef, recall_by_ef, edge_aggs, unfiltered = parse_log(path)
     sections = [
         render_table(
             "Insert Timing (per chunk)",
@@ -223,6 +279,27 @@ def main():
             "Filter Edge Aggregates",
             ["n_keys", "cum_n", "samples", "scored", "added", "total_ms", "per_key_ms", "bool_ms", "str_ms", "int_ms", "float_ms"],
             summarize_edges(edge_aggs),
+        ),
+        render_table(
+            "Unfiltered Search Stats",
+            [
+                "ef_range",
+                "n",
+                "visited_min",
+                "visited_p50",
+                "visited_p90",
+                "visited_p99",
+                "visited_max",
+                "expanded_min",
+                "expanded_p50",
+                "expanded_p90",
+                "expanded_p99",
+                "expanded_max",
+                "util_p50",
+                "best_score_p50",
+                "worst_score_p50",
+            ],
+            summarize_unfiltered(unfiltered),
         ),
     ]
 
