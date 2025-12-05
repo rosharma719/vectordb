@@ -12,16 +12,20 @@ use crate::payload_storage::filters::{Filter, evaluate_filter};
 
 const VERBOSE: bool = false;
 const DEFAULT_EXACT_FALLBACK_THRESHOLD: usize = 256;
-const FILTER_EDGE_LOG_CHUNK: usize = 1000;
+const FILTER_EDGE_LOG_CHUNK: usize = 10_000;
 thread_local! {
     static FILTER_EDGE_TOTAL_KEYS: RefCell<usize> = RefCell::new(0);
 }
 thread_local! {
     static UNFILTERED_SEARCH_AGG: RefCell<UnfilteredSearchAgg> = RefCell::new(UnfilteredSearchAgg::default());
 }
+thread_local! {
+    static FILTER_SEED_COUNT: RefCell<usize> = RefCell::new(0);
+}
 
 static LOG_UNFILTERED_SEARCH: OnceLock<bool> = OnceLock::new();
 static UNFILTERED_LOG_CHUNK: OnceLock<usize> = OnceLock::new();
+static FILTER_SEED_LOG_CHUNK: OnceLock<usize> = OnceLock::new();
 
 fn log_unfiltered_enabled() -> bool {
     *LOG_UNFILTERED_SEARCH.get_or_init(|| {
@@ -46,6 +50,16 @@ fn unfiltered_log_chunk() -> usize {
             .and_then(|v| v.replace('_', "").parse::<usize>().ok())
             .filter(|&v| v > 0)
             .unwrap_or(1000)
+    })
+}
+
+fn filter_seed_log_chunk() -> usize {
+    *FILTER_SEED_LOG_CHUNK.get_or_init(|| {
+        std::env::var("VECTORDB_LOG_FILTER_SEED_EVERY")
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(100)
     })
 }
 
@@ -484,8 +498,9 @@ impl HNSWIndex {
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
 
-        // Limit how many candidates we sample from the inverted index per key; tie to ef_search.
-        let sample_limit: usize = self.ef.max(self.m());
+        // Limit how many candidates we sample from the inverted index per key.
+        // Keep it at least 2xM so we can still pick up to M good edges without scoring the whole posting list.
+        let sample_limit: usize = self.m().saturating_mul(2);
 
         for key in filter_keys {
             if let Some(value) = payload.get(key) {
@@ -764,6 +779,8 @@ impl HNSWIndex {
         let mut candidate_queue = BinaryHeap::new();
         let mut result_set = BinaryHeap::new();
         let mut expanded = 0usize;
+        // Allow a wider expansion budget than ef to avoid early cutoff; mirrors filtered search budget.
+        let expansion_cap = ef.saturating_mul(4).max(ef);
 
         // If the entry is deleted, skip it by choosing a non-deleted vector (if possible)
         let start_entry = if self.deleted.contains(&entry) {
@@ -790,12 +807,12 @@ impl HNSWIndex {
         visited.insert(start_entry);
     
         //println!("[search_layer_unfiltered] Initial score at entry {}: {:.4}",start_entry, entry_score);
-    
+
         let mut worst_score = result_set.peek().unwrap().0.sort_key;
         let allow_early_exit = self.metric != DistanceMetric::Dot;
-    
+
         while let Some(current) = candidate_queue.peek() {
-            if allow_early_exit && current.sort_key > worst_score {
+            if allow_early_exit && result_set.len() >= ef && current.sort_key > worst_score {
                 break;
             }
 
@@ -840,8 +857,13 @@ impl HNSWIndex {
                     }
                 }
             }
+
+            // Guard against runaway expansion; treat as a backstop, not the primary stop signal.
+            if self.metric != DistanceMetric::Dot && expanded >= expansion_cap {
+                break;
+            }
         }
-    
+
         let mut results: Vec<ScoredPoint> = result_set.into_iter().map(|rp| rp.0).collect();
         results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
     
@@ -1230,17 +1252,25 @@ impl HNSWIndex {
         out.truncate(top_k);
 
         if log_seed && full_filter.is_some() {
-            let seeds_in_results = out.iter().filter(|sp| seed_ids.contains(&sp.id)).count();
-            let msg = format!(
-                "[filter_search_seed] seeds_pool={} seeds_added={} seeds_accepted={} seeds_in_results={} final_results={}",
-                seed_pool_size,
-                seeds_added,
-                seeds_accepted,
-                seeds_in_results,
-                out.len()
-            );
-            log::info!(target: "hnsw", "{}", msg);
-            println!("{}", msg);
+            let chunk = filter_seed_log_chunk();
+            let should_emit = FILTER_SEED_COUNT.with(|c| {
+                let mut v = c.borrow_mut();
+                *v += 1;
+                *v % chunk == 0
+            });
+            if should_emit {
+                let seeds_in_results = out.iter().filter(|sp| seed_ids.contains(&sp.id)).count();
+                let msg = format!(
+                    "[filter_search_seed] seeds_pool={} seeds_added={} seeds_accepted={} seeds_in_results={} final_results={}",
+                    seed_pool_size,
+                    seeds_added,
+                    seeds_accepted,
+                    seeds_in_results,
+                    out.len()
+                );
+                log::info!(target: "hnsw", "{}", msg);
+                println!("{}", msg);
+            }
         }
 
         Ok(out)

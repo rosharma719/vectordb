@@ -108,14 +108,17 @@ def parse_log(path: Path):
     return inserts, seeds_by_ef, recall_by_ef, edge_aggs
 
 
-def print_table(title: str, headers, rows):
+def render_table(title: str, headers, rows) -> str:
     if not rows:
-        return
-    print(f"\n{title}")
-    print(" | ".join(headers))
-    print(" | ".join("---" for _ in headers))
+        return ""
+    lines = [
+        f"\n{title}",
+        " | ".join(headers),
+        " | ".join("---" for _ in headers),
+    ]
     for row in rows:
-        print(" | ".join(str(row.get(h, "")) for h in headers))
+        lines.append(" | ".join(str(row.get(h, "")) for h in headers))
+    return "\n".join(lines)
 
 
 def summarize_seeds(seeds_by_ef):
@@ -200,32 +203,36 @@ def main():
         sys.exit(1)
 
     inserts, seeds_by_ef, recall_by_ef, edge_aggs = parse_log(path)
-    print_table(
-        "Insert Timing (per chunk)",
-        ["n", "cum_n", "hnsw_ms", "filter_ms", "total_ms", "delta_s", "chunk_elapsed"],
-        inserts,
-    )
+    sections = [
+        render_table(
+            "Insert Timing (per chunk)",
+            ["n", "cum_n", "hnsw_ms", "filter_ms", "total_ms", "delta_s", "chunk_elapsed"],
+            inserts,
+        ),
+        render_table(
+            "Seed Stats by ef_search (averages)",
+            ["ef", "samples", "pool", "added", "accepted", "in_results", "final_results"],
+            summarize_seeds(seeds_by_ef),
+        ),
+        render_table(
+            "Recall Stats by ef_search",
+            ["ef", "mean", "p50", "p90", "p99", "min", "max", "full", ">=0.8", ">=0.5"],
+            summarize_recall(recall_by_ef),
+        ),
+        render_table(
+            "Filter Edge Aggregates",
+            ["n_keys", "cum_n", "samples", "scored", "added", "total_ms", "per_key_ms", "bool_ms", "str_ms", "int_ms", "float_ms"],
+            summarize_edges(edge_aggs),
+        ),
+    ]
 
-    seed_rows = summarize_seeds(seeds_by_ef)
-    print_table(
-        "Seed Stats by ef_search (averages)",
-        ["ef", "samples", "pool", "added", "accepted", "in_results", "final_results"],
-        seed_rows,
-    )
-
-    recall_rows = summarize_recall(recall_by_ef)
-    print_table(
-        "Recall Stats by ef_search",
-        ["ef", "mean", "p50", "p90", "p99", "min", "max", "full", ">=0.8", ">=0.5"],
-        recall_rows,
-    )
-
-    edge_rows = summarize_edges(edge_aggs)
-    print_table(
-        "Filter Edge Aggregates",
-        ["n_keys", "cum_n", "samples", "scored", "added", "total_ms", "per_key_ms", "bool_ms", "str_ms", "int_ms", "float_ms"],
-        edge_rows,
-    )
+    summary_text = "\n\n".join(s for s in sections if s)
+    if summary_text:
+        print(summary_text)
+        append_block = "\n\n=== parsed summary ===\n" + summary_text + "\n"
+        # Append instead of rewriting the whole file to avoid copying large logs.
+        with path.open("a", encoding="utf-8") as f:
+            f.write(append_block)
 
 
 if __name__ == "__main__":
