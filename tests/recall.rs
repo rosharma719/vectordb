@@ -6,27 +6,15 @@ use rand::distr::{Distribution, Uniform};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
+use vectordb::payload_storage::filters::Filter;
 use vectordb::segment::segment::Segment;
+use vectordb::utils::payload::PayloadValue;
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::vector::hnsw::HNSWIndex;
 use vectordb::vector::metric::score;
-use vectordb::payload_storage::filters::Filter;
-use vectordb::utils::payload::PayloadValue;
 
 mod common;
-use common::generate_vector_dim;
-
-fn parse_usize_list(env_key: &str, default: &[usize]) -> Vec<usize> {
-    env::var(env_key)
-        .ok()
-        .map(|v| {
-            v.split(',')
-                .filter_map(|s| s.trim().replace('_', "").parse::<usize>().ok())
-                .collect::<Vec<_>>()
-        })
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_vec())
-}
+use common::{env_usize_first, env_usize_list_first, generate_vector_dim};
 
 fn parse_metric_env(env_key: &str, default: DistanceMetric) -> DistanceMetric {
     match env::var(env_key).ok().as_deref() {
@@ -55,23 +43,13 @@ fn random_vector(rng: &mut SmallRng, dim: usize, noise: f32) -> Vector {
 #[ignore]
 fn recall_unfiltered_euclidean() {
     let t0 = Instant::now();
-    let size = env::var("VECTORDB_RECALL_SIZE")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse().ok())
-        .unwrap_or(20_000);
-    let dim = env::var("VECTORDB_RECALL_DIM")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse().ok())
-        .unwrap_or(1536);
-    let ef_values = parse_usize_list("VECTORDB_RECALL_EF_SEARCH", &[32, 64, 128]);
-    let top_k = env::var("VECTORDB_RECALL_TOPK")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse().ok())
-        .unwrap_or(20);
-    let num_queries = env::var("VECTORDB_RECALL_QUERIES")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse().ok())
-        .unwrap_or(20);
+    let size = env_usize_first(&["VECTORDB_SIZE", "VECTORDB_RECALL_SIZE"]).unwrap_or(20_000);
+    let dim = env_usize_first(&["VECTORDB_DIM", "VECTORDB_RECALL_DIM"]).unwrap_or(1536);
+    let ef_values = env_usize_list_first(&["VECTORDB_EF_SEARCH", "VECTORDB_RECALL_EF_SEARCH"])
+        .unwrap_or_else(|| vec![32, 64, 128]);
+    let top_k = env_usize_first(&["VECTORDB_TOPK", "VECTORDB_RECALL_TOPK"]).unwrap_or(20);
+    let num_queries =
+        env_usize_first(&["VECTORDB_QUERIES", "VECTORDB_RECALL_QUERIES"]).unwrap_or(20);
     let seed = env::var("VECTORDB_RECALL_SEED")
         .ok()
         .and_then(|v| v.replace('_', "").parse().ok())
@@ -173,6 +151,7 @@ fn recall_unfiltered_euclidean() {
             "✅ [ef_search={}] Average recall over {} queries: {:.3} | avg search {:.3} ms/query",
             ef_search, num_queries, avg_recall, avg_search_ms
         );
+        segment.hnsw().flush_unfiltered_search_stats();
         summary.push((ef_search, avg_recall));
     }
 
@@ -186,23 +165,13 @@ fn recall_unfiltered_euclidean() {
 #[ignore]
 fn recall_in_place_filtered() {
     let t0 = Instant::now();
-    let size = env::var("VECTORDB_RECALL_SIZE")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse().ok())
-        .unwrap_or(20_000);
-    let dim = env::var("VECTORDB_RECALL_DIM")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse().ok())
-        .unwrap_or(1536);
-    let ef_values = parse_usize_list("VECTORDB_RECALL_EF_SEARCH", &[32, 64, 128]);
-    let top_k = env::var("VECTORDB_RECALL_TOPK")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse().ok())
-        .unwrap_or(20);
-    let num_queries = env::var("VECTORDB_RECALL_QUERIES")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse().ok())
-        .unwrap_or(20);
+    let size = env_usize_first(&["VECTORDB_SIZE", "VECTORDB_RECALL_SIZE"]).unwrap_or(20_000);
+    let dim = env_usize_first(&["VECTORDB_DIM", "VECTORDB_RECALL_DIM"]).unwrap_or(1536);
+    let ef_values = env_usize_list_first(&["VECTORDB_EF_SEARCH", "VECTORDB_RECALL_EF_SEARCH"])
+        .unwrap_or_else(|| vec![32, 64, 128]);
+    let top_k = env_usize_first(&["VECTORDB_TOPK", "VECTORDB_RECALL_TOPK"]).unwrap_or(20);
+    let num_queries =
+        env_usize_first(&["VECTORDB_QUERIES", "VECTORDB_RECALL_QUERIES"]).unwrap_or(20);
     let seed = env::var("VECTORDB_RECALL_SEED")
         .ok()
         .and_then(|v| v.replace('_', "").parse().ok())
@@ -328,6 +297,7 @@ fn recall_in_place_filtered() {
             "✅ [ef_search={}] Average filtered recall over {} queries: {:.3} | avg search {:.3} ms/query",
             ef_search, num_queries, avg_recall, avg_search_ms
         );
+        segment.hnsw().flush_unfiltered_search_stats();
         summary.push((ef_search, avg_recall, avg_search_ms));
     }
 

@@ -55,6 +55,7 @@ fn bench_unfiltered_large_scale() {
         search_dur,
         avg_ms
     );
+    segment.hnsw().flush_unfiltered_search_stats();
 }
 
 /// Parametrizable unfiltered benchmark; size/dim can be set via env vars.
@@ -114,6 +115,7 @@ fn bench_unfiltered_param_scale() {
         search_dur,
         avg_ms
     );
+    segment.hnsw().flush_unfiltered_search_stats();
 }
 
 /// Very large-scale unfiltered benchmark (opt-in; runs longer).
@@ -164,4 +166,5 @@ fn bench_unfiltered_million_scale() {
         search_dur,
         avg_ms
     );
+    segment.hnsw().flush_unfiltered_search_stats();
 }

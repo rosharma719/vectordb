@@ -1,5 +1,6 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::cell::RefCell;
+use std::sync::OnceLock;
 use rand::seq::IteratorRandom;
 use rand::Rng;
 use crate::utils::payload::PayloadValue;
@@ -14,6 +15,144 @@ const DEFAULT_EXACT_FALLBACK_THRESHOLD: usize = 256;
 const FILTER_EDGE_LOG_CHUNK: usize = 1000;
 thread_local! {
     static FILTER_EDGE_TOTAL_KEYS: RefCell<usize> = RefCell::new(0);
+}
+thread_local! {
+    static UNFILTERED_SEARCH_AGG: RefCell<UnfilteredSearchAgg> = RefCell::new(UnfilteredSearchAgg::default());
+}
+
+static LOG_UNFILTERED_SEARCH: OnceLock<bool> = OnceLock::new();
+static UNFILTERED_LOG_CHUNK: OnceLock<usize> = OnceLock::new();
+
+fn log_unfiltered_enabled() -> bool {
+    *LOG_UNFILTERED_SEARCH.get_or_init(|| {
+        let enabled = std::env::var("VECTORDB_LOG_UNFILTERED_SEARCH")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+        if enabled {
+            let chunk = unfiltered_log_chunk();
+            println!(
+                "[unfiltered_search_stats] enabled (chunk={}, set VECTORDB_LOG_UNFILTERED_EVERY to change)",
+                chunk
+            );
+        }
+        enabled
+    })
+}
+
+fn unfiltered_log_chunk() -> usize {
+    *UNFILTERED_LOG_CHUNK.get_or_init(|| {
+        std::env::var("VECTORDB_LOG_UNFILTERED_EVERY")
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(1000)
+    })
+}
+
+#[derive(Default)]
+struct UnfilteredSearchAgg {
+    samples: Vec<UnfilteredSample>,
+}
+
+#[derive(Clone)]
+struct UnfilteredSample {
+    ef_search: usize,
+    visited: usize,
+    expanded: usize,
+    best_score: f32,
+    worst_score: f32,
+}
+
+#[derive(Default)]
+struct SearchLayerStats {
+    visited: usize,
+    expanded: usize,
+}
+
+impl UnfilteredSearchAgg {
+    fn record(&mut self, sample: UnfilteredSample) {
+        self.samples.push(sample);
+        let chunk = unfiltered_log_chunk();
+        if self.samples.len() >= chunk {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.samples.is_empty() {
+            return;
+        }
+
+        let mut visited: Vec<f64> = self.samples.iter().map(|s| s.visited as f64).collect();
+        let mut expanded: Vec<f64> = self.samples.iter().map(|s| s.expanded as f64).collect();
+        let mut util_pct: Vec<f64> = self
+            .samples
+            .iter()
+            .map(|s| (s.expanded as f64 / s.ef_search.max(1) as f64) * 100.0)
+            .collect();
+        let mut best: Vec<f64> = self.samples.iter().map(|s| s.best_score as f64).collect();
+        let mut worst: Vec<f64> = self.samples.iter().map(|s| s.worst_score as f64).collect();
+        let ef_min = self.samples.iter().map(|s| s.ef_search).min().unwrap_or(0);
+        let ef_max = self.samples.iter().map(|s| s.ef_search).max().unwrap_or(0);
+
+        let stats = |vals: &mut Vec<f64>| {
+            vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p = |pct: f64| -> f64 {
+                if vals.is_empty() {
+                    return 0.0;
+                }
+                let idx = ((pct / 100.0) * (vals.len() as f64 - 1.0)).round() as usize;
+                vals[idx]
+            };
+            (p(50.0), p(90.0), p(99.0), *vals.first().unwrap_or(&0.0), *vals.last().unwrap_or(&0.0))
+        };
+
+        let (vis_p50, vis_p90, vis_p99, vis_min, vis_max) = stats(&mut visited);
+        let (exp_p50, exp_p90, exp_p99, exp_min, exp_max) = stats(&mut expanded);
+        let (util_p50, util_p90, util_p99, util_min, util_max) = stats(&mut util_pct);
+        let (best_p50, best_p90, best_p99, best_min, best_max) = stats(&mut best);
+        let (worst_p50, worst_p90, worst_p99, worst_min, worst_max) = stats(&mut worst);
+
+        println!(
+            "[unfiltered_search_stats] n={} ef_search={}..{} visited(min/p50/p90/p99/max)={:.0}/{:.0}/{:.0}/{:.0}/{:.0} expanded={:.0}/{:.0}/{:.0}/{:.0}/{:.0} util%={:.1}/{:.1}/{:.1}/{:.1}/{:.1} best_score={:.4}/{:.4}/{:.4}/{:.4}/{:.4} worst_score={:.4}/{:.4}/{:.4}/{:.4}/{:.4}",
+            self.samples.len(),
+            ef_min,
+            ef_max,
+            vis_min,
+            vis_p50,
+            vis_p90,
+            vis_p99,
+            vis_max,
+            exp_min,
+            exp_p50,
+            exp_p90,
+            exp_p99,
+            exp_max,
+            util_min,
+            util_p50,
+            util_p90,
+            util_p99,
+            util_max,
+            best_min,
+            best_p50,
+            best_p90,
+            best_p99,
+            best_max,
+            worst_min,
+            worst_p50,
+            worst_p90,
+            worst_p99,
+            worst_max,
+        );
+
+        self.samples.clear();
+    }
+}
+
+impl Drop for UnfilteredSearchAgg {
+    fn drop(&mut self) {
+        self.flush();
+    }
 }
 
 #[derive(Default)]
@@ -125,6 +264,8 @@ impl HNSWIndex {
         brute
     }
     pub fn new(metric: DistanceMetric, m: usize, ef: usize, max_level_cap: usize, dim: usize) -> Self {
+        // Touch the flag early so the enable banner shows up before long inserts.
+        let _ = log_unfiltered_enabled();
         let level_scale = 1.0 / (m as f64).ln();
         if VERBOSE {
             log::debug!(
@@ -276,7 +417,14 @@ impl HNSWIndex {
         for l in (0..=level).rev() {
             //println!("[INSERT] Performing search layer at level {}...", l);
             let use_norm = self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
-            let candidates = self.search_layer_unfiltered(&self.vectors[&point_id], current_entry, l, self.ef_construct, use_norm)?;
+            let candidates = self.search_layer_unfiltered(
+                &self.vectors[&point_id],
+                current_entry,
+                l,
+                self.ef_construct,
+                use_norm,
+                None,
+            )?;
             // Diverse neighbor selection: skip a candidate if it is closer to any already-picked neighbor than to the query.
             let neighbors: Vec<PointId> = self.select_diverse_neighbors(&candidates, self.m, use_norm);
             //println!("[INSERT] Found neighbors at level {} for {}: {:?}", l, point_id, neighbors);
@@ -596,7 +744,6 @@ impl HNSWIndex {
 
         Ok(current)
     }
-    
     fn search_layer_unfiltered(
         &self,
         query: &Vector,
@@ -604,6 +751,7 @@ impl HNSWIndex {
         level: usize,
         ef: usize,
         normalize: bool,
+        stats: Option<&mut SearchLayerStats>,
     ) -> Result<Vec<ScoredPoint>, DBError> {
         if query.len() != self.dim {
             return Err(DBError::VectorLengthMismatch {
@@ -615,7 +763,8 @@ impl HNSWIndex {
         let mut visited = HashSet::new();
         let mut candidate_queue = BinaryHeap::new();
         let mut result_set = BinaryHeap::new();
-    
+        let mut expanded = 0usize;
+
         // If the entry is deleted, skip it by choosing a non-deleted vector (if possible)
         let start_entry = if self.deleted.contains(&entry) {
             self.vectors.keys().find(|&&id| !self.deleted.contains(&id)).cloned().unwrap_or(entry)
@@ -649,8 +798,9 @@ impl HNSWIndex {
             if allow_early_exit && current.sort_key > worst_score {
                 break;
             }
-    
+
             let current = candidate_queue.pop().unwrap();
+            expanded += 1;
             if let Some(neighbors) = self.layers.get(&level).and_then(|l| l.get(&current.id)) {
                 for &neighbor in neighbors {
                     if self.deleted.contains(&neighbor) || !visited.insert(neighbor) {
@@ -696,7 +846,11 @@ impl HNSWIndex {
         results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
     
         //println!("[search_layer_unfiltered] Done. Returning top {} results: {:?}",results.len(),results.iter().map(|sp| sp.id).collect::<Vec<_>>());
-    
+        if let Some(stats) = stats {
+            stats.visited = visited.len();
+            stats.expanded = expanded;
+        }
+
         Ok(results)
     }
        
@@ -750,7 +904,16 @@ impl HNSWIndex {
             self.ef.max(top_k)
         };
 
-        let mut results = self.search_layer_unfiltered(final_query, current, 0, ef_search, normalize_score_flag)?;
+        let log_enabled = log_unfiltered_enabled();
+        let mut layer_stats = SearchLayerStats::default();
+        let mut results = self.search_layer_unfiltered(
+            final_query,
+            current,
+            0,
+            ef_search,
+            normalize_score_flag,
+            if log_enabled { Some(&mut layer_stats) } else { None },
+        )?;
         results.sort_by(|a, b| {
             a.sort_key
                 .partial_cmp(&b.sort_key)
@@ -758,6 +921,21 @@ impl HNSWIndex {
                 .then_with(|| a.id.cmp(&b.id))
         });
         results.truncate(top_k);
+
+        if log_enabled {
+            let best = results.first().map(|r| r.sort_key).unwrap_or(0.0);
+            let worst = results.last().map(|r| r.sort_key).unwrap_or(0.0);
+            UNFILTERED_SEARCH_AGG.with(|cell| {
+                cell.borrow_mut().record(UnfilteredSample {
+                    ef_search,
+                    visited: layer_stats.visited,
+                    expanded: layer_stats.expanded,
+                    best_score: best,
+                    worst_score: worst,
+                });
+            });
+        }
+
         Ok(results)
     }
 
@@ -1139,7 +1317,16 @@ impl HNSWIndex {
     }
 
     pub fn set_ef_search(&mut self, ef: usize) {
+        if log_unfiltered_enabled() {
+            UNFILTERED_SEARCH_AGG.with(|cell| cell.borrow_mut().flush());
+        }
         self.ef = ef;
+    }
+
+    pub fn flush_unfiltered_search_stats(&self) {
+        if log_unfiltered_enabled() {
+            UNFILTERED_SEARCH_AGG.with(|cell| cell.borrow_mut().flush());
+        }
     }
 
     pub fn max_level_cap(&self) -> usize {

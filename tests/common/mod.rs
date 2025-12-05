@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::convert::TryInto;
+use std::env;
 use std::time::Instant;
 
 use vectordb::payload_storage::filters::Filter;
@@ -8,6 +9,26 @@ use vectordb::segment::segment::Segment;
 use vectordb::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::vector::hnsw::HNSWIndex;
+
+/// Return the first present env var (by key) parsed as usize.
+pub fn env_usize_first(keys: &[&str]) -> Option<usize> {
+    keys.iter().find_map(|k| {
+        env::var(k)
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+    })
+}
+
+/// Return the first present env var (by key) parsed as a comma list of usize.
+pub fn env_usize_list_first(keys: &[&str]) -> Option<Vec<usize>> {
+    keys.iter().find_map(|k| {
+        env::var(k).ok().map(|v| {
+            v.split(',')
+                .filter_map(|s| s.trim().replace('_', "").parse::<usize>().ok())
+                .collect::<Vec<_>>()
+        }).filter(|v| !v.is_empty())
+    })
+}
 
 pub fn vecf(v: &[f32]) -> Vector {
     v.to_vec()

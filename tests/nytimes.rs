@@ -8,6 +8,9 @@ use ndarray::Array2;
 use ndarray_npy::read_npy;
 use serde_json::from_slice;
 
+mod common;
+use common::{env_usize_first, env_usize_list_first};
+
 use vectordb::segment::segment::Segment;
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::vector::hnsw::HNSWIndex;
@@ -20,17 +23,6 @@ fn load_vectors(path: &Path) -> Vec<Vector> {
 fn load_ground_truth(path: &Path) -> Vec<Vec<usize>> {
     let data = fs::read(path).expect("failed to read ground truth json");
     from_slice(&data).expect("failed to parse ground truth json")
-}
-
-fn parse_usize_list(env_key: &str) -> Option<Vec<usize>> {
-    env::var(env_key)
-        .ok()
-        .map(|v| {
-            v.split(',')
-                .filter_map(|s| s.trim().replace('_', "").parse::<usize>().ok())
-                .collect::<Vec<_>>()
-        })
-        .filter(|v| !v.is_empty())
 }
 
 fn ensure_exists(path: &Path) {
@@ -50,28 +42,13 @@ fn nytimes_256_angular_perf_and_recall() {
     let t0 = Instant::now();
     let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
         .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
-    let top_k = env::var("VECTORDB_NYT_TOPK")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20usize);
-    let ef_values = parse_usize_list("VECTORDB_NYT_EF_SEARCH_LIST").unwrap_or_else(|| {
-        env::var("VECTORDB_NYT_EF_SEARCH")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .map(|v| vec![v])
-            .unwrap_or_else(|| vec![32, 64, 128, 256, 512])
-    });
-    let queries_cap = env::var("VECTORDB_NYT_QUERIES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1000usize);
-    let base_cap = env::var("VECTORDB_NYT_BASE_LIMIT")
-        .ok()
-        .and_then(|v| v.parse().ok());
-    let ef_construct = env::var("VECTORDB_NYT_EF_CONSTRUCT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(100usize);
+    let top_k = env_usize_first(&["VECTORDB_TOPK", "VECTORDB_NYT_TOPK"]).unwrap_or(20);
+    let ef_values = env_usize_list_first(&["VECTORDB_EF_SEARCH_LIST", "VECTORDB_NYT_EF_SEARCH_LIST"])
+        .or_else(|| env_usize_first(&["VECTORDB_EF_SEARCH", "VECTORDB_NYT_EF_SEARCH"]).map(|v| vec![v]))
+        .unwrap_or_else(|| vec![32, 64, 128, 256, 512]);
+    let queries_cap = env_usize_first(&["VECTORDB_QUERIES", "VECTORDB_NYT_QUERIES"]).unwrap_or(1000);
+    let base_cap = env_usize_first(&["VECTORDB_BASE_LIMIT", "VECTORDB_NYT_BASE_LIMIT"]);
+    let ef_construct = env_usize_first(&["VECTORDB_EF_CONSTRUCT", "VECTORDB_NYT_EF_CONSTRUCT"]).unwrap_or(100);
 
     let base_path = Path::new(&data_dir).join("base.npy");
     let queries_path = Path::new(&data_dir).join("queries.npy");
@@ -185,6 +162,8 @@ fn nytimes_256_angular_perf_and_recall() {
             total_targets,
             avg_ms
         );
+        // Flush any unfiltered search stats for this sweep so logging is emitted promptly.
+        segment.hnsw().flush_unfiltered_search_stats();
         summary.push((ef_search, recall, avg_ms));
     }
 
