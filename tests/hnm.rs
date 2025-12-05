@@ -226,7 +226,7 @@ fn hnm_filtered_cosine_recall() {
     let top_k = env::var("VECTORDB_HNM_TOPK")
         .ok()
         .and_then(|v| v.replace('_', "").parse().ok());
-    let ef_values = parse_usize_list("VECTORDB_HNM_EF_SEARCH_LIST", &[64, 128, 256]);
+    let ef_values = parse_usize_list("VECTORDB_HNM_EF_SEARCH_LIST", &[32, 64, 128, 256, 512]);
     let queries_cap = env::var("VECTORDB_HNM_QUERIES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -339,6 +339,7 @@ fn hnm_filtered_cosine_recall() {
         segment.hnsw_mut().set_ef_search(ef_search);
         let mut hits = 0usize;
         let mut total_targets = 0usize;
+        let mut per_query_recalls: Vec<f64> = Vec::with_capacity(num_queries);
         let start_search = Instant::now();
         for (qi, case) in prepared_cases.iter().enumerate() {
             let res = segment
@@ -351,7 +352,10 @@ fn hnm_filtered_cosine_recall() {
                 .copied()
                 .collect();
             total_targets += truth.len();
-            hits += res.iter().filter(|r| truth.contains(&r.id)).count();
+            let query_hits = res.iter().filter(|r| truth.contains(&r.id)).count();
+            hits += query_hits;
+            let recall = query_hits as f64 / truth.len().max(1) as f64;
+            per_query_recalls.push(recall);
             if (qi + 1) % 50 == 0 || qi + 1 == num_queries {
                 let partial = hits as f64 / total_targets.max(1) as f64;
                 println!(
@@ -376,6 +380,41 @@ fn hnm_filtered_cosine_recall() {
             total_targets,
             avg_ms
         );
+
+        // Per-query recall stats to understand distribution.
+        per_query_recalls.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let stats = |p: f64| -> f64 {
+            if per_query_recalls.is_empty() {
+                0.0
+            } else {
+                let idx = ((p / 100.0) * (per_query_recalls.len() as f64 - 1.0)).round() as usize;
+                per_query_recalls[idx]
+            }
+        };
+        let mean = per_query_recalls.iter().copied().sum::<f64>() / per_query_recalls.len().max(1) as f64;
+        let p50 = stats(50.0);
+        let p90 = stats(90.0);
+        let p99 = stats(99.0);
+        let min = *per_query_recalls.first().unwrap_or(&0.0);
+        let max = *per_query_recalls.last().unwrap_or(&0.0);
+        let full = per_query_recalls.iter().filter(|&&r| (r - 1.0).abs() < 1e-6).count();
+        let ge_08 = per_query_recalls.iter().filter(|&&r| r >= 0.8).count();
+        let ge_05 = per_query_recalls.iter().filter(|&&r| r >= 0.5).count();
+        println!(
+            "[recall_stats] ef_search={} queries={} mean={:.3} p50={:.3} p90={:.3} p99={:.3} min={:.3} max={:.3} full={} ge_0.8={} ge_0.5={}",
+            ef_search,
+            num_queries,
+            mean,
+            p50,
+            p90,
+            p99,
+            min,
+            max,
+            full,
+            ge_08,
+            ge_05
+        );
+
         summary.push((ef_search, recall, avg_ms));
     }
 

@@ -59,7 +59,7 @@ fn nytimes_256_angular_perf_and_recall() {
             .ok()
             .and_then(|v| v.parse().ok())
             .map(|v| vec![v])
-            .unwrap_or_else(|| vec![128usize])
+            .unwrap_or_else(|| vec![32, 64, 128, 256, 512])
     });
     let queries_cap = env::var("VECTORDB_NYT_QUERIES")
         .ok()
@@ -111,11 +111,19 @@ fn nytimes_256_angular_perf_and_recall() {
 
     println!("🚀 Inserting {} vectors with dataset-aligned IDs...", base.len());
     let start_insert = Instant::now();
+    let mut last_log = start_insert;
     for (i, v) in base.iter().enumerate() {
         let dataset_id = i as u64; // align with ground-truth neighbor IDs (0-based)
         segment.insert_with_id(dataset_id, v.clone(), None).unwrap();
         if i != 0 && i % 1000 == 0 {
-            println!("Inserted {} vectors (+{:?})", i, start_insert.elapsed());
+            let now = Instant::now();
+            println!(
+                "Inserted {} vectors (+{:?}, chunk={:?})",
+                i,
+                now - start_insert,
+                now - last_log
+            );
+            last_log = now;
         }
     }
     let insert_dur = start_insert.elapsed();

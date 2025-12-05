@@ -1,6 +1,8 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::cell::RefCell;
 use rand::seq::IteratorRandom;
 use rand::Rng;
+use crate::utils::payload::PayloadValue;
 use crate::utils::types::{PointId, Vector, DistanceMetric, Score};
 use crate::utils::errors::DBError;
 use crate::payload_storage::stores::PayloadIndex;
@@ -9,6 +11,24 @@ use crate::payload_storage::filters::{Filter, evaluate_filter};
 
 const VERBOSE: bool = false;
 const DEFAULT_EXACT_FALLBACK_THRESHOLD: usize = 256;
+const FILTER_EDGE_LOG_CHUNK: usize = 1000;
+thread_local! {
+    static FILTER_EDGE_TOTAL_KEYS: RefCell<usize> = RefCell::new(0);
+}
+
+#[derive(Default)]
+struct FilterEdgeAgg {
+    count: usize,
+    // Buckets: Bool, Str, Int, Float
+    ns_by_type: [u128; 4],
+    samples: usize,
+    scored: usize,
+    added: usize,
+}
+
+thread_local! {
+    static FILTER_EDGE_STATS: RefCell<FilterEdgeAgg> = RefCell::new(FilterEdgeAgg::default());
+}
 
 #[derive(Clone, Debug)]
 pub struct ScoredPoint {
@@ -312,12 +332,20 @@ impl HNSWIndex {
     
         let mut extra_neighbors = HashSet::new();
         let m = self.m();
-    
+        let log_edges_agg = std::env::var("VECTORDB_LOG_FILTER_EDGES_AGG")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
+
         // Limit how many candidates we sample from the inverted index per key; tie to ef_search.
         let sample_limit: usize = self.ef.max(self.m());
 
         for key in filter_keys {
             if let Some(value) = payload.get(key) {
+                let key_start = if log_edges_agg { Some(std::time::Instant::now()) } else { None };
+                let mut sample_len = 0usize;
+                let mut scored_len = 0usize;
+                let prev_len = extra_neighbors.len();
+
                 // ✅ Try fast exact match via payload index first
                 if let Some(id_set) = payload_index.query_exact(key, value) {
                     let mut rng = rand::rng();
@@ -346,6 +374,7 @@ impl HNSWIndex {
                             })
                         })
                         .collect();
+                    sample_len = scored.len();
 
                     scored.sort_by(|a, b| {
                         if self.metric == DistanceMetric::Dot {
@@ -354,6 +383,7 @@ impl HNSWIndex {
                             a.raw_score.partial_cmp(&b.raw_score).unwrap()
                         }
                     });
+                    scored_len = scored.len();
 
                     for sp in scored.into_iter().take(m) {
                         extra_neighbors.insert(sp.id);
@@ -362,15 +392,95 @@ impl HNSWIndex {
                 // If the inverted-index sample already filled the desired neighbor budget for this key,
                 // skip the fallback search but keep checking other keys.
                 if extra_neighbors.len() >= m {
+                    if let Some(start) = key_start {
+                        let dur = start.elapsed();
+                        if log_edges_agg && sample_len > 0 {
+                            let bucket = match value {
+                                PayloadValue::Bool(_) => 0,
+                                PayloadValue::Str(_) => 1,
+                                PayloadValue::Int(_) => 2,
+                                PayloadValue::Float(_) => 3,
+                                _ => 3,
+                            };
+                            FILTER_EDGE_STATS.with(|cell| {
+                                let mut agg = cell.borrow_mut();
+                                agg.count += 1;
+                                    agg.samples += sample_len;
+                                    agg.scored += scored_len;
+                                    agg.added += extra_neighbors.len().saturating_sub(prev_len);
+                                    agg.ns_by_type[bucket] += dur.as_nanos();
+                                    if agg.count % FILTER_EDGE_LOG_CHUNK == 0 {
+                                        FILTER_EDGE_TOTAL_KEYS.with(|tk| *tk.borrow_mut() += agg.count);
+                                        let cum = FILTER_EDGE_TOTAL_KEYS.with(|tk| *tk.borrow());
+                                        let total_ns: u128 = agg.ns_by_type.iter().sum();
+                                        let to_ms = |ns: u128| (ns as f64) / 1_000_000.0;
+                                        println!(
+                                            "[filter_edges_agg] n={} cum_n={} samples={} scored={} added={} total_ms={:.3} bool_ms={:.3} str_ms={:.3} int_ms={:.3} float_ms={:.3}",
+                                            agg.count,
+                                            cum,
+                                            agg.samples,
+                                            agg.scored,
+                                            agg.added,
+                                            to_ms(total_ns),
+                                            to_ms(agg.ns_by_type[0]),
+                                        to_ms(agg.ns_by_type[1]),
+                                        to_ms(agg.ns_by_type[2]),
+                                        to_ms(agg.ns_by_type[3]),
+                                    );
+                                    *agg = FilterEdgeAgg::default();
+                                }
+                            });
+                        }
+                    }
                     continue;
                 }
                 }
 
                 // ⛔ If the posting list was empty, fall back to unfiltered search to find nearby vectors
                 // and then filter them by this key/value to establish some connectivity.
+                    if let Some(start) = key_start {
+                    let dur = start.elapsed();
+                    if log_edges_agg && sample_len > 0 {
+                        let bucket = match value {
+                            PayloadValue::Bool(_) => 0,
+                            PayloadValue::Str(_) => 1,
+                            PayloadValue::Int(_) => 2,
+                            PayloadValue::Float(_) => 3,
+                            _ => 3,
+                        };
+                        FILTER_EDGE_STATS.with(|cell| {
+                            let mut agg = cell.borrow_mut();
+                            agg.count += 1;
+                                    agg.samples += sample_len;
+                                    agg.scored += scored_len;
+                                    agg.added += extra_neighbors.len().saturating_sub(prev_len);
+                                    agg.ns_by_type[bucket] += dur.as_nanos();
+                                    if agg.count % FILTER_EDGE_LOG_CHUNK == 0 {
+                                        FILTER_EDGE_TOTAL_KEYS.with(|tk| *tk.borrow_mut() += agg.count);
+                                        let cum = FILTER_EDGE_TOTAL_KEYS.with(|tk| *tk.borrow());
+                                        let total_ns: u128 = agg.ns_by_type.iter().sum();
+                                        let to_ms = |ns: u128| (ns as f64) / 1_000_000.0;
+                                        println!(
+                                            "[filter_edges_agg] n={} cum_n={} samples={} scored={} added={} total_ms={:.3} bool_ms={:.3} str_ms={:.3} int_ms={:.3} float_ms={:.3}",
+                                            agg.count,
+                                            cum,
+                                            agg.samples,
+                                            agg.scored,
+                                            agg.added,
+                                            to_ms(total_ns),
+                                    to_ms(agg.ns_by_type[0]),
+                                    to_ms(agg.ns_by_type[1]),
+                                    to_ms(agg.ns_by_type[2]),
+                                    to_ms(agg.ns_by_type[3]),
+                                );
+                                *agg = FilterEdgeAgg::default();
+                            }
+                        });
+                    }
+                }
             }
         }
-    
+
         // Cap the total number of filter-aware neighbors to avoid blowing up degree.
         let cap = m.max(1);
         for neighbor_id in extra_neighbors.into_iter().filter(|id| *id != point_id).take(cap) {
@@ -854,13 +964,18 @@ impl HNSWIndex {
                 Filter::Not(_) | Filter::Compare { .. } => {}
             }
         }
-        if let Some(f) = full_filter {
-            collect_match_ids(f, payload_index, &mut seed_ids);
+        let use_seeds = std::env::var("VECTORDB_DISABLE_FILTER_SEEDS")
+            .map(|v| v == "0" || v.to_lowercase() == "false")
+            .unwrap_or(true);
+        if use_seeds {
+            if let Some(f) = full_filter {
+                collect_match_ids(f, payload_index, &mut seed_ids);
+            }
         }
         let seed_pool_size = seed_ids.len();
         let mut seeds_added = 0usize;
         let mut seeds_accepted = 0usize;
-        if !seed_ids.is_empty() {
+        if use_seeds && !seed_ids.is_empty() {
             for id in seed_ids.iter().copied() {
                 if seeds_added >= seed_limit {
                     break;

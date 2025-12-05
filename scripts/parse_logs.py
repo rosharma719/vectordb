@@ -12,18 +12,28 @@ from pathlib import Path
 
 
 INSERT_RE = re.compile(
-    r"\[insert_timing_chunk\] n=(\d+) avg_hnsw=([\d\.]+)ms avg_payload_idx=([\d\.]+)\u00b5s avg_filter_edges=([\d\.]+)ms avg_total=([\d\.]+)ms"
+    r"\[insert_timing_chunk\] n=(\d+) cum_n=(\d+) avg_hnsw=([\d\.]+)ms avg_payload_idx=([\d\.]+)\u00b5s avg_filter_edges=([\d\.]+)ms avg_total=([\d\.]+)ms chunk_elapsed=([\d\.\w]+)"
 )
 INSERTED_RE = re.compile(r"Inserted (\d+) vectors \(\+([\d\.]+)s\)")
 SEED_RE = re.compile(
     r"\[filter_search_seed\] seeds_pool=(\d+) seeds_added=(\d+) seeds_accepted=(\d+) seeds_in_results=(\d+) final_results=(\d+)"
 )
 EF_RE = re.compile(r"ef_search=(\d+)")
+RECALL_STATS_RE = re.compile(
+    r"\[recall_stats\] ef_search=(\d+) queries=(\d+) mean=([\d\.]+) p50=([\d\.]+) p90=([\d\.]+) p99=([\d\.]+) min=([\d\.]+) max=([\d\.]+) full=(\d+) ge_0\.8=(\d+) ge_0\.5=(\d+)"
+)
+EDGE_AGG_RE = re.compile(
+    r"\[filter_edges_agg\] n=(\d+) cum_n=(\d+) samples=(\d+) scored=(\d+) added=(\d+) total_ms=([\d\.]+) bool_ms=([\d\.]+) str_ms=([\d\.]+) int_ms=([\d\.]+) float_ms=([\d\.]+)"
+)
 
 
 def parse_log(path: Path):
+    if not path.is_file():
+        return [], defaultdict(list), {}, []
     inserts = []
     seeds_by_ef = defaultdict(list)
+    recall_by_ef = {}
+    edge_aggs = []
     last_inserted_time = None
     current_ef = None
     insert_chunk_idx = 0
@@ -36,10 +46,12 @@ def parse_log(path: Path):
                 {
                     "idx": len(inserts),
                     "n": int(m.group(1)),
-                    "hnsw_ms": float(m.group(2)),
-                    "payload_us": float(m.group(3)),
-                    "filter_ms": float(m.group(4)),
-                    "total_ms": float(m.group(5)),
+                    "cum_n": int(m.group(2)),
+                    "hnsw_ms": float(m.group(3)),
+                    "payload_us": float(m.group(4)),
+                    "filter_ms": float(m.group(5)),
+                    "total_ms": float(m.group(6)),
+                    "chunk_elapsed": m.group(7),
                     "delta_s": None,  # filled from INSERTED_RE
                 }
             )
@@ -63,9 +75,37 @@ def parse_log(path: Path):
                 "final_results": int(m.group(5)),
             }
             seeds_by_ef[current_ef].append(record)
+        elif m := RECALL_STATS_RE.search(line):
+            recall_by_ef[int(m.group(1))] = {
+                "queries": int(m.group(2)),
+                "mean": float(m.group(3)),
+                "p50": float(m.group(4)),
+                "p90": float(m.group(5)),
+                "p99": float(m.group(6)),
+                "min": float(m.group(7)),
+                "max": float(m.group(8)),
+                "full": int(m.group(9)),
+                "ge_08": int(m.group(10)),
+                "ge_05": int(m.group(11)),
+            }
+        elif m := EDGE_AGG_RE.search(line):
+            edge_aggs.append(
+                {
+                    "n": int(m.group(1)),
+                    "cum_n": int(m.group(2)),
+                    "samples": int(m.group(3)),
+                    "scored": int(m.group(4)),
+                    "added": int(m.group(5)),
+                    "total_ms": float(m.group(6)),
+                    "bool_ms": float(m.group(7)),
+                    "str_ms": float(m.group(8)),
+                    "int_ms": float(m.group(9)),
+                    "float_ms": float(m.group(10)),
+                }
+            )
 
     inserts = sorted(inserts, key=lambda r: r["idx"])
-    return inserts, seeds_by_ef
+    return inserts, seeds_by_ef, recall_by_ef, edge_aggs
 
 
 def print_table(title: str, headers, rows):
@@ -107,6 +147,49 @@ def summarize_seeds(seeds_by_ef):
     return rows
 
 
+def summarize_recall(recall_by_ef):
+    rows = []
+    for ef, stats in sorted(recall_by_ef.items()):
+        q = stats["queries"]
+        rows.append(
+            {
+                "ef": ef,
+                "mean": f"{stats['mean']:.3f}",
+                "p50": f"{stats['p50']:.3f}",
+                "p90": f"{stats['p90']:.3f}",
+                "p99": f"{stats['p99']:.3f}",
+                "min": f"{stats['min']:.3f}",
+                "max": f"{stats['max']:.3f}",
+                "full": f"{stats['full']}/{q}",
+                ">=0.8": f"{stats['ge_08']}/{q}",
+                ">=0.5": f"{stats['ge_05']}/{q}",
+            }
+        )
+    return rows
+
+
+def summarize_edges(edge_aggs):
+    rows = []
+    for e in edge_aggs:
+        per_key_ms = e["total_ms"] / e["n"] if e["n"] else 0.0
+        rows.append(
+            {
+                "n_keys": e["n"],
+                "cum_n": e.get("cum_n", ""),
+                "samples": e["samples"],
+                "scored": e["scored"],
+                "added": e["added"],
+                "total_ms": f"{e['total_ms']:.3f}",
+                "per_key_ms": f"{per_key_ms:.3f}",
+                "bool_ms": f"{e['bool_ms']:.3f}",
+                "str_ms": f"{e['str_ms']:.3f}",
+                "int_ms": f"{e['int_ms']:.3f}",
+                "float_ms": f"{e['float_ms']:.3f}",
+            }
+        )
+    return rows
+
+
 def main():
     if len(sys.argv) != 2:
         print(__doc__)
@@ -116,10 +199,10 @@ def main():
         print(f"Log not found: {path}")
         sys.exit(1)
 
-    inserts, seeds_by_ef = parse_log(path)
+    inserts, seeds_by_ef, recall_by_ef, edge_aggs = parse_log(path)
     print_table(
         "Insert Timing (per chunk)",
-        ["n", "hnsw_ms", "filter_ms", "total_ms", "delta_s"],
+        ["n", "cum_n", "hnsw_ms", "filter_ms", "total_ms", "delta_s", "chunk_elapsed"],
         inserts,
     )
 
@@ -128,6 +211,20 @@ def main():
         "Seed Stats by ef_search (averages)",
         ["ef", "samples", "pool", "added", "accepted", "in_results", "final_results"],
         seed_rows,
+    )
+
+    recall_rows = summarize_recall(recall_by_ef)
+    print_table(
+        "Recall Stats by ef_search",
+        ["ef", "mean", "p50", "p90", "p99", "min", "max", "full", ">=0.8", ">=0.5"],
+        recall_rows,
+    )
+
+    edge_rows = summarize_edges(edge_aggs)
+    print_table(
+        "Filter Edge Aggregates",
+        ["n_keys", "cum_n", "samples", "scored", "added", "total_ms", "per_key_ms", "bool_ms", "str_ms", "int_ms", "float_ms"],
+        edge_rows,
     )
 
 

@@ -30,13 +30,15 @@
 - Test: `hnm_filtered_cosine_recall` (ignored). Run with `cargo test --release hnm_filtered_cosine_recall -- --ignored --nocapture`.
 - Knobs:
   - `VECTORDB_HNM_TOPK` (defaults to dataset truth length)
-  - `VECTORDB_HNM_EF_SEARCH_LIST` (comma list; default `64,128,256`)
+  - `VECTORDB_HNM_EF_SEARCH_LIST` (comma list; default `32,64,128,256,512`)
   - `VECTORDB_HNM_QUERIES` (default `1000`)
   - `VECTORDB_HNM_BASE_LIMIT` to cap inserts
   - `VECTORDB_HNM_EF_CONSTRUCT` (default `200`)
   - `VECTORDB_FILTER_EDGES` to toggle filter-aware edge construction (`0`/`false` to disable; default disabled)
-  - `VECTORDB_FILTER_KEYS` to allowlist payload keys (comma list) for filter-aware edges; defaults to all indexable scalars when edges are enabled
-  - `VECTORDB_LOG_FILTER_SEED` to log per-query seeding stats (seed pool/added/accepted/in-results)
+- `VECTORDB_FILTER_KEYS` to allowlist payload keys (comma list) for filter-aware edges; defaults to all indexable scalars when edges are enabled
+- `VECTORDB_FILTER_MAX_KEYS` to cap how many payload keys per point get filter-aware edges; keys are ordered Bool → Str → Int → Float, then name, before truncation (default unlimited)
+  - `VECTORDB_DISABLE_FILTER_SEEDS` to turn off seeding the beam from the inverted index (default: seeds enabled)
+- `VECTORDB_LOG_FILTER_SEED` to log per-query seeding stats (seed pool/added/accepted/in-results); `VECTORDB_LOG_FILTER_EDGES_AGG` for aggregated per-1000 key stats (ms by type)
   - `VECTORDB_LOG_INSERT_TIMING` to emit per-5k insert timing chunks (see `segment` target logs/STDOUT)
   - Filtered search behavior:
     - Beam seeds are pulled from inverted-index matches for equality filters (AND -> intersection, OR -> union), capped at `ef_search`.
@@ -48,4 +50,4 @@
 - Data source: `open-vdb/nytimes-256-angular` dataset; load configs `train` (base vectors), `test` (queries), `neighbors` (ground truth).
 - Files expected under `VECTORDB_NYT_DATA_DIR` (default `data/nytimes-256-angular`): `base.npy`, `queries.npy`, `ground_truth.json`. See README for the download script (requires `HF_TOKEN` with repo read access).
 - Test: `nytimes_256_angular_perf_and_recall` (ignored). Run with `cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocapture`.
-- Knobs: `VECTORDB_NYT_TOPK` (default `20`), `VECTORDB_NYT_EF_SEARCH` (default `128`) or `VECTORDB_NYT_EF_SEARCH_LIST` for sweeps (e.g., `16,32,64,128,256`), `VECTORDB_NYT_QUERIES` (default `1000`), `VECTORDB_NYT_EF_CONSTRUCT` (default `100`), `VECTORDB_NYT_BASE_LIMIT` to cap inserts for faster iteration.
+- Knobs: `VECTORDB_NYT_TOPK` (default `20`), `VECTORDB_NYT_EF_SEARCH` (default `128`) or `VECTORDB_NYT_EF_SEARCH_LIST` for sweeps (default `32,64,128,256,512`), `VECTORDB_NYT_QUERIES` (default `1000`), `VECTORDB_NYT_EF_CONSTRUCT` (default `100`), `VECTORDB_NYT_BASE_LIMIT` to cap inserts for faster iteration.

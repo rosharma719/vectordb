@@ -32,6 +32,7 @@ struct InsertTiming {
 
 thread_local! {
     static INSERT_TIMINGS: RefCell<InsertTiming> = RefCell::new(InsertTiming::default());
+    static INSERT_TOTAL: RefCell<usize> = RefCell::new(0);
 }
 
 impl Segment {
@@ -61,6 +62,7 @@ impl Segment {
         let log_timing = Self::log_insert_timing();
         let total_start = if log_timing { Some(Instant::now()) } else { None };
         let mut last = total_start;
+        let mut chunk_start = total_start;
         let mut hnsw_dur = Duration::from_millis(0);
         let mut payload_idx_dur = Duration::from_millis(0);
         let mut filter_edges_dur = Duration::from_millis(0);
@@ -110,28 +112,35 @@ impl Segment {
             // Accumulate and log every CHUNK inserts to avoid log spam.
             const CHUNK: usize = 5000;
             INSERT_TIMINGS.with(|cell| {
-                let mut s = cell.borrow_mut();
-                s.count += 1;
-                s.hnsw += hnsw_dur;
-                s.payload_idx += payload_idx_dur;
-                s.filter_edges += filter_edges_dur;
-                s.total += total;
-                if s.count % CHUNK == 0 {
-                    let c = s.count as u32;
-                    let msg = format!(
-                        "[insert_timing_chunk] n={} avg_hnsw={:?} avg_payload_idx={:?} avg_filter_edges={:?} avg_total={:?}",
-                        s.count,
-                        s.hnsw / c,
-                        s.payload_idx / c,
-                        s.filter_edges / c,
-                        s.total / c
-                    );
-                    // Log if a logger is configured, and also print so tests with --nocapture see it.
-                    log::info!(target: "segment", "{}", msg);
-                    println!("{}", msg);
-                    // Reset for next chunk
-                    *s = InsertTiming::default();
-                }
+                INSERT_TOTAL.with(|tc| {
+                    let mut s = cell.borrow_mut();
+                    let mut total_count = tc.borrow_mut();
+                    s.count += 1;
+                    s.hnsw += hnsw_dur;
+                    s.payload_idx += payload_idx_dur;
+                    s.filter_edges += filter_edges_dur;
+                    s.total += total;
+                    if s.count % CHUNK == 0 {
+                        let c = s.count as u32;
+                        *total_count += s.count;
+                        let chunk_elapsed = chunk_start.map(|cs| cs.elapsed()).unwrap_or_default();
+                        let msg = format!(
+                            "[insert_timing_chunk] n={} cum_n={} avg_hnsw={:?} avg_payload_idx={:?} avg_filter_edges={:?} avg_total={:?} chunk_elapsed={:?}",
+                            s.count,
+                            *total_count,
+                            s.hnsw / c,
+                            s.payload_idx / c,
+                            s.filter_edges / c,
+                            s.total / c,
+                            chunk_elapsed
+                        );
+                        log::info!(target: "segment", "{}", msg);
+                        println!("{}", msg);
+                        // Reset for next chunk
+                        *s = InsertTiming::default();
+                        chunk_start = Some(Instant::now());
+                    }
+                });
             });
         }
 
@@ -333,7 +342,8 @@ impl Segment {
             .unwrap_or(false)
     }
 
-    /// Build the list of payload keys to use for filter-aware edges, honoring an optional allowlist.
+    /// Build the list of payload keys to use for filter-aware edges, honoring an optional allowlist,
+    /// a max count, and a type preference (Bool -> Str -> Int -> Float).
     fn filter_keys_for_payload(payload: &Payload) -> Vec<String> {
         let allow: Option<HashSet<String>> = env::var("VECTORDB_FILTER_KEYS")
             .ok()
@@ -343,19 +353,42 @@ impl Segment {
                     .filter(|s| !s.is_empty())
                     .collect()
             });
+        let max_keys: Option<usize> = env::var("VECTORDB_FILTER_MAX_KEYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0);
 
-        payload
+        fn type_rank(v: &PayloadValue) -> usize {
+            match v {
+                PayloadValue::Bool(_) => 0,
+                PayloadValue::Str(_) => 1,
+                PayloadValue::Int(_) => 2,
+                PayloadValue::Float(_) => 3,
+                _ => 4,
+            }
+        }
+
+        let mut keys_with_rank: Vec<(usize, String)> = payload
             .0
             .iter()
-            .filter(|(k, v)| {
-                matches!(
+            .filter_map(|(k, v)| {
+                if matches!(
                     v,
                     PayloadValue::Int(_) | PayloadValue::Float(_) | PayloadValue::Str(_) | PayloadValue::Bool(_)
-                ) && allow
-                    .as_ref()
-                    .map_or(true, |set| set.contains(*k))
+                ) && allow.as_ref().map_or(true, |set| set.contains(k))
+                {
+                    Some((type_rank(v), k.clone()))
+                } else {
+                    None
+                }
             })
-            .map(|(k, _)| k.clone())
-            .collect()
+            .collect();
+
+        // Prefer cheaper/more selective types first, then deterministic key order.
+        keys_with_rank.sort_by(|a, b| a.cmp(b));
+        if let Some(cap) = max_keys {
+            keys_with_rank.truncate(cap);
+        }
+        keys_with_rank.into_iter().map(|(_, k)| k).collect()
     }
 }

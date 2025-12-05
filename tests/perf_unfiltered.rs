@@ -20,10 +20,18 @@ fn bench_unfiltered_large_scale() {
 
     println!("\n🚀 Inserting {} vectors for large-scale unfiltered benchmark", size);
     let start_insert = Instant::now();
+    let mut last_log = start_insert;
     for i in 0..size {
         segment.insert(generate_vector_dim(i, dim), None).unwrap();
         if i != 0 && i % 1000 == 0 {
-            println!("Inserted {} vectors... (+{:?})", i, start_insert.elapsed());
+            let now = Instant::now();
+            println!(
+                "Inserted {} vectors... (+{:?}, chunk={:?})",
+                i,
+                now - start_insert,
+                now - last_log
+            );
+            last_log = now;
         }
     }
     let insert_dur = start_insert.elapsed();
@@ -33,7 +41,7 @@ fn bench_unfiltered_large_scale() {
         size, insert_dur, vps
     );
 
-    let queries: Vec<_> = (0..5).map(|i| generate_vector_dim(i + size, dim)).collect();
+    let queries: Vec<_> = (0..500).map(|i| generate_vector_dim(i + size, dim)).collect();
     let start_search = Instant::now();
     for q in &queries {
         let res = segment.search(q, 20).unwrap();
@@ -71,10 +79,18 @@ fn bench_unfiltered_param_scale() {
         size, dim
     );
     let start_insert = Instant::now();
+    let mut last_log = start_insert;
     for i in 0..size {
         segment.insert(generate_vector_dim(i, dim), None).unwrap();
         if i != 0 && i % 5000 == 0 {
-            println!("Inserted {} vectors... (+{:?})", i, start_insert.elapsed());
+            let now = Instant::now();
+            println!(
+                "Inserted {} vectors... (+{:?}, chunk={:?})",
+                i,
+                now - start_insert,
+                now - last_log
+            );
+            last_log = now;
         }
     }
     let insert_dur = start_insert.elapsed();
@@ -84,7 +100,7 @@ fn bench_unfiltered_param_scale() {
         size, insert_dur, vps
     );
 
-    let queries: Vec<_> = (0..5).map(|i| generate_vector_dim(i + size, dim)).collect();
+    let queries: Vec<_> = (0..500).map(|i| generate_vector_dim(i + size, dim)).collect();
     let start_search = Instant::now();
     for q in &queries {
         let res = segment.search(q, 20).unwrap();
@@ -113,10 +129,18 @@ fn bench_unfiltered_million_scale() {
 
     println!("\n🚀 Inserting {} vectors for million-scale unfiltered benchmark", size);
     let start_insert = Instant::now();
+    let mut last_log = start_insert;
     for i in 0..size {
         segment.insert(generate_vector_dim(i, dim), None).unwrap();
         if i != 0 && i % 20000 == 0 {
-            println!("Inserted {} vectors... (+{:?})", i, start_insert.elapsed());
+            let now = Instant::now();
+            println!(
+                "Inserted {} vectors... (+{:?}, chunk={:?})",
+                i,
+                now - start_insert,
+                now - last_log
+            );
+            last_log = now;
         }
     }
     let insert_dur = start_insert.elapsed();
@@ -126,7 +150,7 @@ fn bench_unfiltered_million_scale() {
         size, insert_dur, vps
     );
 
-    let queries: Vec<_> = (0..5).map(|i| generate_vector_dim(i + size, dim)).collect();
+    let queries: Vec<_> = (0..500).map(|i| generate_vector_dim(i + size, dim)).collect();
     let start_search = Instant::now();
     for q in &queries {
         let res = segment.search(q, 20).unwrap();
