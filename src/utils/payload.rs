@@ -2,10 +2,11 @@
 use std::collections::HashMap;
 use crate::utils::errors::DBError;
 use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize};
 
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PayloadValue {
     Int(i64),
     Float(OrderedFloat<f64>),
@@ -17,7 +18,7 @@ pub enum PayloadValue {
     ListBool(Vec<bool>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Payload(pub HashMap<String, PayloadValue>);
 
 

@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::PointId;
+use serde::{Deserialize, Serialize};
 
 /// Inverted index: field_name -> field_value -> set of PointIds
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct PayloadIndex {
     index: HashMap<String, HashMap<PayloadValue, HashSet<PointId>>>,
 }

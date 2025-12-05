@@ -1,15 +1,21 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use std::path::Path;
 use std::thread_local;
 use std::time::{Duration, Instant};
+
+use anyhow::anyhow;
+use serde::{Deserialize, Serialize};
 
 use crate::payload_storage::filters::Filter;
 use crate::payload_storage::stores::PayloadIndex;
 use crate::utils::errors::DBError;
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::{PointId, Vector};
-use crate::vector::hnsw::{HNSWIndex, ScoredPoint};
+use crate::vector::hnsw::{HNSWIndex, HnswSnapshot, ScoredPoint};
 
 /// A segment is the core unit that wraps vector storage, indexing, payloads, and deletion.
 pub struct Segment {
@@ -17,6 +23,15 @@ pub struct Segment {
     payload_index: PayloadIndex,
     payloads: HashMap<PointId, Payload>,
     // This set is maintained in parallel with the HNSW deletion set.
+    deleted: HashSet<PointId>,
+    next_id: PointId,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SegmentSnapshot {
+    hnsw: HnswSnapshot,
+    payload_index: PayloadIndex,
+    payloads: HashMap<PointId, Payload>,
     deleted: HashSet<PointId>,
     next_id: PointId,
 }
@@ -340,6 +355,37 @@ impl Segment {
         env::var("VECTORDB_LOG_INSERT_TIMING")
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false)
+    }
+
+    /// Persist the entire segment (graph, vectors, payloads, and inverted index) to disk.
+    pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), DBError> {
+        let snapshot = SegmentSnapshot {
+            hnsw: self.hnsw.to_snapshot(),
+            payload_index: self.payload_index.clone(),
+            payloads: self.payloads.clone(),
+            deleted: self.deleted.clone(),
+            next_id: self.next_id,
+        };
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        bincode::serialize_into(&mut writer, &snapshot)
+            .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+        Ok(())
+    }
+
+    /// Restore a segment that was previously persisted with `save_to_path`.
+    pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let snapshot: SegmentSnapshot = bincode::deserialize_from(&mut reader)
+            .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+        Ok(Self {
+            hnsw: HNSWIndex::from_snapshot(snapshot.hnsw),
+            payload_index: snapshot.payload_index,
+            payloads: snapshot.payloads,
+            deleted: snapshot.deleted,
+            next_id: snapshot.next_id,
+        })
     }
 
     /// Build the list of payload keys to use for filter-aware edges, honoring an optional allowlist,

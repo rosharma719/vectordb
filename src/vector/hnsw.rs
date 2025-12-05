@@ -1,8 +1,15 @@
-use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::cell::RefCell;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use std::path::Path;
 use std::sync::OnceLock;
+
 use rand::seq::IteratorRandom;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
+
+use anyhow::anyhow;
 use crate::utils::payload::PayloadValue;
 use crate::utils::types::{PointId, Vector, DistanceMetric, Score};
 use crate::utils::errors::DBError;
@@ -229,6 +236,25 @@ impl Ord for ResultPoint {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.0.sort_key.partial_cmp(&other.0.sort_key).unwrap()
     }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct HnswSnapshot {
+    pub layers: HashMap<usize, HashMap<PointId, Vec<PointId>>>,
+    pub vectors: HashMap<PointId, Vector>,
+    pub levels: HashMap<PointId, usize>,
+    pub entry_point: Option<PointId>,
+    pub metric: DistanceMetric,
+    pub m: usize,
+    pub ef: usize,
+    pub ef_construct: usize,
+    pub max_level_cap: usize,
+    pub level_scale: f64,
+    pub current_max_level: usize,
+    pub dim: usize,
+    pub deleted: HashSet<PointId>,
+    pub exact_fallback_enabled: bool,
+    pub exact_fallback_threshold: usize,
 }
 
 pub struct HNSWIndex {
@@ -1412,5 +1438,61 @@ impl HNSWIndex {
             }
             _ => vec.clone(),
         }
+    }
+
+    pub fn to_snapshot(&self) -> HnswSnapshot {
+        HnswSnapshot {
+            layers: self.layers.clone(),
+            vectors: self.vectors.clone(),
+            levels: self.levels.clone(),
+            entry_point: self.entry_point,
+            metric: self.metric,
+            m: self.m,
+            ef: self.ef,
+            ef_construct: self.ef_construct,
+            max_level_cap: self.max_level_cap,
+            level_scale: self.level_scale,
+            current_max_level: self.current_max_level,
+            dim: self.dim,
+            deleted: self.deleted.clone(),
+            exact_fallback_enabled: self.exact_fallback_enabled,
+            exact_fallback_threshold: self.exact_fallback_threshold,
+        }
+    }
+
+    pub fn from_snapshot(snapshot: HnswSnapshot) -> Self {
+        Self {
+            layers: snapshot.layers,
+            vectors: snapshot.vectors,
+            levels: snapshot.levels,
+            entry_point: snapshot.entry_point,
+            metric: snapshot.metric,
+            m: snapshot.m,
+            ef: snapshot.ef,
+            ef_construct: snapshot.ef_construct,
+            max_level_cap: snapshot.max_level_cap,
+            level_scale: snapshot.level_scale,
+            current_max_level: snapshot.current_max_level,
+            dim: snapshot.dim,
+            deleted: snapshot.deleted,
+            exact_fallback_enabled: snapshot.exact_fallback_enabled,
+            exact_fallback_threshold: snapshot.exact_fallback_threshold,
+        }
+    }
+
+    pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), DBError> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        bincode::serialize_into(&mut writer, &self.to_snapshot())
+            .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+        Ok(())
+    }
+
+    pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let snapshot: HnswSnapshot = bincode::deserialize_from(&mut reader)
+            .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+        Ok(Self::from_snapshot(snapshot))
     }
 }

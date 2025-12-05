@@ -221,6 +221,28 @@ struct PreparedCase {
 #[test]
 #[ignore]
 fn hnm_filtered_cosine_recall() {
+    let persist_path = env::var("VECTORDB_HNM_PERSIST_PATH").ok();
+    run_hnm_filtered_cosine_recall(persist_path, false);
+}
+
+#[test]
+#[ignore]
+fn hnm_build_and_persist_snapshot_only() {
+    // Build the index and persist it, skip recall to save time.
+    let persist_path = env::var("VECTORDB_HNM_PERSIST_PATH")
+        .expect("set VECTORDB_HNM_PERSIST_PATH to save the snapshot");
+    run_hnm_filtered_cosine_recall(Some(persist_path), true);
+}
+
+#[test]
+#[ignore]
+fn hnm_recall_from_snapshot() {
+    let path = env::var("VECTORDB_HNM_PERSIST_PATH")
+        .expect("set VECTORDB_HNM_PERSIST_PATH to load the snapshot");
+    run_hnm_recall_only(&path);
+}
+
+fn run_hnm_filtered_cosine_recall(persist_path: Option<String>, skip_recall: bool) {
     let t0 = Instant::now();
     let data_dir = env::var("VECTORDB_HNM_DATA_DIR").unwrap_or_else(|_| "data/hnm".to_string());
     let top_k = env::var("VECTORDB_HNM_TOPK")
@@ -327,6 +349,18 @@ fn hnm_filtered_cosine_recall() {
         insert_ms
     );
 
+    if let Some(path) = persist_path.clone() {
+        println!("💾 Persisting H&M segment to {} ...", path);
+        segment
+            .save_to_path(&path)
+            .expect("failed to persist H&M segment");
+        println!("✅ Saved H&M segment to {}", path);
+    }
+
+    if skip_recall {
+        return;
+    }
+
     let num_queries = prepared_cases.len();
     println!(
         "🔍 Sweeping ef_search over {:?} for {} queries (top_k={})...",
@@ -415,6 +449,144 @@ fn hnm_filtered_cosine_recall() {
             ge_05
         );
 
+        summary.push((ef_search, recall, avg_ms));
+    }
+
+    println!("\nSummary (ef_search -> recall, ms/query):");
+    for (ef, recall, ms) in summary {
+        println!("  {} -> {:.3}, {:.3} ms/query", ef, recall, ms);
+    }
+}
+
+fn run_hnm_recall_only(persist_path: &str) {
+    let t0 = Instant::now();
+    let data_dir = env::var("VECTORDB_HNM_DATA_DIR").unwrap_or_else(|_| "data/hnm".to_string());
+    let top_k = env::var("VECTORDB_HNM_TOPK")
+        .ok()
+        .and_then(|v| v.replace('_', "").parse().ok());
+    let ef_values = parse_usize_list("VECTORDB_HNM_EF_SEARCH_LIST", &[32, 64, 128, 256, 512]);
+    let queries_cap = env::var("VECTORDB_HNM_QUERIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000usize);
+
+    let tests_path = Path::new(&data_dir).join("tests.jsonl");
+    assert!(tests_path.exists(), "missing {}", tests_path.display());
+
+    // Load only the test cases; vectors/payloads come from the persisted segment.
+    let raw_tests = load_test_cases(&tests_path);
+    println!("⏱️  Tests loaded in {:?}", t0.elapsed());
+
+    let default_topk = raw_tests
+        .first()
+        .map(|c| c.closest_ids.len())
+        .unwrap_or(10);
+    let top_k = top_k.unwrap_or(default_topk);
+
+    let prepared_cases: Vec<PreparedCase> = raw_tests
+        .into_iter()
+        .take(queries_cap)
+        .map(|raw| {
+            let filter = if raw.conditions.is_null() {
+                None
+            } else {
+                Some(parse_condition(&raw.conditions).expect("failed to parse filter conditions"))
+            };
+            let truth_ids = raw
+                .closest_ids
+                .into_iter()
+                .take(top_k)
+                .map(|id| id as u64)
+                .collect();
+            PreparedCase {
+                query: raw.query,
+                filter,
+                truth_ids,
+            }
+        })
+        .collect();
+
+    println!("💾 Loading persisted H&M segment from {} ...", persist_path);
+    let mut segment =
+        Segment::load_from_path(persist_path).expect("failed to load persisted H&M segment");
+    println!(
+        "✅ Loaded persisted segment with {} payloads, ef_search={}",
+        segment.payloads().len(),
+        segment.hnsw().ef()
+    );
+
+    let num_queries = prepared_cases.len();
+    let mut summary: Vec<(usize, f64, f64)> = Vec::new();
+    for &ef in &ef_values {
+        let ef_search = ef.max(top_k);
+        segment.hnsw_mut().set_ef_search(ef_search);
+        let mut hits = 0usize;
+        let mut total_targets = 0usize;
+        let mut per_query_recalls: Vec<f64> = Vec::with_capacity(num_queries);
+        let start_search = Instant::now();
+        for (qi, case) in prepared_cases.iter().enumerate() {
+            let res = segment
+                .search_with_filter(&case.query, top_k, case.filter.as_ref())
+                .unwrap();
+            let truth: HashSet<_> = case.truth_ids.iter().copied().collect();
+            total_targets += truth.len();
+            let query_hits = res.iter().filter(|r| truth.contains(&r.id)).count();
+            hits += query_hits;
+            let recall = query_hits as f64 / truth.len().max(1) as f64;
+            per_query_recalls.push(recall);
+            if (qi + 1) % 50 == 0 || qi + 1 == num_queries {
+                let partial = hits as f64 / total_targets.max(1) as f64;
+                println!(
+                    "  progress: query {}/{} (ef_search={}) cumulative recall={:.3}",
+                    qi + 1,
+                    num_queries,
+                    ef_search,
+                    partial
+                );
+            }
+        }
+        let search_dur = start_search.elapsed();
+        let avg_ms = search_dur.as_secs_f64() * 1000.0 / num_queries as f64;
+        let recall = hits as f64 / total_targets.max(1) as f64;
+        let mean = per_query_recalls.iter().copied().sum::<f64>() / num_queries.max(1) as f64;
+        let mut sorted = per_query_recalls.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let idx = |p: f64| -> usize {
+            let n = sorted.len();
+            (((p / 100.0) * (n.saturating_sub(1) as f64)).round() as usize).min(n.saturating_sub(1))
+        };
+        let p50 = sorted.get(idx(50.0)).copied().unwrap_or(0.0);
+        let p90 = sorted.get(idx(90.0)).copied().unwrap_or(0.0);
+        let p99 = sorted.get(idx(99.0)).copied().unwrap_or(0.0);
+        let min = sorted.first().copied().unwrap_or(0.0);
+        let max = sorted.last().copied().unwrap_or(0.0);
+        let full = per_query_recalls.iter().filter(|&&r| (r - 1.0).abs() < 1e-6).count();
+        let ge_08 = per_query_recalls.iter().filter(|&&r| r >= 0.8).count();
+        let ge_05 = per_query_recalls.iter().filter(|&&r| r >= 0.5).count();
+        println!(
+            "[recall_stats] ef_search={} queries={} mean={:.3} p50={:.3} p90={:.3} p99={:.3} min={:.3} max={:.3} full={} ge_0.8={} ge_0.5={}",
+            ef_search,
+            num_queries,
+            mean,
+            p50,
+            p90,
+            p99,
+            min,
+            max,
+            full,
+            ge_08,
+            ge_05
+        );
+        println!(
+            "🎯 [ef_search={}] recall@{}: {:.3} over {} queries (hits {}/{}) | avg {:.3} ms/query",
+            ef_search,
+            top_k,
+            recall,
+            num_queries,
+            hits,
+            total_targets,
+            avg_ms
+        );
         summary.push((ef_search, recall, avg_ms));
     }
 

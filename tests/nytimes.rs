@@ -39,6 +39,27 @@ fn ensure_exists(path: &Path) {
 #[test]
 #[ignore]
 fn nytimes_256_angular_perf_and_recall() {
+    let persist_path = env::var("VECTORDB_NYT_PERSIST_PATH").ok();
+    run_nytimes_perf_and_recall(persist_path, false);
+}
+
+#[test]
+#[ignore]
+fn nytimes_build_and_persist_snapshot_only() {
+    let persist_path = env::var("VECTORDB_NYT_PERSIST_PATH")
+        .expect("set VECTORDB_NYT_PERSIST_PATH to save the snapshot");
+    run_nytimes_perf_and_recall(Some(persist_path), true);
+}
+
+#[test]
+#[ignore]
+fn nytimes_recall_from_snapshot() {
+    let path = env::var("VECTORDB_NYT_PERSIST_PATH")
+        .expect("set VECTORDB_NYT_PERSIST_PATH to load the snapshot");
+    run_nytimes_recall_only(&path);
+}
+
+fn run_nytimes_perf_and_recall(persist_path: Option<String>, skip_recall: bool) {
     let t0 = Instant::now();
     let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
         .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
@@ -112,6 +133,18 @@ fn nytimes_256_angular_perf_and_recall() {
         insert_ms
     );
 
+    if let Some(path) = persist_path.clone() {
+        println!("💾 Persisting NYTimes segment to {} ...", path);
+        segment
+            .save_to_path(&path)
+            .expect("failed to persist NYTimes segment");
+        println!("✅ Saved NYTimes segment to {}", path);
+    }
+
+    if skip_recall {
+        return;
+    }
+
     let num_queries = queries.len().min(queries_cap);
     println!(
         "🔍 Sweeping ef_search over {:?} for {} queries (top_k={})...",
@@ -163,6 +196,94 @@ fn nytimes_256_angular_perf_and_recall() {
             avg_ms
         );
         // Flush any unfiltered search stats for this sweep so logging is emitted promptly.
+        segment.hnsw().flush_unfiltered_search_stats();
+        summary.push((ef_search, recall, avg_ms));
+    }
+
+    println!("\nSummary (ef_search -> recall, ms/query):");
+    for (ef, recall, ms) in summary {
+        println!("  {} -> {:.3}, {:.3} ms/query", ef, recall, ms);
+    }
+}
+
+fn run_nytimes_recall_only(persist_path: &str) {
+    let t0 = Instant::now();
+    let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
+        .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
+    let top_k = env_usize_first(&["VECTORDB_TOPK", "VECTORDB_NYT_TOPK"]).unwrap_or(20);
+    let ef_values = env_usize_list_first(&["VECTORDB_EF_SEARCH_LIST", "VECTORDB_NYT_EF_SEARCH_LIST"])
+        .or_else(|| env_usize_first(&["VECTORDB_EF_SEARCH", "VECTORDB_NYT_EF_SEARCH"]).map(|v| vec![v]))
+        .unwrap_or_else(|| vec![32, 64, 128, 256, 512]);
+    let queries_cap = env_usize_first(&["VECTORDB_QUERIES", "VECTORDB_NYT_QUERIES"]).unwrap_or(1000);
+
+    let queries_path = Path::new(&data_dir).join("queries.npy");
+    let truth_path = Path::new(&data_dir).join("ground_truth.json");
+    ensure_exists(&queries_path);
+    ensure_exists(&truth_path);
+
+    let queries = load_vectors(&queries_path);
+    let ground_truth = load_ground_truth(&truth_path);
+    assert_eq!(ground_truth.len(), queries.len(), "ground truth length must match queries");
+    println!("⏱️  Queries and truth loaded in {:?}", t0.elapsed());
+
+    println!("💾 Loading persisted NYTimes segment from {} ...", persist_path);
+    let mut segment =
+        Segment::load_from_path(persist_path).expect("failed to load persisted NYTimes segment");
+    println!(
+        "✅ Loaded persisted segment with {} vectors (payloads={})",
+        segment.hnsw().len(),
+        segment.payloads().len()
+    );
+
+    let num_queries = queries.len().min(queries_cap);
+    println!(
+        "🔍 Sweeping ef_search over {:?} for {} queries (top_k={})...",
+        ef_values, num_queries, top_k
+    );
+
+    let mut summary: Vec<(usize, f64, f64)> = Vec::new();
+    for &ef in &ef_values {
+        let ef_search = ef.max(top_k);
+        segment.hnsw_mut().set_ef_search(ef_search);
+        let mut hits = 0usize;
+        let mut total_targets = 0usize;
+        let start_search = Instant::now();
+        for (qi, q) in queries.iter().take(num_queries).enumerate() {
+            let approx = segment.search(q, top_k).unwrap();
+            let truth = &ground_truth[qi];
+            let truth_k = truth.len().min(top_k);
+            let truth_set: HashSet<_> = truth
+                .iter()
+                .take(truth_k)
+                // Ground truth IDs are 0-based row indices.
+                .map(|&id| id as u64)
+                .collect();
+            total_targets += truth_set.len();
+            hits += approx.iter().filter(|r| truth_set.contains(&r.id)).count();
+            if (qi + 1) % 100 == 0 || qi + 1 == num_queries {
+                let partial_recall = hits as f64 / total_targets.max(1) as f64;
+                println!(
+                    "  progress: query {}/{} (ef_search={}) cumulative recall={:.3}",
+                    qi + 1,
+                    num_queries,
+                    ef_search,
+                    partial_recall
+                );
+            }
+        }
+        let search_dur = start_search.elapsed();
+        let avg_ms = search_dur.as_secs_f64() * 1000.0 / num_queries as f64;
+        let recall = hits as f64 / total_targets.max(1) as f64;
+        println!(
+            "🎯 [ef_search={}] recall@{}: {:.3} over {} queries (hits {}/{}) | avg {:.3} ms/query",
+            ef_search,
+            top_k,
+            recall,
+            num_queries,
+            hits,
+            total_targets,
+            avg_ms
+        );
         segment.hnsw().flush_unfiltered_search_stats();
         summary.push((ef_search, recall, avg_ms));
     }
