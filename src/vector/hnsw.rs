@@ -1,9 +1,9 @@
 use std::cell::RefCell;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use rand::seq::IteratorRandom;
 use rand::Rng;
@@ -37,6 +37,9 @@ static DISABLE_EARLY_EXIT: OnceLock<bool> = OnceLock::new();
 static SEARCH_EXPANSION_MULT: OnceLock<usize> = OnceLock::new();
 static SEARCH_EXPANSION_CAP: OnceLock<Option<usize>> = OnceLock::new();
 static EARLY_EXIT_PATIENCE: OnceLock<usize> = OnceLock::new();
+static FILTER_SEARCH_LOG: OnceLock<Option<Mutex<BufWriter<File>>>> = OnceLock::new();
+static FILTER_EXPANSION_CAP: OnceLock<Option<usize>> = OnceLock::new();
+static FILTER_SEARCH_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
 
 fn log_unfiltered_enabled() -> bool {
     *LOG_UNFILTERED_SEARCH.get_or_init(|| {
@@ -113,6 +116,36 @@ fn early_exit_patience() -> usize {
     })
 }
 
+fn filter_expansion_cap() -> Option<usize> {
+    // Specific cap for filtered search; 0 means unbounded.
+    FILTER_EXPANSION_CAP
+        .get_or_init(|| {
+            std::env::var("VECTORDB_FILTER_EXPANSION_CAP")
+                .ok()
+                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+                .map(|v| if v == 0 { usize::MAX } else { v })
+        })
+        .clone()
+}
+
+fn filter_search_logger() -> Option<&'static Mutex<BufWriter<File>>> {
+    FILTER_SEARCH_LOG
+        .get_or_init(|| {
+            std::env::var("VECTORDB_FILTER_SEARCH_LOG")
+                .ok()
+                .and_then(|path| File::create(path).ok())
+                .map(|f| Mutex::new(BufWriter::new(f)))
+        })
+        .as_ref()
+}
+
+fn next_filter_search_seq() -> u64 {
+    let lock = FILTER_SEARCH_SEQ.get_or_init(|| Mutex::new(0));
+    let mut guard = lock.lock().unwrap();
+    *guard += 1;
+    *guard
+}
+
 #[derive(Default)]
 struct UnfilteredSearchAgg {
     samples: Vec<UnfilteredSample>,
@@ -131,6 +164,29 @@ struct UnfilteredSample {
 struct SearchLayerStats {
     visited: usize,
     expanded: usize,
+}
+
+#[derive(Serialize)]
+struct FilterSearchLogEntry {
+    seq: u64,
+    ef_search: usize,
+    top_k: usize,
+    filter_present: bool,
+    patience_limit: usize,
+    early_exit: bool,
+    seeds_pool: usize,
+    seeds_added: usize,
+    seeds_accepted: usize,
+    seeds_in_results: usize,
+    seeds_popped: usize,
+    filter_checked: usize,
+    filter_passed: usize,
+    visited: usize,
+    expansions: usize,
+    max_expansions: usize,
+    results_len: usize,
+    stop_reason: String,
+    elapsed_ms: f64,
 }
 
 impl UnfilteredSearchAgg {
@@ -1198,16 +1254,32 @@ impl HNSWIndex {
         let log_seed = std::env::var("VECTORDB_LOG_FILTER_SEED")
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
+        let allow_early_exit = self.metric != DistanceMetric::Dot && !disable_early_exit();
+        let patience_limit = if allow_early_exit { early_exit_patience() } else { 0 };
+        let mut no_improve_streak = 0usize;
+        let mut early_exit = false;
 
+        let search_start = std::time::Instant::now();
         let dist0 = self.fast_score(&query_for_search, self.get_vector(&entry).unwrap());
         let sk0   = if use_normalize_score { self.normalize_score(dist0) } else { dist0 };
         let first = ScoredPoint { id: entry, raw_score: dist0, sort_key: sk0 };
+        let mut filter_checked = 0usize;
+        let mut filter_passed = 0usize;
+        let mut seeds_popped = 0usize;
+        let max_expansions = filter_expansion_cap()
+            .unwrap_or_else(|| self.ef.saturating_mul(search_expansion_multiplier()));
 
         candidate_queue.push(first.clone());
         // only push into result_set if it passes the *full* filter:
-        if full_filter.map_or(true, |f| {
-            payloads.get(&entry).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false))
-        }) {
+        let entry_passes = full_filter.map_or(true, |f| {
+            filter_checked += 1;
+            let ok = payloads.get(&entry).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+            if ok {
+                filter_passed += 1;
+            }
+            ok
+        });
+        if entry_passes {
             result_set.push(ResultPoint(first));
         }
         visited.insert(entry);
@@ -1271,9 +1343,15 @@ impl HNSWIndex {
                 let sk = if use_normalize_score { self.normalize_score(d) } else { d };
                 let sp = ScoredPoint { id, raw_score: d, sort_key: sk };
                 candidate_queue.push(sp.clone());
-                if full_filter.map_or(true, |f| {
-                    payloads.get(&id).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false))
-                }) {
+                let passes = full_filter.map_or(true, |f| {
+                    filter_checked += 1;
+                    let ok = payloads.get(&id).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+                    if ok {
+                        filter_passed += 1;
+                    }
+                    ok
+                });
+                if passes {
                     result_set.push(ResultPoint(sp));
                     seeds_accepted += 1;
                 }
@@ -1283,18 +1361,40 @@ impl HNSWIndex {
 
         let mut worst = result_set.peek().map(|rp| rp.0.sort_key).unwrap_or(f32::MAX);
 
-        let max_expansions = self.ef.saturating_mul(4);
         let mut expansions = 0usize;
+        let mut stop_reason = "queue_exhausted".to_string();
 
         while let Some(curr) = candidate_queue.pop() {
             expansions += 1;
+            if seed_ids.contains(&curr.id) {
+                seeds_popped += 1;
+            }
+            if allow_early_exit && patience_limit > 0 && result_set.len() >= self.ef {
+                if let Some(next) = candidate_queue.peek() {
+                    if next.sort_key > worst {
+                        no_improve_streak += 1;
+                    } else {
+                        no_improve_streak = 0;
+                    }
+                } else {
+                    no_improve_streak += 1;
+                }
+                if no_improve_streak > patience_limit {
+                    early_exit = true;
+                    stop_reason = "early_exit_patience".to_string();
+                    break;
+                }
+            }
+
             if expansions >= max_expansions {
+                stop_reason = "max_expansions".to_string();
                 break;
             }
             // Once we already have top_k passing the filter, stop exploring candidates
             // that are worse than our current worst. This restores the usual early-exit
             // even when a filter is present.
             if result_set.len() >= top_k && curr.sort_key > worst {
+                stop_reason = "pruned_by_worst".to_string();
                 break;
             }
 
@@ -1311,9 +1411,15 @@ impl HNSWIndex {
                     candidate_queue.push(sp.clone());
 
                     // *now* apply the full filter before pushing to result_set
-                    if full_filter.map_or(true, |f| {
-                        payloads.get(&nb).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false))
-                    }) {
+                    let passes = full_filter.map_or(true, |f| {
+                        filter_checked += 1;
+                        let ok = payloads.get(&nb).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+                        if ok {
+                            filter_passed += 1;
+                        }
+                        ok
+                    });
+                    if passes {
                         result_set.push(ResultPoint(sp));
                         if result_set.len() > self.ef {
                             result_set.pop();
@@ -1334,6 +1440,8 @@ impl HNSWIndex {
             .collect::<Vec<_>>();
         out.truncate(top_k);
 
+        let seeds_in_results = out.iter().filter(|sp| seed_ids.contains(&sp.id)).count();
+
         if log_seed && full_filter.is_some() {
             let chunk = filter_seed_log_chunk();
             let should_emit = FILTER_SEED_COUNT.with(|c| {
@@ -1342,7 +1450,6 @@ impl HNSWIndex {
                 *v % chunk == 0
             });
             if should_emit {
-                let seeds_in_results = out.iter().filter(|sp| seed_ids.contains(&sp.id)).count();
                 let msg = format!(
                     "[filter_search_seed] seeds_pool={} seeds_added={} seeds_accepted={} seeds_in_results={} final_results={}",
                     seed_pool_size,
@@ -1353,6 +1460,35 @@ impl HNSWIndex {
                 );
                 log::info!(target: "hnsw", "{}", msg);
                 println!("{}", msg);
+            }
+        }
+
+        if let Some(log) = filter_search_logger() {
+            let entry = FilterSearchLogEntry {
+                seq: next_filter_search_seq(),
+                ef_search: self.ef,
+                top_k,
+                filter_present: full_filter.is_some(),
+                seeds_pool: seed_pool_size,
+                seeds_added,
+                seeds_accepted,
+                seeds_in_results,
+                seeds_popped,
+                filter_checked,
+                filter_passed,
+                visited: visited.len(),
+                expansions,
+                max_expansions,
+                results_len: out.len(),
+                stop_reason,
+                patience_limit,
+                early_exit,
+                elapsed_ms: search_start.elapsed().as_secs_f64() * 1000.0,
+            };
+            if let Ok(mut writer) = log.lock() {
+                if serde_json::to_writer(&mut *writer, &entry).is_ok() {
+                    let _ = writer.write_all(b"\n");
+                }
             }
         }
 
