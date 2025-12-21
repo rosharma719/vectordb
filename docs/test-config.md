@@ -11,6 +11,7 @@ Tests are `#[ignore]` and driven entirely by env vars. Use these knobs consisten
   - `VECTORDB_FILTER_EXPANSION_CAP` (0 => uncapped for filtered search; otherwise max expansions)
   - `VECTORDB_DISABLE_FILTER_SEEDS` (set to `1` to disable seeding; default seeds enabled)
   - `VECTORDB_FILTER_SEARCH_LOG` path to JSONL for per-query traversal stats
+  - `VECTORDB_FILTER_PASSING_BUDGET` / `VECTORDB_FILTER_FAILING_BUDGET` (override routing budgets; defaults derive from M: passing≈max(8, 2*M), failing=1)
 
 - NYTimes (unfiltered):
   - `VECTORDB_NYT_DATA_DIR` (default `data/nytimes-256-angular`)

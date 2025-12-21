@@ -53,6 +53,12 @@ def summarize(path: Path) -> None:
         if e.get("results_len", 0) > 0
     )
     seeds_popped = sorted(e.get("seeds_popped", 0) for e in entries)
+    routing_popped_total = sorted(e.get("routing_popped_total", 0) for e in entries)
+    routing_popped_passing = sorted(e.get("routing_popped_passing", 0) for e in entries)
+    routing_popped_failing = sorted(e.get("routing_popped_failing", 0) for e in entries)
+    results_inserted = sorted(e.get("results_inserted", 0) for e in entries)
+    results_pq_peek_dist = sorted(e.get("results_pq_peek_dist", 0.0) for e in entries)
+    best_routing_dist_at_exit = sorted(e.get("best_routing_dist_at_exit", 0.0) for e in entries)
 
     def fmt_dist(vals):
         return (
@@ -88,6 +94,18 @@ def summarize(path: Path) -> None:
         )
     if seeds_popped:
         print(f"seeds_popped_during_walk: {fmt_dist(seeds_popped)}")
+    if routing_popped_total:
+        print(f"routing_popped_total: {fmt_dist(routing_popped_total)}")
+    if routing_popped_passing:
+        print(f"routing_popped_passing: {fmt_dist(routing_popped_passing)}")
+    if routing_popped_failing:
+        print(f"routing_popped_failing: {fmt_dist(routing_popped_failing)}")
+    if results_inserted:
+        print(f"results_inserted: {fmt_dist(results_inserted)}")
+    if results_pq_peek_dist:
+        print(f"results_pq_peek_dist: min={results_pq_peek_dist[0]:.4f} p50={pct(results_pq_peek_dist,50):.4f} p90={pct(results_pq_peek_dist,90):.4f} p99={pct(results_pq_peek_dist,99):.4f} max={results_pq_peek_dist[-1]:.4f}")
+    if best_routing_dist_at_exit:
+        print(f"best_routing_dist_at_exit: min={best_routing_dist_at_exit[0]:.4f} p50={pct(best_routing_dist_at_exit,50):.4f} p90={pct(best_routing_dist_at_exit,90):.4f} p99={pct(best_routing_dist_at_exit,99):.4f} max={best_routing_dist_at_exit[-1]:.4f}")
 
 
 if __name__ == "__main__":

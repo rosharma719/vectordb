@@ -39,6 +39,8 @@ static SEARCH_EXPANSION_CAP: OnceLock<Option<usize>> = OnceLock::new();
 static EARLY_EXIT_PATIENCE: OnceLock<usize> = OnceLock::new();
 static FILTER_SEARCH_LOG: OnceLock<Option<Mutex<BufWriter<File>>>> = OnceLock::new();
 static FILTER_EXPANSION_CAP: OnceLock<Option<usize>> = OnceLock::new();
+static FILTER_PASSING_BUDGET: OnceLock<Option<usize>> = OnceLock::new();
+static FILTER_FAILING_BUDGET: OnceLock<Option<usize>> = OnceLock::new();
 static FILTER_SEARCH_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
 
 fn log_unfiltered_enabled() -> bool {
@@ -128,6 +130,28 @@ fn filter_expansion_cap() -> Option<usize> {
         .clone()
 }
 
+fn filter_passing_budget(m: usize) -> usize {
+    FILTER_PASSING_BUDGET
+        .get_or_init(|| {
+            std::env::var("VECTORDB_FILTER_PASSING_BUDGET")
+                .ok()
+                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+        })
+        .clone()
+        .unwrap_or_else(|| std::cmp::max(8, m.saturating_mul(2)))
+}
+
+fn filter_failing_budget(m: usize) -> usize {
+    FILTER_FAILING_BUDGET
+        .get_or_init(|| {
+            std::env::var("VECTORDB_FILTER_FAILING_BUDGET")
+                .ok()
+                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+        })
+        .clone()
+        .unwrap_or_else(|| std::cmp::max(1, m / 8))
+}
+
 fn filter_search_logger() -> Option<&'static Mutex<BufWriter<File>>> {
     FILTER_SEARCH_LOG
         .get_or_init(|| {
@@ -187,6 +211,12 @@ struct FilterSearchLogEntry {
     results_len: usize,
     stop_reason: String,
     elapsed_ms: f64,
+    routing_popped_total: usize,
+    routing_popped_passing: usize,
+    routing_popped_failing: usize,
+    results_inserted: usize,
+    results_pq_peek_dist: f32,
+    best_routing_dist_at_exit: f32,
 }
 
 impl UnfilteredSearchAgg {
@@ -294,6 +324,34 @@ pub struct ScoredPoint {
     pub id: PointId,
     pub raw_score: Score,
     pub sort_key: Score,
+}
+
+#[derive(Clone, Debug)]
+struct RoutingEntry {
+    sp: ScoredPoint,
+    passes_filter: bool,
+    budget: usize,
+}
+
+impl PartialEq for RoutingEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.sp.sort_key == other.sp.sort_key
+    }
+}
+
+impl Eq for RoutingEntry {}
+
+impl PartialOrd for RoutingEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Lower scores are better; invert for max-heap behavior.
+        other.sp.sort_key.partial_cmp(&self.sp.sort_key)
+    }
+}
+
+impl Ord for RoutingEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap()
+    }
 }
 
 // This ordering is used for the candidate queue (we want the candidate with the lowest score to be popped first).
@@ -1249,8 +1307,10 @@ impl HNSWIndex {
         // 4) now do the ef‐search on level 0, but *only* apply the full filter
         //    at the moment we push into the result‐heap:
         let mut visited = HashSet::new();
-        let mut candidate_queue: BinaryHeap<ScoredPoint> = BinaryHeap::new();
-        let mut result_set:  BinaryHeap<ResultPoint>    = BinaryHeap::new();
+        // routing_pq holds all candidates (filtered or not), ordered by best distance first.
+        let mut routing_pq: BinaryHeap<RoutingEntry> = BinaryHeap::new();
+        // results_pq holds only filter-passing points competing for the final top_k; worst on top.
+        let mut results_pq: BinaryHeap<ResultPoint> = BinaryHeap::new();
         let log_seed = std::env::var("VECTORDB_LOG_FILTER_SEED")
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
@@ -1268,9 +1328,13 @@ impl HNSWIndex {
         let mut seeds_popped = 0usize;
         let max_expansions = filter_expansion_cap()
             .unwrap_or_else(|| self.ef.saturating_mul(search_expansion_multiplier()));
+        let result_cap = self.ef.max(top_k);
+        let mut routing_popped_total = 0usize;
+        let mut routing_popped_passing = 0usize;
+        let mut results_inserted = 0usize;
+        let passing_budget = filter_passing_budget(self.m);
+        let failing_budget = filter_failing_budget(self.m);
 
-        candidate_queue.push(first.clone());
-        // only push into result_set if it passes the *full* filter:
         let entry_passes = full_filter.map_or(true, |f| {
             filter_checked += 1;
             let ok = payloads.get(&entry).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
@@ -1279,8 +1343,14 @@ impl HNSWIndex {
             }
             ok
         });
+        routing_pq.push(RoutingEntry {
+            sp: first.clone(),
+            passes_filter: entry_passes,
+            budget: if entry_passes { passing_budget } else { failing_budget },
+        });
+        // only push into results_pq if it passes the *full* filter:
         if entry_passes {
-            result_set.push(ResultPoint(first));
+            results_pq.push(ResultPoint(first));
         }
         visited.insert(entry);
 
@@ -1342,7 +1412,6 @@ impl HNSWIndex {
                 let d = self.fast_score(&query_for_search, vec);
                 let sk = if use_normalize_score { self.normalize_score(d) } else { d };
                 let sp = ScoredPoint { id, raw_score: d, sort_key: sk };
-                candidate_queue.push(sp.clone());
                 let passes = full_filter.map_or(true, |f| {
                     filter_checked += 1;
                     let ok = payloads.get(&id).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
@@ -1351,27 +1420,37 @@ impl HNSWIndex {
                     }
                     ok
                 });
+                let budget = if passes { passing_budget } else { failing_budget };
+                routing_pq.push(RoutingEntry {
+                    sp: sp.clone(),
+                    passes_filter: passes,
+                    budget,
+                });
                 if passes {
-                    result_set.push(ResultPoint(sp));
+                    results_pq.push(ResultPoint(sp));
                     seeds_accepted += 1;
                 }
                 seeds_added += 1;
             }
         }
 
-        let mut worst = result_set.peek().map(|rp| rp.0.sort_key).unwrap_or(f32::MAX);
+        let mut worst = results_pq.peek().map(|rp| rp.0.sort_key).unwrap_or(f32::MAX);
 
         let mut expansions = 0usize;
         let mut stop_reason = "queue_exhausted".to_string();
 
-        while let Some(curr) = candidate_queue.pop() {
+        while let Some(curr) = routing_pq.pop() {
             expansions += 1;
-            if seed_ids.contains(&curr.id) {
+            if seed_ids.contains(&curr.sp.id) {
                 seeds_popped += 1;
             }
-            if allow_early_exit && patience_limit > 0 && result_set.len() >= self.ef {
-                if let Some(next) = candidate_queue.peek() {
-                    if next.sort_key > worst {
+            routing_popped_total += 1;
+            if curr.passes_filter {
+                routing_popped_passing += 1;
+            }
+            if allow_early_exit && patience_limit > 0 && results_pq.len() >= self.ef {
+                if let Some(next) = routing_pq.peek() {
+                    if next.sp.sort_key > worst {
                         no_improve_streak += 1;
                     } else {
                         no_improve_streak = 0;
@@ -1393,12 +1472,16 @@ impl HNSWIndex {
             // Once we already have top_k passing the filter, stop exploring candidates
             // that are worse than our current worst. This restores the usual early-exit
             // even when a filter is present.
-            if result_set.len() >= top_k && curr.sort_key > worst {
+            if results_pq.len() >= top_k && curr.sp.sort_key > worst {
                 stop_reason = "pruned_by_worst".to_string();
                 break;
             }
 
-            if let Some(neighs) = self.layer_neighbors(0, curr.id) {
+            if curr.budget <= 1 {
+                continue;
+            }
+
+            if let Some(neighs) = self.layer_neighbors(0, curr.sp.id) {
                 for &nb in neighs {
                     if self.deleted.contains(&nb) || !visited.insert(nb) {
                         continue;
@@ -1408,24 +1491,32 @@ impl HNSWIndex {
                     let sk  = if use_normalize_score { self.normalize_score(d) } else { d };
                     let sp  = ScoredPoint { id: nb, raw_score: d, sort_key: sk };
 
-                    candidate_queue.push(sp.clone());
-
+                let passes = full_filter.map_or(true, |f| {
+                    filter_checked += 1;
+                    let ok = payloads.get(&nb).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+                    if ok {
+                        filter_passed += 1;
+                    }
+                    ok
+                });
+                let budget = if passes { passing_budget } else { failing_budget };
+                if budget > 0 {
+                routing_pq.push(RoutingEntry {
+                    sp: sp.clone(),
+                    passes_filter: passes,
+                    budget,
+                });
+                }
+                let passes_for_results = passes;
+                if passes_for_results {
                     // *now* apply the full filter before pushing to result_set
-                    let passes = full_filter.map_or(true, |f| {
-                        filter_checked += 1;
-                        let ok = payloads.get(&nb).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
-                        if ok {
-                            filter_passed += 1;
+                        results_pq.push(ResultPoint(sp));
+                        results_inserted += 1;
+                        if results_pq.len() > result_cap {
+                            results_pq.pop();
                         }
-                        ok
-                    });
-                    if passes {
-                        result_set.push(ResultPoint(sp));
-                        if result_set.len() > self.ef {
-                            result_set.pop();
-                        }
-                        if result_set.len() >= top_k {
-                            worst = result_set.peek().unwrap().0.sort_key;
+                        if results_pq.len() >= top_k {
+                            worst = results_pq.peek().unwrap().0.sort_key;
                         }
                     }
                 }
@@ -1433,7 +1524,7 @@ impl HNSWIndex {
         }
 
         // unwrap the inner ScoredPoint and truncate to top_k
-        let mut out = result_set
+        let mut out = results_pq
             .into_sorted_vec()
             .into_iter()
             .map(|rp| rp.0)
@@ -1464,6 +1555,8 @@ impl HNSWIndex {
         }
 
         if let Some(log) = filter_search_logger() {
+            let best_routing_dist_at_exit = routing_pq.peek().map(|sp| sp.sp.sort_key).unwrap_or(f32::MAX);
+            let results_pq_peek_dist = worst;
             let entry = FilterSearchLogEntry {
                 seq: next_filter_search_seq(),
                 ef_search: self.ef,
@@ -1483,6 +1576,12 @@ impl HNSWIndex {
                 stop_reason,
                 patience_limit,
                 early_exit,
+                routing_popped_total,
+                routing_popped_passing,
+                routing_popped_failing: routing_popped_total.saturating_sub(routing_popped_passing),
+                results_inserted,
+                results_pq_peek_dist,
+                best_routing_dist_at_exit,
                 elapsed_ms: search_start.elapsed().as_secs_f64() * 1000.0,
             };
             if let Ok(mut writer) = log.lock() {
