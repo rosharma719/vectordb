@@ -319,6 +319,113 @@ thread_local! {
     static FILTER_EDGE_STATS: RefCell<FilterEdgeAgg> = RefCell::new(FilterEdgeAgg::default());
 }
 
+#[derive(Default)]
+struct SearchScratch {
+    visited_epoch: Vec<u32>,
+    epoch: u32,
+    candidate_queue: BinaryHeap<NodeCandidate>,
+    result_set: BinaryHeap<NodeResult>,
+    routing_pq: BinaryHeap<NodeRoutingEntry>,
+    results_pq: BinaryHeap<NodeResult>,
+    seed_epoch: Vec<u32>,
+    seed_epoch_val: u32,
+    seed_list: Vec<usize>,
+    temp_epoch: Vec<u32>,
+    temp_epoch_val: u32,
+    temp_list: Vec<usize>,
+}
+
+impl SearchScratch {
+    fn next_epoch(&mut self, len: usize) {
+        if self.visited_epoch.len() < len {
+            self.visited_epoch.resize(len, 0);
+        }
+        if self.epoch == u32::MAX {
+            self.visited_epoch.fill(0);
+            self.epoch = 1;
+        } else {
+            self.epoch = self.epoch.wrapping_add(1);
+            if self.epoch == 0 {
+                self.epoch = 1;
+            }
+        }
+    }
+
+    fn mark_visited(&mut self, idx: usize) -> bool {
+        if self.visited_epoch[idx] == self.epoch {
+            false
+        } else {
+            self.visited_epoch[idx] = self.epoch;
+            true
+        }
+    }
+
+    fn reset_seed(&mut self, len: usize) {
+        if self.seed_epoch.len() < len {
+            self.seed_epoch.resize(len, 0);
+        }
+        if self.seed_epoch_val == u32::MAX {
+            self.seed_epoch.fill(0);
+            self.seed_epoch_val = 1;
+        } else {
+            self.seed_epoch_val = self.seed_epoch_val.wrapping_add(1);
+            if self.seed_epoch_val == 0 {
+                self.seed_epoch_val = 1;
+            }
+        }
+        self.seed_list.clear();
+    }
+
+    fn reset_temp(&mut self, len: usize) {
+        if self.temp_epoch.len() < len {
+            self.temp_epoch.resize(len, 0);
+        }
+        if self.temp_epoch_val == u32::MAX {
+            self.temp_epoch.fill(0);
+            self.temp_epoch_val = 1;
+        } else {
+            self.temp_epoch_val = self.temp_epoch_val.wrapping_add(1);
+            if self.temp_epoch_val == 0 {
+                self.temp_epoch_val = 1;
+            }
+        }
+        self.temp_list.clear();
+    }
+
+    fn mark_seed(&mut self, idx: usize) -> bool {
+        if self.seed_epoch[idx] == self.seed_epoch_val {
+            false
+        } else {
+            self.seed_epoch[idx] = self.seed_epoch_val;
+            self.seed_list.push(idx);
+            true
+        }
+    }
+
+    fn mark_temp(&mut self, idx: usize) -> bool {
+        if self.temp_epoch[idx] == self.temp_epoch_val {
+            false
+        } else {
+            self.temp_epoch[idx] = self.temp_epoch_val;
+            self.temp_list.push(idx);
+            true
+        }
+    }
+
+    fn is_seed(&self, idx: usize) -> bool {
+        self.seed_epoch.get(idx).copied().unwrap_or(0) == self.seed_epoch_val
+    }
+
+    fn is_temp(&self, idx: usize) -> bool {
+        self.temp_epoch.get(idx).copied().unwrap_or(0) == self.temp_epoch_val
+    }
+
+}
+
+thread_local! {
+    static SEARCH_SCRATCH: RefCell<SearchScratch> = RefCell::new(SearchScratch::default());
+}
+
 #[derive(Clone, Debug)]
 pub struct ScoredPoint {
     pub id: PointId,
@@ -327,28 +434,35 @@ pub struct ScoredPoint {
 }
 
 #[derive(Clone, Debug)]
-struct RoutingEntry {
-    sp: ScoredPoint,
+struct NodeCandidate {
+    idx: usize,
+    raw_score: Score,
+    sort_key: Score,
+}
+
+#[derive(Clone, Debug)]
+struct NodeRoutingEntry {
+    node: NodeCandidate,
     passes_filter: bool,
     budget: usize,
 }
 
-impl PartialEq for RoutingEntry {
+impl PartialEq for NodeRoutingEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.sp.sort_key == other.sp.sort_key
+        self.node.sort_key == other.node.sort_key
     }
 }
 
-impl Eq for RoutingEntry {}
+impl Eq for NodeRoutingEntry {}
 
-impl PartialOrd for RoutingEntry {
+impl PartialOrd for NodeRoutingEntry {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         // Lower scores are better; invert for max-heap behavior.
-        other.sp.sort_key.partial_cmp(&self.sp.sort_key)
+        other.node.sort_key.partial_cmp(&self.node.sort_key)
     }
 }
 
-impl Ord for RoutingEntry {
+impl Ord for NodeRoutingEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other).unwrap()
     }
@@ -376,20 +490,40 @@ impl Ord for ScoredPoint {
     }
 }
 
-// A wrapper for the result set so that the worst candidate (largest score) is at the top.
+impl PartialEq for NodeCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.sort_key == other.sort_key
+    }
+}
+
+impl Eq for NodeCandidate {}
+
+impl PartialOrd for NodeCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Invert the ordering so that lower scores (better) are considered "greater" for the BinaryHeap.
+        other.sort_key.partial_cmp(&self.sort_key)
+    }
+}
+
+impl Ord for NodeCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
-struct ResultPoint(ScoredPoint);
+struct NodeResult(NodeCandidate);
 
-impl Eq for ResultPoint {}
+impl Eq for NodeResult {}
 
-impl PartialOrd for ResultPoint {
+impl PartialOrd for NodeResult {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         // Normal ordering: lower score is better, so when used in a max-heap the worst (largest score) will be at the top.
         self.0.sort_key.partial_cmp(&other.0.sort_key)
     }
 }
 
-impl Ord for ResultPoint {
+impl Ord for NodeResult {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.0.sort_key.partial_cmp(&other.0.sort_key).unwrap()
     }
@@ -415,10 +549,10 @@ pub struct HnswSnapshot {
 }
 
 pub struct HNSWIndex {
-    layers: HashMap<usize, HashMap<PointId, Vec<PointId>>>,
-    vectors: HashMap<PointId, Vector>,
-    levels: HashMap<PointId, usize>,
-    entry_point: Option<PointId>,
+    layers: Vec<Vec<Vec<usize>>>,
+    vectors: Vec<Vector>,
+    levels: Vec<usize>,
+    entry_point: Option<usize>,
     metric: DistanceMetric,
     m: usize,
     ef: usize,
@@ -427,8 +561,10 @@ pub struct HNSWIndex {
     level_scale: f64,
     current_max_level: usize,
     dim: usize,
-    // NEW: Maintain a set of deleted point IDs for lazy deletion
-    deleted: HashSet<PointId>,
+    // Maintain a deleted flag per internal node id for lazy deletion.
+    deleted: Vec<bool>,
+    point_to_idx: HashMap<PointId, usize>,
+    idx_to_point: Vec<PointId>,
     exact_fallback_enabled: bool,
     exact_fallback_threshold: usize,
 }
@@ -437,9 +573,11 @@ pub struct HNSWIndex {
 impl HNSWIndex {
     fn exact_scan(&self, query: &Vector, normalize_scores: bool, top_k: usize) -> Vec<ScoredPoint> {
         let mut brute: Vec<ScoredPoint> = self
-            .iter_vectors()
-            .filter_map(|(&id, vec)| {
-                if self.deleted.contains(&id) {
+            .vectors
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, vec)| {
+                if self.deleted.get(idx).copied().unwrap_or(false) {
                     return None;
                 }
                 let raw = self.fast_score(query, vec);
@@ -448,7 +586,11 @@ impl HNSWIndex {
                 } else {
                     raw
                 };
-                Some(ScoredPoint { id, raw_score: raw, sort_key })
+                Some(ScoredPoint {
+                    id: self.point_id(idx),
+                    raw_score: raw,
+                    sort_key,
+                })
             })
             .collect();
         brute.sort_by(|a, b| {
@@ -475,9 +617,9 @@ impl HNSWIndex {
             );
         }
         Self {
-            layers: HashMap::new(),
-            vectors: HashMap::new(),
-            levels: HashMap::new(),
+            layers: Vec::new(),
+            vectors: Vec::new(),
+            levels: Vec::new(),
             entry_point: None,
             metric,
             m,
@@ -487,7 +629,9 @@ impl HNSWIndex {
             level_scale,
             current_max_level: 0,
             dim,
-            deleted: HashSet::new(),
+            deleted: Vec::new(),
+            point_to_idx: HashMap::new(),
+            idx_to_point: Vec::new(),
             exact_fallback_enabled: true,
             exact_fallback_threshold: DEFAULT_EXACT_FALLBACK_THRESHOLD,
         }
@@ -498,6 +642,51 @@ impl HNSWIndex {
         let l = (-r.ln() * self.level_scale).floor() as usize;
         let level = l.min(self.max_level_cap);
         level
+    }
+
+    #[inline]
+    fn idx_of(&self, point_id: PointId) -> Option<usize> {
+        self.point_to_idx.get(&point_id).copied()
+    }
+
+    #[inline]
+    fn point_id(&self, idx: usize) -> PointId {
+        self.idx_to_point[idx]
+    }
+
+    #[inline]
+    fn get_vector_by_idx(&self, idx: usize) -> Option<&Vector> {
+        if self.deleted.get(idx).copied().unwrap_or(false) {
+            None
+        } else {
+            self.vectors.get(idx)
+        }
+    }
+
+    #[inline]
+    fn neighbor_list(&self) -> Vec<usize> {
+        Vec::with_capacity(self.m + 1)
+    }
+
+    fn ensure_level_capacity(&mut self, level: usize, nodes_len: usize) {
+        if self.layers.len() <= level {
+            for _ in self.layers.len()..=level {
+                let mut layer = Vec::with_capacity(nodes_len);
+                for _ in 0..nodes_len {
+                    layer.push(self.neighbor_list());
+                }
+                self.layers.push(layer);
+            }
+        }
+    }
+
+    fn extend_layers_for_new_node(&mut self, nodes_len: usize) {
+        let cap = self.m + 1;
+        for layer in &mut self.layers {
+            if layer.len() < nodes_len {
+                layer.push(Vec::with_capacity(cap));
+            }
+        }
     }
 
     pub fn normalize_score(&self, raw: f32) -> f32 {
@@ -529,27 +718,31 @@ impl HNSWIndex {
     
     /// Mark a point as deleted and, if needed, update the entry point.
     pub fn mark_deleted(&mut self, point_id: PointId) {
-        self.deleted.insert(point_id);
+        let Some(idx) = self.idx_of(point_id) else { return; };
+        if let Some(flag) = self.deleted.get_mut(idx) {
+            *flag = true;
+        }
         // If the deleted point was the entry point, try to choose a new one.
-        if Some(point_id) == self.entry_point {
+        if Some(idx) == self.entry_point {
             self.entry_point = self.find_highest_level_entry_point();
         }
         
     }
 
-    pub fn find_highest_level_entry_point(&self) -> Option<PointId> {
+    pub fn find_highest_level_entry_point(&self) -> Option<usize> {
         self.levels
             .iter()
-            .filter(|(id, _)| !self.deleted.contains(id) && self.vectors.contains_key(id))
+            .enumerate()
+            .filter(|(idx, _)| !self.deleted.get(*idx).copied().unwrap_or(false))
             .max_by_key(|(_, level)| *level)
-            .map(|(id, _)| *id)
+            .map(|(idx, _)| idx)
     }
     
 
     pub fn insert(&mut self, point_id: PointId, vector: Vector) -> Result<(), DBError> {
         //println!("\n[INSERT] Attempting to insert point: {}", point_id);
     
-        if self.vectors.contains_key(&point_id) {
+        if self.point_to_idx.contains_key(&point_id) {
             if VERBOSE {
                 log::debug!(target: "vector::hnsw", "[INSERT] Point {} already exists. Skipping.", point_id);
             }
@@ -573,14 +766,19 @@ impl HNSWIndex {
         //println!("[INSERT] Assigned random level {} to point {}", level, point_id);
     
         let vec = self.maybe_normalize(&vector);
-        self.vectors.insert(point_id, vec);
-        self.levels.insert(point_id, level);
+        let idx = self.vectors.len();
+        self.vectors.push(vec);
+        self.levels.push(level);
+        self.deleted.push(false);
+        self.idx_to_point.push(point_id);
+        self.point_to_idx.insert(point_id, idx);
+        let nodes_len = self.vectors.len();
+        self.ensure_level_capacity(level, nodes_len);
+        self.extend_layers_for_new_node(nodes_len);
     
         // Initialize self-links
         for l in 0..=level {
-            self.layers.entry(l).or_default()
-                .entry(point_id).or_insert_with(Vec::new)
-                .push(point_id);
+            self.layers[l][idx].push(idx);
             //println!("[INSERT] Initialized self-link at level {}", l);
         }
     
@@ -588,26 +786,26 @@ impl HNSWIndex {
             if VERBOSE {
                 log::debug!(target: "vector::hnsw", "[INSERT] First point. Setting entry point to {} at level {}", point_id, level);
             }
-            self.entry_point = Some(point_id);
+            self.entry_point = Some(idx);
             self.current_max_level = level;
             return Ok(());
         }
     
         // If the current entry point is deleted, pick a non-deleted candidate.
         let mut current_entry = if let Some(ep) = self.entry_point {
-            if self.deleted.contains(&ep) {
-                self.find_highest_level_entry_point().unwrap_or(point_id)
+            if self.deleted.get(ep).copied().unwrap_or(false) {
+                self.find_highest_level_entry_point().unwrap_or(idx)
             } else {
                 ep
             }
         } else {
-            self.find_highest_level_entry_point().unwrap_or(point_id)
+            self.find_highest_level_entry_point().unwrap_or(idx)
         };
         
         
         for l in ((level + 1)..=self.current_max_level).rev() {
             //println!("[INSERT] Greedy search for entry at level {} starting from {}", l, current_entry);
-            current_entry = self.greedy_search_layer_unfiltered(&self.vectors[&point_id], current_entry, l);
+            current_entry = self.greedy_search_layer_unfiltered(&self.vectors[idx], current_entry, l);
             //println!("[INSERT] Entry point after greedy search at level {}: {}", l, current_entry);
         }
     
@@ -615,7 +813,7 @@ impl HNSWIndex {
             //println!("[INSERT] Performing search layer at level {}...", l);
             let use_norm = self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
             let candidates = self.search_layer_unfiltered(
-                &self.vectors[&point_id],
+                &self.vectors[idx],
                 current_entry,
                 l,
                 self.ef_construct,
@@ -623,20 +821,20 @@ impl HNSWIndex {
                 None,
             )?;
             // Diverse neighbor selection: skip a candidate if it is closer to any already-picked neighbor than to the query.
-            let neighbors: Vec<PointId> = self.select_diverse_neighbors(&candidates, self.m, use_norm);
+            let neighbors: Vec<usize> = self.select_diverse_neighbors(&candidates, self.m, use_norm);
             //println!("[INSERT] Found neighbors at level {} for {}: {:?}", l, point_id, neighbors);
 
-            let layer = self.layers.get_mut(&l).unwrap();
+            let layer = self.layers.get_mut(l).unwrap();
             let mut linked = neighbors.clone();
-            if !linked.contains(&point_id) {
-                linked.push(point_id);
+            if !linked.contains(&idx) {
+                linked.push(idx);
             }
-            layer.insert(point_id, linked.clone());
+            layer[idx] = linked.clone();
     
             for &n in &neighbors {
-                let e = layer.entry(n).or_default();
-                if !e.contains(&point_id) {
-                    e.push(point_id);
+                let e = &mut layer[n];
+                if !e.contains(&idx) {
+                    e.push(idx);
                 }
             }
     
@@ -649,7 +847,7 @@ impl HNSWIndex {
             if VERBOSE {
                 log::debug!(target: "vector::hnsw", "[INSERT] Promoting {} to new entry point at level {}", point_id, level);
             }
-            self.entry_point = Some(point_id);
+            self.entry_point = Some(idx);
             self.current_max_level = level;
         }
     
@@ -839,24 +1037,30 @@ impl HNSWIndex {
     
 
     pub fn add_bidirectional_edge(&mut self, level: usize, a: PointId, b: PointId) {
-        let layer = self.layers.entry(level).or_default();
-        Self::push_unique(layer.entry(a).or_default(), b);
-        Self::push_unique(layer.entry(b).or_default(), a);
+        let (Some(a_idx), Some(b_idx)) = (self.idx_of(a), self.idx_of(b)) else { return; };
+        let nodes_len = self.vectors.len();
+        self.ensure_level_capacity(level, nodes_len);
+        self.extend_layers_for_new_node(nodes_len);
+        Self::push_unique(&mut self.layers[level][a_idx], b_idx);
+        Self::push_unique(&mut self.layers[level][b_idx], a_idx);
     }
 
     pub fn add_one_way_edge(&mut self, level: usize, from: PointId, to: PointId) {
-        let layer = self.layers.entry(level).or_default();
-        Self::push_unique(layer.entry(from).or_default(), to);
+        let (Some(from_idx), Some(to_idx)) = (self.idx_of(from), self.idx_of(to)) else { return; };
+        let nodes_len = self.vectors.len();
+        self.ensure_level_capacity(level, nodes_len);
+        self.extend_layers_for_new_node(nodes_len);
+        Self::push_unique(&mut self.layers[level][from_idx], to_idx);
     }
 
     #[inline]
-    fn push_unique(vec: &mut Vec<PointId>, val: PointId) {
+    fn push_unique(vec: &mut Vec<usize>, val: usize) {
         if !vec.contains(&val) {
             vec.push(val);
         }
     }
 
-    pub fn greedy_search_layer_unfiltered(&self, query: &Vector, entry: PointId, level: usize) -> PointId {
+    pub fn greedy_search_layer_unfiltered(&self, query: &Vector, entry: usize, level: usize) -> usize {
         //println!("[GREEDY] Start at level {}, from entry {}", level, entry);
         let mut current = entry;
         let mut changed = true;
@@ -865,14 +1069,14 @@ impl HNSWIndex {
         while changed && steps < 1000 {
             steps += 1;
             changed = false;
-            if let Some(neighbors) = self.layers.get(&level).and_then(|l| l.get(&current)) {
+            if let Some(neighbors) = self.layers.get(level).and_then(|l| l.get(current)) {
                 for &neighbor in neighbors {
-                    if self.deleted.contains(&neighbor) {
+                    if self.deleted.get(neighbor).copied().unwrap_or(false) {
                         continue;
                     }
     
-                    let d_current = self.fast_score(query, &self.vectors[&current]);
-                    let d_new = self.fast_score(query, &self.vectors[&neighbor]);
+                    let d_current = self.fast_score(query, &self.vectors[current]);
+                    let d_new = self.fast_score(query, &self.vectors[neighbor]);
                     let s_current = self.normalize_score(d_current);
                     let s_new = self.normalize_score(d_new);
     
@@ -896,11 +1100,11 @@ impl HNSWIndex {
     pub fn greedy_search_layer_with_filter(
         &self,
         query: &Vector,
-        entry: PointId,
+        entry: usize,
         level: usize,
         payloads: &HashMap<PointId, Payload>,
         filter: Option<&Filter>,
-    ) -> Result<PointId, DBError> {
+    ) -> Result<usize, DBError> {
         let mut current = entry;
         let mut changed = true;
 
@@ -909,19 +1113,20 @@ impl HNSWIndex {
 
             if let Some(neighbors) = self.layer_neighbors(level, current) {
                 for &neighbor in neighbors {
-                    if self.deleted.contains(&neighbor) {
+                    if self.deleted.get(neighbor).copied().unwrap_or(false) {
                         continue;
                     }
 
                     if let Some(f) = filter {
-                        let Some(payload) = payloads.get(&neighbor) else { continue; };
+                        let id = self.point_id(neighbor);
+                        let Some(payload) = payloads.get(&id) else { continue; };
                         if !evaluate_filter(f, payload)? {
                             continue;
                         }
                     }
 
-                    let d_current = self.fast_score(query, self.get_vector(&current).unwrap());
-                    let d_new = self.fast_score(query, self.get_vector(&neighbor).unwrap());
+                    let d_current = self.fast_score(query, self.get_vector_by_idx(current).unwrap());
+                    let d_new = self.fast_score(query, self.get_vector_by_idx(neighbor).unwrap());
 
                     let s_current = match self.metric {
                         DistanceMetric::Dot => -d_current,
@@ -945,12 +1150,12 @@ impl HNSWIndex {
     fn search_layer_unfiltered(
         &self,
         query: &Vector,
-        entry: PointId,
+        entry: usize,
         level: usize,
         ef: usize,
         normalize: bool,
         stats: Option<&mut SearchLayerStats>,
-    ) -> Result<Vec<ScoredPoint>, DBError> {
+    ) -> Result<Vec<NodeCandidate>, DBError> {
         if query.len() != self.dim {
             return Err(DBError::VectorLengthMismatch {
                 expected: self.dim,
@@ -958,119 +1163,133 @@ impl HNSWIndex {
             });
         }
     
-        let mut visited = HashSet::new();
-        let mut candidate_queue = BinaryHeap::new();
-        let mut result_set = BinaryHeap::new();
-        let mut expanded = 0usize;
-        // Allow a wider expansion budget than ef to avoid early cutoff; mirrors filtered search budget.
-        let expansion_cap = search_expansion_cap_override()
-            .or_else(|| Some(ef.saturating_mul(search_expansion_multiplier()).max(ef)));
+        SEARCH_SCRATCH.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            scratch.next_epoch(self.vectors.len());
+            scratch.candidate_queue.clear();
+            scratch.result_set.clear();
 
-        // If the entry is deleted, skip it by choosing a non-deleted vector (if possible)
-        let start_entry = if self.deleted.contains(&entry) {
-            self.vectors.keys().find(|&&id| !self.deleted.contains(&id)).cloned().unwrap_or(entry)
-        } else {
-            entry
-        };
-    
-        let entry_distance = self.fast_score(query, &self.vectors[&start_entry]);
-        let entry_score = if normalize {
-            self.normalize_score(entry_distance)
-        } else {
-            entry_distance
-        };
-    
-        let initial = ScoredPoint {
-            id: start_entry,
-            raw_score: entry_distance,
-            sort_key: entry_score,
-        };
-    
-        candidate_queue.push(initial.clone());
-        result_set.push(ResultPoint(initial.clone()));
-        visited.insert(start_entry);
-    
-        //println!("[search_layer_unfiltered] Initial score at entry {}: {:.4}",start_entry, entry_score);
+            let mut visited_count = 0usize;
+            let mut expanded = 0usize;
+            // Allow a wider expansion budget than ef to avoid early cutoff; mirrors filtered search budget.
+            let expansion_cap = search_expansion_cap_override()
+                .or_else(|| Some(ef.saturating_mul(search_expansion_multiplier()).max(ef)));
 
-        let mut worst_score = result_set.peek().unwrap().0.sort_key;
-        let allow_early_exit = self.metric != DistanceMetric::Dot && !disable_early_exit();
-        let patience_limit = if allow_early_exit { early_exit_patience() } else { 0 };
-        let mut no_improve_streak = 0usize;
-
-        while let Some(current) = candidate_queue.peek() {
-            if allow_early_exit && result_set.len() >= ef {
-                if current.sort_key > worst_score {
-                    no_improve_streak += 1;
-                } else {
-                    no_improve_streak = 0;
-                }
-                if no_improve_streak > patience_limit {
-                    break;
-                }
+            // If the entry is deleted, skip it by choosing a non-deleted vector (if possible)
+            let start_entry = if self.deleted.get(entry).copied().unwrap_or(false) {
+                self.deleted
+                    .iter()
+                    .position(|deleted| !*deleted)
+                    .unwrap_or(entry)
+            } else {
+                entry
+            };
+        
+            let entry_distance = self.fast_score(query, &self.vectors[start_entry]);
+            let entry_score = if normalize {
+                self.normalize_score(entry_distance)
+            } else {
+                entry_distance
+            };
+        
+            let initial = NodeCandidate {
+                idx: start_entry,
+                raw_score: entry_distance,
+                sort_key: entry_score,
+            };
+        
+            scratch.candidate_queue.push(initial.clone());
+            scratch.result_set.push(NodeResult(initial.clone()));
+            if scratch.mark_visited(start_entry) {
+                visited_count += 1;
             }
+        
+            //println!("[search_layer_unfiltered] Initial score at entry {}: {:.4}",start_entry, entry_score);
 
-            let current = candidate_queue.pop().unwrap();
-            expanded += 1;
-            if let Some(neighbors) = self.layers.get(&level).and_then(|l| l.get(&current.id)) {
-                for &neighbor in neighbors {
-                    if self.deleted.contains(&neighbor) || !visited.insert(neighbor) {
-                        continue;
-                    }
-    
-                    let raw = self.fast_score(query, &self.vectors[&neighbor]);
-                    let score_val = if normalize {
-                        self.normalize_score(raw)
+            let mut worst_score = scratch.result_set.peek().unwrap().0.sort_key;
+            let allow_early_exit = self.metric != DistanceMetric::Dot && !disable_early_exit();
+            let patience_limit = if allow_early_exit { early_exit_patience() } else { 0 };
+            let mut no_improve_streak = 0usize;
+
+            while let Some(current) = scratch.candidate_queue.peek() {
+                if allow_early_exit && scratch.result_set.len() >= ef {
+                    if current.sort_key > worst_score {
+                        no_improve_streak += 1;
                     } else {
-                        raw
-                    };
+                        no_improve_streak = 0;
+                    }
+                    if no_improve_streak > patience_limit {
+                        break;
+                    }
+                }
 
-                    // For Dot we explore broadly (push all neighbors) to avoid getting stuck in local optima.
-                    let push_candidate = self.metric == DistanceMetric::Dot
-                        || result_set.len() < ef
-                        || score_val < worst_score;
-
-                    if push_candidate {
-                        let sp = ScoredPoint {
-                            id: neighbor,
-                            raw_score: raw,
-                            sort_key: score_val,
+                let current = scratch.candidate_queue.pop().unwrap();
+                expanded += 1;
+                if let Some(neighbors) = self.layers.get(level).and_then(|l| l.get(current.idx)) {
+                    for &neighbor in neighbors {
+                        if self.deleted.get(neighbor).copied().unwrap_or(false) || !scratch.mark_visited(neighbor) {
+                            continue;
+                        }
+                        visited_count += 1;
+        
+                        let raw = self.fast_score(query, &self.vectors[neighbor]);
+                        let score_val = if normalize {
+                            self.normalize_score(raw)
+                        } else {
+                            raw
                         };
-                        candidate_queue.push(sp.clone());
 
-                        // Still keep result_set trimmed to ef best items.
-                        if result_set.len() < ef || score_val < worst_score {
-                            result_set.push(ResultPoint(sp));
-                            if result_set.len() > ef {
-                                result_set.pop();
+                        // For Dot we explore broadly (push all neighbors) to avoid getting stuck in local optima.
+                        let push_candidate = self.metric == DistanceMetric::Dot
+                            || scratch.result_set.len() < ef
+                            || score_val < worst_score;
+
+                        if push_candidate {
+                            let sp = NodeCandidate {
+                                idx: neighbor,
+                                raw_score: raw,
+                                sort_key: score_val,
+                            };
+                            scratch.candidate_queue.push(sp.clone());
+
+                            // Still keep result_set trimmed to ef best items.
+                            if scratch.result_set.len() < ef || score_val < worst_score {
+                                scratch.result_set.push(NodeResult(sp));
+                                if scratch.result_set.len() > ef {
+                                    scratch.result_set.pop();
+                                }
+                                if let Some(rp) = scratch.result_set.peek() {
+                                    worst_score = rp.0.sort_key;
+                                }
                             }
-                            if let Some(rp) = result_set.peek() {
-                                worst_score = rp.0.sort_key;
-                            }
+                        }
+                    }
+                }
+
+                // Guard against runaway expansion; treat as a backstop, not the primary stop signal.
+                if self.metric != DistanceMetric::Dot {
+                    if let Some(cap) = expansion_cap {
+                        if expanded >= cap {
+                            break;
                         }
                     }
                 }
             }
 
-            // Guard against runaway expansion; treat as a backstop, not the primary stop signal.
-            if self.metric != DistanceMetric::Dot {
-                if let Some(cap) = expansion_cap {
-                    if expanded >= cap {
-                        break;
-                    }
-                }
+            let mut results: Vec<NodeCandidate> = std::mem::take(&mut scratch.result_set)
+                .into_iter()
+                .map(|rp| rp.0)
+                .collect();
+            results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
+        
+            //println!("[search_layer_unfiltered] Done. Returning top {} results: {:?}",results.len(),results.iter().map(|sp| sp.idx).collect::<Vec<_>>());
+            if let Some(stats) = stats {
+                stats.visited = visited_count;
+                stats.expanded = expanded;
             }
-        }
 
-        let mut results: Vec<ScoredPoint> = result_set.into_iter().map(|rp| rp.0).collect();
-        results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
-    
-        //println!("[search_layer_unfiltered] Done. Returning top {} results: {:?}",results.len(),results.iter().map(|sp| sp.id).collect::<Vec<_>>());
-        if let Some(stats) = stats {
-            stats.visited = visited.len();
-            stats.expanded = expanded;
-        }
-
-        Ok(results)
+            Ok(results)
+        })
     }
        
     pub fn search(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
@@ -1099,7 +1318,8 @@ impl HNSWIndex {
             query.clone()
         };
 
-        let collection_size = self.vectors.len() - self.deleted.len();
+        let deleted_count = self.deleted.iter().filter(|d| **d).count();
+        let collection_size = self.vectors.len().saturating_sub(deleted_count);
         let exact_scan_possible = self.exact_fallback_enabled
             && collection_size <= self.exact_fallback_threshold;
 
@@ -1137,13 +1357,28 @@ impl HNSWIndex {
             a.sort_key
                 .partial_cmp(&b.sort_key)
                 .unwrap()
-                .then_with(|| a.id.cmp(&b.id))
+                .then_with(|| self.point_id(a.idx).cmp(&self.point_id(b.idx)))
         });
         results.truncate(top_k);
+        let mut scored = results
+            .into_iter()
+            .map(|cand| ScoredPoint {
+                id: self.point_id(cand.idx),
+                raw_score: cand.raw_score,
+                sort_key: cand.sort_key,
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|a, b| {
+            a.sort_key
+                .partial_cmp(&b.sort_key)
+                .unwrap()
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        scored.truncate(top_k);
 
         if log_enabled {
-            let best = results.first().map(|r| r.sort_key).unwrap_or(0.0);
-            let worst = results.last().map(|r| r.sort_key).unwrap_or(0.0);
+            let best = scored.first().map(|r| r.sort_key).unwrap_or(0.0);
+            let worst = scored.last().map(|r| r.sort_key).unwrap_or(0.0);
             UNFILTERED_SEARCH_AGG.with(|cell| {
                 cell.borrow_mut().record(UnfilteredSample {
                     ef_search,
@@ -1155,7 +1390,7 @@ impl HNSWIndex {
             });
         }
 
-        Ok(results)
+        Ok(scored)
     }
 
     pub fn find_entry_point_matching_filter(
@@ -1163,16 +1398,16 @@ impl HNSWIndex {
         filter: &Filter,
         payload_index: &PayloadIndex,
         payloads: &HashMap<PointId, Payload>,
-    ) -> Option<PointId> {
+    ) -> Option<usize> {
         fn max_level_point<'a>(
             ids: impl Iterator<Item = &'a PointId>,
-            levels: &HashMap<PointId, usize>,
-            deleted: &HashSet<PointId>,
-            vectors: &HashMap<PointId, Vector>,
-        ) -> Option<PointId> {
-            ids.filter(|&&id| !deleted.contains(&id) && vectors.contains_key(&id))
-                .max_by_key(|&&id| levels.get(&id).copied().unwrap_or(0))
-                .copied()
+            levels: &[usize],
+            deleted: &[bool],
+            map: &HashMap<PointId, usize>,
+        ) -> Option<usize> {
+            ids.filter_map(|id| map.get(id).copied())
+                .filter(|&idx| !deleted.get(idx).copied().unwrap_or(false))
+                .max_by_key(|&idx| levels.get(idx).copied().unwrap_or(0))
         }
     
         match filter {
@@ -1180,15 +1415,15 @@ impl HNSWIndex {
                 payload_index
                     .query_exact(key, value)
                     .and_then(|ids| {
-                        max_level_point(ids.iter(), &self.levels, &self.deleted, &self.vectors)
+                        max_level_point(ids.iter(), &self.levels, &self.deleted, &self.point_to_idx)
                     })
             }
             Filter::And(conds) | Filter::Or(conds) => {
-                let mut best: Option<(PointId, usize)> = None;
+                let mut best: Option<(usize, usize)> = None;
     
                 for cond in conds {
                     if let Some(id) = self.find_entry_point_matching_filter(cond, payload_index, payloads) {
-                        let level = self.levels.get(&id).copied().unwrap_or(0);
+                        let level = self.levels.get(id).copied().unwrap_or(0);
                         if best.map_or(true, |(_, l)| level > l) {
                             best = Some((id, level));
                         }
@@ -1263,22 +1498,23 @@ impl HNSWIndex {
         let match_filter = self.extract_match_filter(full_filter);
 
         // 2) pick the entry point exactly as before
-        let mut entry = match self.get_entry_point() {
-            Some(id) => {
+        let mut entry = match self.entry_point {
+            Some(idx) => {
                 if let Some(f) = full_filter {
-                    if let Some(p) = payloads.get(&id) {
+                    let entry_id = self.point_id(idx);
+                    if let Some(p) = payloads.get(&entry_id) {
                         if evaluate_filter(f, p)? {
-                            id
+                            idx
                         } else {
                             self.find_entry_point_matching_filter(f, payload_index, payloads)
-                                .unwrap_or(id)
+                                .unwrap_or(idx)
                         }
                     } else {
                         self.find_entry_point_matching_filter(f, payload_index, payloads)
-                            .unwrap_or(id)
+                            .unwrap_or(idx)
                     }
                 } else {
-                    id
+                    idx
                 }
             }
             None => {
@@ -1306,11 +1542,12 @@ impl HNSWIndex {
 
         // 4) now do the ef‐search on level 0, but *only* apply the full filter
         //    at the moment we push into the result‐heap:
-        let mut visited = HashSet::new();
-        // routing_pq holds all candidates (filtered or not), ordered by best distance first.
-        let mut routing_pq: BinaryHeap<RoutingEntry> = BinaryHeap::new();
-        // results_pq holds only filter-passing points competing for the final top_k; worst on top.
-        let mut results_pq: BinaryHeap<ResultPoint> = BinaryHeap::new();
+        let result = SEARCH_SCRATCH.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            scratch.next_epoch(self.vectors.len());
+            scratch.routing_pq.clear();
+            scratch.results_pq.clear();
+            let mut visited_count = 0usize;
         let log_seed = std::env::var("VECTORDB_LOG_FILTER_SEED")
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
@@ -1320,9 +1557,9 @@ impl HNSWIndex {
         let mut early_exit = false;
 
         let search_start = std::time::Instant::now();
-        let dist0 = self.fast_score(&query_for_search, self.get_vector(&entry).unwrap());
+        let dist0 = self.fast_score(&query_for_search, self.get_vector_by_idx(entry).unwrap());
         let sk0   = if use_normalize_score { self.normalize_score(dist0) } else { dist0 };
-        let first = ScoredPoint { id: entry, raw_score: dist0, sort_key: sk0 };
+        let first = NodeCandidate { idx: entry, raw_score: dist0, sort_key: sk0 };
         let mut filter_checked = 0usize;
         let mut filter_passed = 0usize;
         let mut seeds_popped = 0usize;
@@ -1337,53 +1574,103 @@ impl HNSWIndex {
 
         let entry_passes = full_filter.map_or(true, |f| {
             filter_checked += 1;
-            let ok = payloads.get(&entry).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+            let entry_id = self.point_id(entry);
+            let ok = payloads.get(&entry_id).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
             if ok {
                 filter_passed += 1;
             }
             ok
         });
-        routing_pq.push(RoutingEntry {
-            sp: first.clone(),
+        scratch.routing_pq.push(NodeRoutingEntry {
+            node: first.clone(),
             passes_filter: entry_passes,
             budget: if entry_passes { passing_budget } else { failing_budget },
         });
         // only push into results_pq if it passes the *full* filter:
         if entry_passes {
-            results_pq.push(ResultPoint(first));
+            scratch.results_pq.push(NodeResult(first));
         }
-        visited.insert(entry);
+        if scratch.mark_visited(entry) {
+            visited_count += 1;
+        }
 
         // Seed the beam with a few IDs pulled from the inverted index that match equality filters.
         // This helps reach filtered regions even when the graph lacks filter-aware edges.
         let seed_limit = self.ef;
-        let mut seed_ids = HashSet::new();
-        fn collect_match_ids(filter: &Filter, idx: &PayloadIndex, out: &mut HashSet<PointId>) {
+        let seed_len = self.vectors.len();
+        fn collect_match_ids(
+            filter: &Filter,
+            idx: &PayloadIndex,
+            scratch: &mut SearchScratch,
+            map: &HashMap<PointId, usize>,
+            len: usize,
+            primary: bool,
+        ) {
             match filter {
                 Filter::Match { key, value } => {
                     if let Some(ids) = idx.query_exact(key, value) {
-                        out.extend(ids.iter().copied());
-                    }
-                }
-                Filter::And(parts) => {
-                    // For AND, intersect the matches to keep the seed set tight.
-                    let mut local: Option<HashSet<PointId>> = None;
-                    for p in parts {
-                        let mut subset = HashSet::new();
-                        collect_match_ids(p, idx, &mut subset);
-                        if let Some(acc) = &mut local {
-                            acc.retain(|id| subset.contains(id));
-                        } else {
-                            local = Some(subset);
+                        for id in ids.iter().copied() {
+                            if let Some(&node_idx) = map.get(&id) {
+                                if primary {
+                                    scratch.mark_seed(node_idx);
+                                } else {
+                                    scratch.mark_temp(node_idx);
+                                }
+                            }
                         }
-                    }
-                    if let Some(s) = local {
-                        out.extend(s);
                     }
                 }
                 Filter::Or(parts) => {
                     for p in parts {
-                        collect_match_ids(p, idx, out);
+                        if primary {
+                            scratch.reset_temp(len);
+                            collect_match_ids(p, idx, scratch, map, len, false);
+                            let other = scratch.temp_list.clone();
+                            for id in other {
+                                scratch.mark_seed(id);
+                            }
+                        } else {
+                            scratch.reset_seed(len);
+                            collect_match_ids(p, idx, scratch, map, len, true);
+                            let other = scratch.seed_list.clone();
+                            for id in other {
+                                scratch.mark_temp(id);
+                            }
+                        }
+                    }
+                }
+                Filter::And(parts) => {
+                    if parts.is_empty() {
+                        return;
+                    }
+                    if primary {
+                        scratch.reset_seed(len);
+                        collect_match_ids(&parts[0], idx, scratch, map, len, true);
+                        for p in parts.iter().skip(1) {
+                            scratch.reset_temp(len);
+                            collect_match_ids(p, idx, scratch, map, len, false);
+                            let retained = std::mem::take(&mut scratch.seed_list);
+                            scratch.reset_seed(len);
+                            for id in retained {
+                                if scratch.is_temp(id) {
+                                    scratch.mark_seed(id);
+                                }
+                            }
+                        }
+                    } else {
+                        scratch.reset_temp(len);
+                        collect_match_ids(&parts[0], idx, scratch, map, len, false);
+                        for p in parts.iter().skip(1) {
+                            scratch.reset_seed(len);
+                            collect_match_ids(p, idx, scratch, map, len, true);
+                            let retained = std::mem::take(&mut scratch.temp_list);
+                            scratch.reset_temp(len);
+                            for id in retained {
+                                if scratch.is_seed(id) {
+                                    scratch.mark_temp(id);
+                                }
+                            }
+                        }
                     }
                 }
                 Filter::Not(_) | Filter::Compare { .. } => {}
@@ -1394,26 +1681,31 @@ impl HNSWIndex {
             .unwrap_or(true);
         if use_seeds {
             if let Some(f) = full_filter {
-                collect_match_ids(f, payload_index, &mut seed_ids);
+                scratch.reset_seed(seed_len);
+                scratch.reset_temp(seed_len);
+                collect_match_ids(f, payload_index, &mut scratch, &self.point_to_idx, seed_len, true);
             }
         }
-        let seed_pool_size = seed_ids.len();
+        let seed_pool_size = scratch.seed_list.len();
         let mut seeds_added = 0usize;
         let mut seeds_accepted = 0usize;
-        if use_seeds && !seed_ids.is_empty() {
-            for id in seed_ids.iter().copied() {
+        if use_seeds && !scratch.seed_list.is_empty() {
+            let seed_ids = scratch.seed_list.clone();
+            for idx in seed_ids {
                 if seeds_added >= seed_limit {
                     break;
                 }
-                if self.deleted.contains(&id) || !visited.insert(id) {
+                if self.deleted.get(idx).copied().unwrap_or(false) || !scratch.mark_visited(idx) {
                     continue;
                 }
-                let Some(vec) = self.get_vector(&id) else { continue; };
+                visited_count += 1;
+                let Some(vec) = self.get_vector_by_idx(idx) else { continue; };
                 let d = self.fast_score(&query_for_search, vec);
                 let sk = if use_normalize_score { self.normalize_score(d) } else { d };
-                let sp = ScoredPoint { id, raw_score: d, sort_key: sk };
+                let sp = NodeCandidate { idx, raw_score: d, sort_key: sk };
                 let passes = full_filter.map_or(true, |f| {
                     filter_checked += 1;
+                    let id = self.point_id(idx);
                     let ok = payloads.get(&id).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
                     if ok {
                         filter_passed += 1;
@@ -1421,36 +1713,36 @@ impl HNSWIndex {
                     ok
                 });
                 let budget = if passes { passing_budget } else { failing_budget };
-                routing_pq.push(RoutingEntry {
-                    sp: sp.clone(),
+                scratch.routing_pq.push(NodeRoutingEntry {
+                    node: sp.clone(),
                     passes_filter: passes,
                     budget,
                 });
                 if passes {
-                    results_pq.push(ResultPoint(sp));
+                    scratch.results_pq.push(NodeResult(sp));
                     seeds_accepted += 1;
                 }
                 seeds_added += 1;
             }
         }
 
-        let mut worst = results_pq.peek().map(|rp| rp.0.sort_key).unwrap_or(f32::MAX);
+        let mut worst = scratch.results_pq.peek().map(|rp| rp.0.sort_key).unwrap_or(f32::MAX);
 
         let mut expansions = 0usize;
         let mut stop_reason = "queue_exhausted".to_string();
 
-        while let Some(curr) = routing_pq.pop() {
+        while let Some(curr) = scratch.routing_pq.pop() {
             expansions += 1;
-            if seed_ids.contains(&curr.sp.id) {
+            if scratch.is_seed(curr.node.idx) {
                 seeds_popped += 1;
             }
             routing_popped_total += 1;
             if curr.passes_filter {
                 routing_popped_passing += 1;
             }
-            if allow_early_exit && patience_limit > 0 && results_pq.len() >= self.ef {
-                if let Some(next) = routing_pq.peek() {
-                    if next.sp.sort_key > worst {
+            if allow_early_exit && patience_limit > 0 && scratch.results_pq.len() >= self.ef {
+                if let Some(next) = scratch.routing_pq.peek() {
+                    if next.node.sort_key > worst {
                         no_improve_streak += 1;
                     } else {
                         no_improve_streak = 0;
@@ -1472,7 +1764,7 @@ impl HNSWIndex {
             // Once we already have top_k passing the filter, stop exploring candidates
             // that are worse than our current worst. This restores the usual early-exit
             // even when a filter is present.
-            if results_pq.len() >= top_k && curr.sp.sort_key > worst {
+            if scratch.results_pq.len() >= top_k && curr.node.sort_key > worst {
                 stop_reason = "pruned_by_worst".to_string();
                 break;
             }
@@ -1481,19 +1773,21 @@ impl HNSWIndex {
                 continue;
             }
 
-            if let Some(neighs) = self.layer_neighbors(0, curr.sp.id) {
+            if let Some(neighs) = self.layer_neighbors(0, curr.node.idx) {
                 for &nb in neighs {
-                    if self.deleted.contains(&nb) || !visited.insert(nb) {
+                    if self.deleted.get(nb).copied().unwrap_or(false) || !scratch.mark_visited(nb) {
                         continue;
                     }
+                    visited_count += 1;
 
-                    let d   = self.fast_score(&query_for_search, self.get_vector(&nb).unwrap());
+                    let d   = self.fast_score(&query_for_search, self.get_vector_by_idx(nb).unwrap());
                     let sk  = if use_normalize_score { self.normalize_score(d) } else { d };
-                    let sp  = ScoredPoint { id: nb, raw_score: d, sort_key: sk };
+                    let sp  = NodeCandidate { idx: nb, raw_score: d, sort_key: sk };
 
                 let passes = full_filter.map_or(true, |f| {
                     filter_checked += 1;
-                    let ok = payloads.get(&nb).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+                    let id = self.point_id(nb);
+                    let ok = payloads.get(&id).map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
                     if ok {
                         filter_passed += 1;
                     }
@@ -1501,8 +1795,8 @@ impl HNSWIndex {
                 });
                 let budget = if passes { passing_budget } else { failing_budget };
                 if budget > 0 {
-                routing_pq.push(RoutingEntry {
-                    sp: sp.clone(),
+                scratch.routing_pq.push(NodeRoutingEntry {
+                    node: sp.clone(),
                     passes_filter: passes,
                     budget,
                 });
@@ -1510,13 +1804,13 @@ impl HNSWIndex {
                 let passes_for_results = passes;
                 if passes_for_results {
                     // *now* apply the full filter before pushing to result_set
-                        results_pq.push(ResultPoint(sp));
+                        scratch.results_pq.push(NodeResult(sp));
                         results_inserted += 1;
-                        if results_pq.len() > result_cap {
-                            results_pq.pop();
+                        if scratch.results_pq.len() > result_cap {
+                            scratch.results_pq.pop();
                         }
-                        if results_pq.len() >= top_k {
-                            worst = results_pq.peek().unwrap().0.sort_key;
+                        if scratch.results_pq.len() >= top_k {
+                            worst = scratch.results_pq.peek().unwrap().0.sort_key;
                         }
                     }
                 }
@@ -1524,14 +1818,24 @@ impl HNSWIndex {
         }
 
         // unwrap the inner ScoredPoint and truncate to top_k
-        let mut out = results_pq
+        let mut out = std::mem::take(&mut scratch.results_pq)
             .into_sorted_vec()
             .into_iter()
-            .map(|rp| rp.0)
+            .map(|rp| {
+                let cand = rp.0;
+                ScoredPoint {
+                    id: self.point_id(cand.idx),
+                    raw_score: cand.raw_score,
+                    sort_key: cand.sort_key,
+                }
+            })
             .collect::<Vec<_>>();
         out.truncate(top_k);
 
-        let seeds_in_results = out.iter().filter(|sp| seed_ids.contains(&sp.id)).count();
+        let seeds_in_results = out
+            .iter()
+            .filter(|sp| self.idx_of(sp.id).map_or(false, |idx| scratch.is_seed(idx)))
+            .count();
 
         if log_seed && full_filter.is_some() {
             let chunk = filter_seed_log_chunk();
@@ -1555,7 +1859,7 @@ impl HNSWIndex {
         }
 
         if let Some(log) = filter_search_logger() {
-            let best_routing_dist_at_exit = routing_pq.peek().map(|sp| sp.sp.sort_key).unwrap_or(f32::MAX);
+            let best_routing_dist_at_exit = scratch.routing_pq.peek().map(|sp| sp.node.sort_key).unwrap_or(f32::MAX);
             let results_pq_peek_dist = worst;
             let entry = FilterSearchLogEntry {
                 seq: next_filter_search_seq(),
@@ -1569,7 +1873,7 @@ impl HNSWIndex {
                 seeds_popped,
                 filter_checked,
                 filter_passed,
-                visited: visited.len(),
+                visited: visited_count,
                 expansions,
                 max_expansions,
                 results_len: out.len(),
@@ -1592,20 +1896,23 @@ impl HNSWIndex {
         }
 
         Ok(out)
+    });
+
+        result
     }
 
     /// Heuristic neighbor selector that enforces diversity (HNSW heuristic 2).
-    fn select_diverse_neighbors(&self, candidates: &[ScoredPoint], m: usize, normalize_scores: bool) -> Vec<PointId> {
+    fn select_diverse_neighbors(&self, candidates: &[NodeCandidate], m: usize, normalize_scores: bool) -> Vec<usize> {
         let mut result = Vec::with_capacity(m);
         for cand in candidates {
             if result.len() >= m {
                 break;
             }
-            let Some(cand_vec) = self.get_vector(&cand.id) else { continue; };
+            let Some(cand_vec) = self.get_vector_by_idx(cand.idx) else { continue; };
             let d_qc = cand.sort_key; // already normalized when requested
             let mut too_close = false;
             for &r_id in &result {
-                let Some(r_vec) = self.get_vector(&r_id) else { continue; };
+                let Some(r_vec) = self.get_vector_by_idx(r_id) else { continue; };
                 let d_cr_raw = self.fast_score(cand_vec, r_vec);
                 let d_cr = if normalize_scores { self.normalize_score(d_cr_raw) } else { d_cr_raw };
                 if d_cr < d_qc {
@@ -1614,7 +1921,7 @@ impl HNSWIndex {
                 }
             }
             if !too_close {
-                result.push(cand.id);
+                result.push(cand.idx);
             }
         }
         // If we selected fewer than m due to the diversity filter, backfill with remaining closest candidates.
@@ -1623,8 +1930,8 @@ impl HNSWIndex {
                 if result.len() >= m {
                     break;
                 }
-                if !result.contains(&cand.id) {
-                    result.push(cand.id);
+                if !result.contains(&cand.idx) {
+                    result.push(cand.idx);
                 }
             }
         }
@@ -1633,19 +1940,22 @@ impl HNSWIndex {
     
     
     pub fn contains(&self, point_id: &PointId) -> bool {
-        self.vectors.contains_key(point_id)
+        self.point_to_idx.contains_key(point_id)
     }
 
     pub fn len(&self) -> usize {
         self.vectors.len()
     }
 
-    pub fn layer_neighbors(&self, level: usize, point_id: PointId) -> Option<&Vec<PointId>> {
-        self.layers.get(&level)?.get(&point_id)
+    pub fn layer_neighbors(&self, level: usize, idx: usize) -> Option<&Vec<usize>> {
+        self.layers.get(level)?.get(idx)
     }
 
     pub fn iter_vectors(&self) -> impl Iterator<Item = (&PointId, &Vector)> {
-        self.vectors.iter()
+        self.vectors
+            .iter()
+            .enumerate()
+            .map(|(idx, vec)| (&self.idx_to_point[idx], vec))
     }
 
     pub fn metric(&self) -> DistanceMetric {
@@ -1687,15 +1997,16 @@ impl HNSWIndex {
 
     pub fn get_vector(&self, point_id: &PointId) -> Option<&Vector> {
         // Optionally, one might return None for deleted points.
-        if self.deleted.contains(point_id) {
+        let idx = self.idx_of(*point_id)?;
+        if self.deleted.get(idx).copied().unwrap_or(false) {
             None
         } else {
-            self.vectors.get(point_id)
+            self.vectors.get(idx)
         }
     }
 
     pub fn get_entry_point(&self) -> Option<u64> {
-        self.entry_point
+        self.entry_point.map(|idx| self.point_id(idx))
     }
 
     pub fn current_max_level(&self) -> usize {
@@ -1703,7 +2014,9 @@ impl HNSWIndex {
     }
 
     pub fn set_entry_point(&mut self, point_id: PointId) {
-        self.entry_point = Some(point_id);
+        if let Some(idx) = self.idx_of(point_id) {
+            self.entry_point = Some(idx);
+        }
     }
 
     pub fn set_current_max_level(&mut self, level: usize) {
@@ -1733,11 +2046,39 @@ impl HNSWIndex {
     }
 
     pub fn to_snapshot(&self) -> HnswSnapshot {
+        let mut vectors = HashMap::with_capacity(self.vectors.len());
+        let mut levels = HashMap::with_capacity(self.levels.len());
+        let mut deleted = HashSet::new();
+        for (idx, vec) in self.vectors.iter().enumerate() {
+            let id = self.point_id(idx);
+            vectors.insert(id, vec.clone());
+            levels.insert(id, self.levels.get(idx).copied().unwrap_or(0));
+            if self.deleted.get(idx).copied().unwrap_or(false) {
+                deleted.insert(id);
+            }
+        }
+
+        let mut layers = HashMap::new();
+        for (level, layer) in self.layers.iter().enumerate() {
+            let mut level_map: HashMap<PointId, Vec<PointId>> = HashMap::new();
+            for (idx, neighbors) in layer.iter().enumerate() {
+                if neighbors.is_empty() {
+                    continue;
+                }
+                let id = self.point_id(idx);
+                let mapped = neighbors.iter().map(|&n| self.point_id(n)).collect::<Vec<_>>();
+                level_map.insert(id, mapped);
+            }
+            if !level_map.is_empty() {
+                layers.insert(level, level_map);
+            }
+        }
+
         HnswSnapshot {
-            layers: self.layers.clone(),
-            vectors: self.vectors.clone(),
-            levels: self.levels.clone(),
-            entry_point: self.entry_point,
+            layers,
+            vectors,
+            levels,
+            entry_point: self.entry_point.map(|idx| self.point_id(idx)),
             metric: self.metric,
             m: self.m,
             ef: self.ef,
@@ -1746,18 +2087,61 @@ impl HNSWIndex {
             level_scale: self.level_scale,
             current_max_level: self.current_max_level,
             dim: self.dim,
-            deleted: self.deleted.clone(),
+            deleted,
             exact_fallback_enabled: self.exact_fallback_enabled,
             exact_fallback_threshold: self.exact_fallback_threshold,
         }
     }
 
     pub fn from_snapshot(snapshot: HnswSnapshot) -> Self {
+        let mut ids: Vec<PointId> = snapshot.vectors.keys().copied().collect();
+        ids.sort_unstable();
+        let mut point_to_idx = HashMap::with_capacity(ids.len());
+        for (idx, id) in ids.iter().copied().enumerate() {
+            point_to_idx.insert(id, idx);
+        }
+        let mut vectors = Vec::with_capacity(ids.len());
+        let mut levels = Vec::with_capacity(ids.len());
+        let mut deleted = vec![false; ids.len()];
+        for (idx, id) in ids.iter().copied().enumerate() {
+            if let Some(vec) = snapshot.vectors.get(&id) {
+                vectors.push(vec.clone());
+            } else {
+                vectors.push(Vec::new());
+            }
+            levels.push(snapshot.levels.get(&id).copied().unwrap_or(0));
+            if snapshot.deleted.contains(&id) {
+                deleted[idx] = true;
+            }
+        }
+        let num_levels = snapshot
+            .layers
+            .keys()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .max(snapshot.current_max_level)
+            + 1;
+        let mut layers = vec![vec![Vec::with_capacity(snapshot.m + 1); ids.len()]; num_levels];
+        for (level, layer_map) in snapshot.layers.iter() {
+            if *level >= layers.len() {
+                continue;
+            }
+            for (id, neighbors) in layer_map {
+                let Some(&idx) = point_to_idx.get(id) else { continue; };
+                let mapped = neighbors
+                    .iter()
+                    .filter_map(|n| point_to_idx.get(n).copied())
+                    .collect::<Vec<_>>();
+                layers[*level][idx] = mapped;
+            }
+        }
+
         Self {
-            layers: snapshot.layers,
-            vectors: snapshot.vectors,
-            levels: snapshot.levels,
-            entry_point: snapshot.entry_point,
+            layers,
+            vectors,
+            levels,
+            entry_point: snapshot.entry_point.and_then(|id| point_to_idx.get(&id).copied()),
             metric: snapshot.metric,
             m: snapshot.m,
             ef: snapshot.ef,
@@ -1766,7 +2150,9 @@ impl HNSWIndex {
             level_scale: snapshot.level_scale,
             current_max_level: snapshot.current_max_level,
             dim: snapshot.dim,
-            deleted: snapshot.deleted,
+            deleted,
+            point_to_idx,
+            idx_to_point: ids,
             exact_fallback_enabled: snapshot.exact_fallback_enabled,
             exact_fallback_threshold: snapshot.exact_fallback_threshold,
         }
