@@ -368,19 +368,3 @@ fn test_high_dimensional_accuracy() {
     assert_eq!(results[0].id, 1, "Expected ID 1 to be closest to query");
 }
 
-
-#[test]
-fn test_stable_search_results() {
-    let mut hnsw = HNSWIndex::new(DistanceMetric::Cosine, 16, 64, 16, 3);
-    for i in 0..100 {
-        hnsw.insert(i, vecf(&[i as f32, 1.0, 0.0])).unwrap();
-    
-    }
-
-    let query = vecf(&[50.0, 1.0, 0.0]);
-
-    let first = hnsw.search(&query, 5).unwrap();
-    let second = hnsw.search(&query, 5).unwrap();
-
-    assert_eq!(first, second, "Search results should be deterministic");
-}

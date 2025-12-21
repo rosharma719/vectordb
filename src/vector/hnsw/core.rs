@@ -102,16 +102,18 @@ impl HNSWIndex {
     pub(crate) fn fast_score(&self, query: &Vector, vec: &Vector) -> f32 {
         match self.metric {
             DistanceMetric::Cosine => {
-                let dot: f32 = query.iter().zip(vec.iter()).map(|(x, y)| x * y).sum();
-                1.0 - dot
+                let dot: f32 = dot_product(query, vec);
+                let sim = if dot > 1.0 {
+                    1.0
+                } else if dot < -1.0 {
+                    -1.0
+                } else {
+                    dot
+                };
+                1.0 - sim
             }
-            DistanceMetric::Dot => query.iter().zip(vec.iter()).map(|(x, y)| x * y).sum(),
-            DistanceMetric::Euclidean => query
-                .iter()
-                .zip(vec.iter())
-                .map(|(x, y)| (x - y).powi(2))
-                .sum::<f32>()
-                .sqrt(),
+            DistanceMetric::Dot => dot_product(query, vec),
+            DistanceMetric::Euclidean => l2_squared(query, vec),
         }
     }
 
@@ -273,16 +275,182 @@ impl HNSWIndex {
     pub fn maybe_normalize(&self, vec: &Vector) -> Vector {
         match self.metric {
             DistanceMetric::Cosine => {
-                let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let norm = vec
+                    .iter()
+                    .map(|x| (*x as f64) * (*x as f64))
+                    .sum::<f64>()
+                    .sqrt();
                 if norm == 0.0 {
                     vec.clone()
                 } else {
-                    vec.iter().map(|x| x / norm).collect()
+                    let inv = 1.0 / norm;
+                    vec.iter().map(|x| (*x as f64 * inv) as f32).collect()
                 }
             }
             _ => vec.clone(),
         }
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn dot_product(query: &[f32], vec: &[f32]) -> f32 {
+    unsafe { dot_neon(query, vec) }
+}
+
+#[cfg(all(not(target_arch = "aarch64"), target_arch = "x86_64"))]
+#[inline]
+fn dot_product(query: &[f32], vec: &[f32]) -> f32 {
+    if std::arch::is_x86_feature_detected!("avx2") {
+        unsafe { dot_avx2(query, vec) }
+    } else {
+        dot_scalar(query, vec)
+    }
+}
+
+#[cfg(all(not(target_arch = "aarch64"), not(target_arch = "x86_64")))]
+#[inline]
+fn dot_product(query: &[f32], vec: &[f32]) -> f32 {
+    dot_scalar(query, vec)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn l2_squared(query: &[f32], vec: &[f32]) -> f32 {
+    unsafe { l2_neon(query, vec) }
+}
+
+#[cfg(all(not(target_arch = "aarch64"), target_arch = "x86_64"))]
+#[inline]
+fn l2_squared(query: &[f32], vec: &[f32]) -> f32 {
+    if std::arch::is_x86_feature_detected!("avx2") {
+        unsafe { l2_avx2(query, vec) }
+    } else {
+        l2_scalar(query, vec)
+    }
+}
+
+#[cfg(all(not(target_arch = "aarch64"), not(target_arch = "x86_64")))]
+#[inline]
+fn l2_squared(query: &[f32], vec: &[f32]) -> f32 {
+    l2_scalar(query, vec)
+}
+
+#[allow(dead_code)]
+#[inline]
+fn dot_scalar(query: &[f32], vec: &[f32]) -> f32 {
+    query.iter().zip(vec.iter()).map(|(x, y)| x * y).sum()
+}
+
+#[allow(dead_code)]
+#[inline]
+fn l2_scalar(query: &[f32], vec: &[f32]) -> f32 {
+    query
+        .iter()
+        .zip(vec.iter())
+        .map(|(x, y)| {
+            let diff = x - y;
+            diff * diff
+        })
+        .sum::<f32>()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline]
+unsafe fn dot_avx2(query: &[f32], vec: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let mut sum = _mm256_setzero_ps();
+    let mut i = 0;
+    let len = query.len().min(vec.len());
+    while i + 8 <= len {
+        let q = _mm256_loadu_ps(query.as_ptr().add(i));
+        let v = _mm256_loadu_ps(vec.as_ptr().add(i));
+        sum = _mm256_add_ps(sum, _mm256_mul_ps(q, v));
+        i += 8;
+    }
+    let sum128 = _mm_add_ps(_mm256_castps256_ps128(sum), _mm256_extractf128_ps(sum, 1));
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let mut acc = _mm_cvtss_f32(sum128);
+    while i < len {
+        acc += query.get_unchecked(i) * vec.get_unchecked(i);
+        i += 1;
+    }
+    acc
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline]
+unsafe fn l2_avx2(query: &[f32], vec: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let mut sum = _mm256_setzero_ps();
+    let mut i = 0;
+    let len = query.len().min(vec.len());
+    while i + 8 <= len {
+        let q = _mm256_loadu_ps(query.as_ptr().add(i));
+        let v = _mm256_loadu_ps(vec.as_ptr().add(i));
+        let diff = _mm256_sub_ps(q, v);
+        sum = _mm256_add_ps(sum, _mm256_mul_ps(diff, diff));
+        i += 8;
+    }
+    let sum128 = _mm_add_ps(_mm256_castps256_ps128(sum), _mm256_extractf128_ps(sum, 1));
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let mut acc = _mm_cvtss_f32(sum128);
+    while i < len {
+        let diff = query.get_unchecked(i) - vec.get_unchecked(i);
+        acc += diff * diff;
+        i += 1;
+    }
+    acc
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline]
+unsafe fn dot_neon(query: &[f32], vec: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+    let mut sum = vdupq_n_f32(0.0);
+    let mut i = 0;
+    let len = query.len().min(vec.len());
+    while i + 4 <= len {
+        let q = vld1q_f32(query.as_ptr().add(i));
+        let v = vld1q_f32(vec.as_ptr().add(i));
+        sum = vmlaq_f32(sum, q, v);
+        i += 4;
+    }
+    let mut acc = vaddvq_f32(sum);
+    while i < len {
+        acc += query.get_unchecked(i) * vec.get_unchecked(i);
+        i += 1;
+    }
+    acc
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline]
+unsafe fn l2_neon(query: &[f32], vec: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+    let mut sum = vdupq_n_f32(0.0);
+    let mut i = 0;
+    let len = query.len().min(vec.len());
+    while i + 4 <= len {
+        let q = vld1q_f32(query.as_ptr().add(i));
+        let v = vld1q_f32(vec.as_ptr().add(i));
+        let diff = vsubq_f32(q, v);
+        sum = vmlaq_f32(sum, diff, diff);
+        i += 4;
+    }
+    let mut acc = vaddvq_f32(sum);
+    while i < len {
+        let diff = query.get_unchecked(i) - vec.get_unchecked(i);
+        acc += diff * diff;
+        i += 1;
+    }
+    acc
 }
 
 impl HNSWIndex {
@@ -313,5 +481,86 @@ impl HNSWIndex {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::time::Instant;
+
+    fn parse_metric() -> DistanceMetric {
+        match env::var("VECTORDB_KERNEL_METRIC")
+            .unwrap_or_else(|_| "cosine".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "dot" => DistanceMetric::Dot,
+            "euclidean" | "l2" => DistanceMetric::Euclidean,
+            _ => DistanceMetric::Cosine,
+        }
+    }
+
+    fn gen_vec(seed: u32, dim: usize) -> Vector {
+        let mut v = Vec::with_capacity(dim);
+        let mut x = seed as u64 + 1;
+        for _ in 0..dim {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            let f = ((x >> 8) as u32) as f32 / (u32::MAX as f32);
+            v.push(f * 2.0 - 1.0);
+        }
+        v
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_fast_score_kernel() {
+        let dim = env::var("VECTORDB_KERNEL_DIM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1536);
+        let vecs = env::var("VECTORDB_KERNEL_VECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
+        let iters = env::var("VECTORDB_KERNEL_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        let metric = parse_metric();
+
+        let hnsw = HNSWIndex::new(metric, 16, 64, 16, dim);
+        let mut data: Vec<Vector> = (0..vecs as u32).map(|i| gen_vec(i, dim)).collect();
+        let mut query = gen_vec(999_983, dim);
+        if metric == DistanceMetric::Cosine {
+            query = hnsw.maybe_normalize(&query);
+            for v in &mut data {
+                *v = hnsw.maybe_normalize(v);
+            }
+        }
+
+        let start = Instant::now();
+        let mut acc = 0.0f32;
+        for _ in 0..iters {
+            for v in &data {
+                acc += hnsw.fast_score(&query, v);
+            }
+        }
+        let elapsed = start.elapsed();
+        let total = (iters as u64) * (vecs as u64);
+        let ns_per = elapsed.as_secs_f64() * 1e9 / total as f64;
+        let scores_per_sec = total as f64 / elapsed.as_secs_f64();
+        println!(
+            "kernel metric={:?} dim={} vecs={} iters={} total={} scores/s={:.2} ns/score={:.2} acc={:.4}",
+            metric,
+            dim,
+            vecs,
+            iters,
+            total,
+            scores_per_sec,
+            ns_per,
+            acc
+        );
     }
 }

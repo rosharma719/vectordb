@@ -1,4 +1,4 @@
-use crate::utils::types::{Vector, DistanceMetric};
+use crate::utils::types::{DistanceMetric, Vector};
 
 /// Main distance dispatcher
 pub fn score(a: &Vector, b: &Vector, metric: DistanceMetric) -> f32 {
@@ -13,23 +13,57 @@ pub fn score(a: &Vector, b: &Vector, metric: DistanceMetric) -> f32 {
 
 /// Cosine distance: 1 - cosine similarity
 fn cosine_distance(a: &Vector, b: &Vector) -> f32 {
-    let dot = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>();
-    let norm_a = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let dot = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum::<f64>();
+    let norm_a = a
+        .iter()
+        .map(|x| (*x as f64) * (*x as f64))
+        .sum::<f64>()
+        .sqrt();
+    let norm_b = b
+        .iter()
+        .map(|x| (*x as f64) * (*x as f64))
+        .sum::<f64>()
+        .sqrt();
 
-    1.0 - (dot / (norm_a * norm_b + 1e-10))  // + epsilon to avoid NaNs
+    if norm_a == 0.0 && norm_b == 0.0 {
+        return 0.0;
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 1.0;
+    }
+
+    let mut sim = dot / (norm_a * norm_b);
+    if sim > 1.0 {
+        sim = 1.0;
+    } else if sim < -1.0 {
+        sim = -1.0;
+    }
+
+    (1.0 - sim) as f32
 }
 
-/// Dot product similarity (inverted to behave like a distance)
+/// Dot product similarity (higher is closer)
 fn dot_product_similarity(a: &Vector, b: &Vector) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum::<f64>() as f32
 }
 
 
 /// Euclidean distance
 fn euclidean_distance(a: &Vector, b: &Vector) -> f32 {
-    a.iter().zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum::<f32>()
-        .sqrt()
+    let sum = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let diff = (*x as f64) - (*y as f64);
+            diff * diff
+        })
+        .sum::<f64>();
+    sum.sqrt() as f32
 }

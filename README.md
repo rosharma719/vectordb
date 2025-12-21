@@ -69,38 +69,25 @@ Requires an `HF_TOKEN` with repo read access for `open-vdb/nytimes-256-angular` 
 cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocapture
 ```
 
-### Recall with ef_construct = 200  
+### Recall/Latency Curve with ef_construct = 100 
 **Recall / Latency (ms/query):**
-- 16 → 0.757, 0.352  
-- 32 → 0.826, 0.582  
-- 64 → 0.869, 0.874  
-- 128 → 0.904, 1.493  
-- 256 → 0.923, 2.760  
-
----
-
-### Recall with ef_construct = 100  
-**Recall / Latency (ms/query):**
-- 16 → 0.722, 0.368  
-- 32 → 0.792, 0.547  
-- 64 → 0.850, 0.881  
-- 128 → 0.883, 1.498  
-- 256 → 0.912, 2.732  
-
-Test: `nytimes_256_angular_perf_and_recall ... ok`
-
+  32 -> 0.783, 0.358 ms/query
+  64 -> 0.829, 0.507 ms/query
+  128 -> 0.866, 0.836 ms/query
+  256 -> 0.896, 1.479 ms/query
+  512 -> 0.927, 2.817 ms/query
 ---
 
 ## Performance Benchmarks  
 **(Euclidean, dim=1536, top_k=20, ef_construct=100, m=16, ef_search=64)**
 
 ### 20,000 vectors
-- Insert: **18.01 s** (~1.1k vec/s)  
-- Search: **0.723 ms/query**
+- Insert: **16.33 s** (~1.2k vec/s)  
+- Search: **0.644 ms/query**
 
 ### 100,000 vectors
-- Insert: **112.82 s** (~0.9k vec/s)  
-- Search: **0.926 ms/query**
+- Insert: **102.33 s** (~0.9k vec/s)  
+- Search: **0.919 ms/query**
 
 ### 1,000,000 vectors
 - Insert: **1312.07 s** (~0.76k vec/s)  

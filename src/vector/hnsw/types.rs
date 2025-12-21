@@ -1,6 +1,6 @@
 use crate::utils::types::{PointId, Score};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ScoredPoint {
     pub id: PointId,
     pub raw_score: Score,
