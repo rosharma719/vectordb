@@ -71,11 +71,11 @@ cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocaptur
 
 ### Recall/Latency Curve with ef_construct = 100 
 **Recall / Latency (ms/query):**
-  32 -> 0.783, 0.358 ms/query
-  64 -> 0.829, 0.507 ms/query
-  128 -> 0.866, 0.836 ms/query
-  256 -> 0.896, 1.479 ms/query
-  512 -> 0.927, 2.817 ms/query
+  32 -> 0.743, 0.301 ms/query
+  64 -> 0.818, 0.461 ms/query
+  128 -> 0.860, 0.820 ms/query
+  256 -> 0.894, 1.514 ms/query
+  512 -> 0.926, 2.843 ms/query
 ---
 
 ## Performance Benchmarks  

@@ -48,6 +48,20 @@ pub struct HNSWIndex {
     pub(crate) exact_fallback_threshold: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct HnswConfigSummary {
+    pub metric: DistanceMetric,
+    pub m: usize,
+    pub ef: usize,
+    pub ef_construct: usize,
+    pub max_level_cap: usize,
+    pub level_scale: f64,
+    pub current_max_level: usize,
+    pub dim: usize,
+    pub exact_fallback_enabled: bool,
+    pub exact_fallback_threshold: usize,
+}
+
 impl HNSWIndex {
     pub fn new(metric: DistanceMetric, m: usize, ef: usize, max_level_cap: usize, dim: usize) -> Self {
         // Touch the flag early so the enable banner shows up before long inserts.
@@ -187,6 +201,21 @@ impl HNSWIndex {
 
     pub fn len(&self) -> usize {
         self.vectors.len()
+    }
+
+    pub fn config_summary(&self) -> HnswConfigSummary {
+        HnswConfigSummary {
+            metric: self.metric,
+            m: self.m,
+            ef: self.ef,
+            ef_construct: self.ef_construct,
+            max_level_cap: self.max_level_cap,
+            level_scale: self.level_scale,
+            current_max_level: self.current_max_level,
+            dim: self.dim,
+            exact_fallback_enabled: self.exact_fallback_enabled,
+            exact_fallback_threshold: self.exact_fallback_threshold,
+        }
     }
 
     pub fn layer_neighbors(&self, level: usize, idx: usize) -> Option<&Vec<usize>> {

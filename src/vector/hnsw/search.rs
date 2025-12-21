@@ -110,38 +110,84 @@ impl HNSWIndex {
                 let current = scratch.candidate_queue.pop().unwrap();
                 expanded += 1;
                 if let Some(neighbors) = self.layers.get(level).and_then(|l| l.get(current.idx)) {
+                    const BATCH: usize = 16;
+                    let mut batch = [0usize; BATCH];
+                    let mut batch_len = 0usize;
+
                     for &neighbor in neighbors {
                         if self.deleted.get(neighbor).copied().unwrap_or(false) || !scratch.mark_visited(neighbor) {
                             continue;
                         }
                         visited_count += 1;
 
-                        let raw = self.fast_score(query, &self.vectors[neighbor]);
-                        let score_val = if normalize {
-                            self.normalize_score(raw)
-                        } else {
-                            raw
-                        };
+                        batch[batch_len] = neighbor;
+                        batch_len += 1;
+                        if batch_len == BATCH {
+                            for i in 0..batch_len {
+                                let idx = batch[i];
+                                let raw = self.fast_score(query, &self.vectors[idx]);
+                                let score_val = if normalize {
+                                    self.normalize_score(raw)
+                                } else {
+                                    raw
+                                };
 
-                        let push_candidate = self.metric == DistanceMetric::Dot
-                            || scratch.result_set.len() < ef
-                            || score_val < worst_score;
+                                let push_candidate = self.metric == DistanceMetric::Dot
+                                    || scratch.result_set.len() < ef
+                                    || score_val < worst_score;
 
-                        if push_candidate {
-                            let sp = NodeCandidate {
-                                idx: neighbor,
-                                raw_score: raw,
-                                sort_key: score_val,
-                            };
-                            scratch.candidate_queue.push(sp.clone());
+                                if push_candidate {
+                                    let sp = NodeCandidate {
+                                        idx,
+                                        raw_score: raw,
+                                        sort_key: score_val,
+                                    };
+                                    scratch.candidate_queue.push(sp.clone());
 
-                            if scratch.result_set.len() < ef || score_val < worst_score {
-                                scratch.result_set.push(NodeResult(sp));
-                                if scratch.result_set.len() > ef {
-                                    scratch.result_set.pop();
+                                    if scratch.result_set.len() < ef || score_val < worst_score {
+                                        scratch.result_set.push(NodeResult(sp));
+                                        if scratch.result_set.len() > ef {
+                                            scratch.result_set.pop();
+                                        }
+                                        if let Some(rp) = scratch.result_set.peek() {
+                                            worst_score = rp.0.sort_key;
+                                        }
+                                    }
                                 }
-                                if let Some(rp) = scratch.result_set.peek() {
-                                    worst_score = rp.0.sort_key;
+                            }
+                            batch_len = 0;
+                        }
+                    }
+                    if batch_len > 0 {
+                        for i in 0..batch_len {
+                            let idx = batch[i];
+                            let raw = self.fast_score(query, &self.vectors[idx]);
+                            let score_val = if normalize {
+                                self.normalize_score(raw)
+                            } else {
+                                raw
+                            };
+
+                            let push_candidate = self.metric == DistanceMetric::Dot
+                                || scratch.result_set.len() < ef
+                                || score_val < worst_score;
+
+                            if push_candidate {
+                                let sp = NodeCandidate {
+                                    idx,
+                                    raw_score: raw,
+                                    sort_key: score_val,
+                                };
+                                scratch.candidate_queue.push(sp.clone());
+
+                                if scratch.result_set.len() < ef || score_val < worst_score {
+                                    scratch.result_set.push(NodeResult(sp));
+                                    if scratch.result_set.len() > ef {
+                                        scratch.result_set.pop();
+                                    }
+                                    if let Some(rp) = scratch.result_set.peek() {
+                                        worst_score = rp.0.sort_key;
+                                    }
                                 }
                             }
                         }

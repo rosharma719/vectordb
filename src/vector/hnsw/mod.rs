@@ -8,5 +8,5 @@ mod search;
 mod filter;
 mod snapshot;
 
-pub use core::{HNSWIndex, HnswSnapshot};
+pub use core::{HNSWIndex, HnswConfigSummary, HnswSnapshot};
 pub use types::ScoredPoint;

@@ -69,7 +69,7 @@ pub(crate) fn search_expansion_multiplier() -> usize {
             .ok()
             .and_then(|v| v.replace('_', "").parse::<usize>().ok())
             .filter(|&v| v > 0)
-            .unwrap_or(4)
+        .unwrap_or(1)
     })
 }
 

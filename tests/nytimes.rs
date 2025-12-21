@@ -262,10 +262,24 @@ fn run_nytimes_recall_only(persist_path: &str) {
     println!("💾 Loading persisted NYTimes segment from {} ...", persist_path);
     let mut segment =
         Segment::load_from_path(persist_path).expect("failed to load persisted NYTimes segment");
+    let cfg = segment.hnsw().config_summary();
     println!(
         "✅ Loaded persisted segment with {} vectors (payloads={})",
         segment.hnsw().len(),
         segment.payloads().len()
+    );
+    println!(
+        "🧭 HNSW config: metric={:?} dim={} m={} ef={} ef_construct={} level_cap={} level_scale={:.3} max_level={} exact_fallback={} threshold={}",
+        cfg.metric,
+        cfg.dim,
+        cfg.m,
+        cfg.ef,
+        cfg.ef_construct,
+        cfg.max_level_cap,
+        cfg.level_scale,
+        cfg.current_max_level,
+        cfg.exact_fallback_enabled,
+        cfg.exact_fallback_threshold
     );
 
     let num_queries = queries.len().min(queries_cap);
