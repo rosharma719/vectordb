@@ -18,6 +18,11 @@ static FILTER_EXPANSION_CAP: OnceLock<Option<usize>> = OnceLock::new();
 static FILTER_PASSING_BUDGET: OnceLock<Option<usize>> = OnceLock::new();
 static FILTER_FAILING_BUDGET: OnceLock<Option<usize>> = OnceLock::new();
 static FILTER_SEARCH_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
+static SEARCH_TRACE_LOG: OnceLock<Option<Mutex<BufWriter<File>>>> = OnceLock::new();
+static INSERT_TRACE_LOG: OnceLock<Option<Mutex<BufWriter<File>>>> = OnceLock::new();
+static TRACE_EVERY: OnceLock<usize> = OnceLock::new();
+static SEARCH_TRACE_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
+static INSERT_TRACE_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
 
 pub(crate) fn log_unfiltered_enabled() -> bool {
     *LOG_UNFILTERED_SEARCH.get_or_init(|| {
@@ -141,6 +146,52 @@ pub(crate) fn filter_search_logger() -> Option<&'static Mutex<BufWriter<File>>> 
 
 pub(crate) fn next_filter_search_seq() -> u64 {
     let lock = FILTER_SEARCH_SEQ.get_or_init(|| Mutex::new(0));
+    let mut guard = lock.lock().unwrap();
+    *guard += 1;
+    *guard
+}
+
+pub(crate) fn search_trace_logger() -> Option<&'static Mutex<BufWriter<File>>> {
+    SEARCH_TRACE_LOG
+        .get_or_init(|| {
+            std::env::var("VECTORDB_SEARCH_TRACE_LOG")
+                .ok()
+                .and_then(|path| File::create(path).ok())
+                .map(|f| Mutex::new(BufWriter::new(f)))
+        })
+        .as_ref()
+}
+
+pub(crate) fn insert_trace_logger() -> Option<&'static Mutex<BufWriter<File>>> {
+    INSERT_TRACE_LOG
+        .get_or_init(|| {
+            std::env::var("VECTORDB_INSERT_TRACE_LOG")
+                .ok()
+                .and_then(|path| File::create(path).ok())
+                .map(|f| Mutex::new(BufWriter::new(f)))
+        })
+        .as_ref()
+}
+
+pub(crate) fn trace_every() -> usize {
+    *TRACE_EVERY.get_or_init(|| {
+        std::env::var("VECTORDB_TRACE_EVERY")
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(100)
+    })
+}
+
+pub(crate) fn next_search_trace_seq() -> u64 {
+    let lock = SEARCH_TRACE_SEQ.get_or_init(|| Mutex::new(0));
+    let mut guard = lock.lock().unwrap();
+    *guard += 1;
+    *guard
+}
+
+pub(crate) fn next_insert_trace_seq() -> u64 {
+    let lock = INSERT_TRACE_SEQ.get_or_init(|| Mutex::new(0));
     let mut guard = lock.lock().unwrap();
     *guard += 1;
     *guard

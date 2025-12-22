@@ -24,6 +24,9 @@ Snapshot defaults (shared):
   - `VECTORDB_PROGRESS_EVERY` -> progress interval for debug logs (default `100`)
   - `VECTORDB_QUERY_LOG` -> JSONL path for per-query stats
   - `VECTORDB_QUERY_LOG_EVERY` -> sample interval for per-query stats (default `1`)
+  - `VECTORDB_SEARCH_TRACE_LOG` -> JSONL path for unfiltered traversal trace
+  - `VECTORDB_INSERT_TRACE_LOG` -> JSONL path for insert traversal trace
+  - `VECTORDB_TRACE_EVERY` -> sample interval for trace logs (default `100`)
   - `VECTORDB_FILTER_SEARCH_LOG` -> JSONL with per-query expansions/visited/filter hit rates/seeds/stop_reason.
   - Parse filter logs with `python scripts/parse_filter_search_log.py <log.jsonl>`.
 

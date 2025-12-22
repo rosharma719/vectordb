@@ -1,11 +1,70 @@
+use std::io::Write;
+use std::time::Instant;
+
+use serde::Serialize;
+
 use crate::utils::errors::DBError;
 use crate::utils::types::{DistanceMetric, Vector};
 
-use super::config::{disable_early_exit, early_exit_patience, log_unfiltered_enabled, search_expansion_cap_override, search_expansion_multiplier};
+use super::config::{
+    disable_early_exit,
+    early_exit_patience,
+    log_unfiltered_enabled,
+    next_search_trace_seq,
+    search_expansion_cap_override,
+    search_expansion_multiplier,
+    search_trace_logger,
+    trace_every,
+};
 use super::scratch::SEARCH_SCRATCH;
 use super::stats::{SearchLayerStats, SearchStats, UnfilteredSample, UNFILTERED_SEARCH_AGG};
 use super::types::{NodeCandidate, NodeResult, ScoredPoint};
 use super::HNSWIndex;
+
+#[derive(Serialize)]
+struct SearchTraceEntry {
+    search_id: u64,
+    metric: String,
+    ef_search: usize,
+    exact_fallback_enabled: bool,
+    exact_fallback_threshold: usize,
+    collection_size: usize,
+    exact_scan: bool,
+    top_id: Option<u64>,
+    top_raw: Option<f32>,
+    top_sort_key: Option<f32>,
+    step: usize,
+    level: usize,
+    current_idx: usize,
+    current_point: u64,
+    current_sort_key: f32,
+    visited: usize,
+    expanded: usize,
+    candidate_len: usize,
+    results_len: usize,
+    worst_score: f32,
+    stop_reason: Option<String>,
+    elapsed_ms: f64,
+}
+
+pub(crate) struct SearchTraceCtx {
+    id: u64,
+    step: usize,
+    every: usize,
+    start: Instant,
+}
+
+fn log_search_trace(entry: &SearchTraceEntry) {
+    let Some(logger) = search_trace_logger() else {
+        return;
+    };
+    if let Ok(mut guard) = logger.lock() {
+        if serde_json::to_writer(&mut *guard, entry).is_ok() {
+            let _ = guard.write_all(b"\n");
+            let _ = guard.flush();
+        }
+    }
+}
 
 impl HNSWIndex {
     fn exact_scan(&self, query: &Vector, normalize_scores: bool, top_k: usize) -> Vec<ScoredPoint> {
@@ -48,9 +107,11 @@ impl HNSWIndex {
         ef: usize,
         normalize: bool,
         stats: Option<&mut SearchLayerStats>,
+        trace: Option<&mut SearchTraceCtx>,
     ) -> Result<Vec<NodeCandidate>, DBError> {
         self.validate_dim(query)?;
 
+        let mut trace = trace;
         SEARCH_SCRATCH.with(|cell| {
             let mut scratch = cell.borrow_mut();
             scratch.next_epoch(self.vectors.len());
@@ -94,6 +155,7 @@ impl HNSWIndex {
             let allow_early_exit = self.metric != DistanceMetric::Dot && !disable_early_exit();
             let patience_limit = if allow_early_exit { early_exit_patience() } else { 0 };
             let mut no_improve_streak = 0usize;
+            let mut stop_reason = "queue_empty";
 
             while let Some(current) = scratch.candidate_queue.peek() {
                 if allow_early_exit && scratch.result_set.len() >= ef {
@@ -103,6 +165,7 @@ impl HNSWIndex {
                         no_improve_streak = 0;
                     }
                     if no_improve_streak > patience_limit {
+                        stop_reason = "early_exit_patience";
                         break;
                     }
                 }
@@ -197,8 +260,41 @@ impl HNSWIndex {
                 if self.metric != DistanceMetric::Dot {
                     if let Some(cap) = expansion_cap {
                         if expanded >= cap {
+                            stop_reason = "expansion_cap";
                             break;
                         }
+                    }
+                }
+
+                if let Some(ctx) = trace.as_mut() {
+                    let ctx = &mut **ctx;
+                    ctx.step += 1;
+                    if ctx.step % ctx.every == 0 {
+                        let entry = SearchTraceEntry {
+                            search_id: ctx.id,
+                            metric: format!("{:?}", self.metric),
+                            ef_search: ef,
+                            exact_fallback_enabled: self.exact_fallback_enabled,
+                            exact_fallback_threshold: self.exact_fallback_threshold,
+                            collection_size: self.vectors.len(),
+                            exact_scan: false,
+                            top_id: None,
+                            top_raw: None,
+                            top_sort_key: None,
+                            step: ctx.step,
+                            level,
+                            current_idx: current.idx,
+                            current_point: self.point_id(current.idx),
+                            current_sort_key: current.sort_key,
+                            visited: visited_count,
+                            expanded,
+                            candidate_len: scratch.candidate_queue.len(),
+                            results_len: scratch.result_set.len(),
+                            worst_score,
+                            stop_reason: None,
+                            elapsed_ms: ctx.start.elapsed().as_secs_f64() * 1000.0,
+                        };
+                        log_search_trace(&entry);
                     }
                 }
             }
@@ -208,6 +304,35 @@ impl HNSWIndex {
                 .map(|rp| rp.0)
                 .collect();
             results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
+
+            if let Some(ctx) = trace.as_mut() {
+                let ctx = &mut **ctx;
+                let entry = SearchTraceEntry {
+                    search_id: ctx.id,
+                    metric: format!("{:?}", self.metric),
+                    ef_search: ef,
+                    exact_fallback_enabled: self.exact_fallback_enabled,
+                    exact_fallback_threshold: self.exact_fallback_threshold,
+                    collection_size: self.vectors.len(),
+                    exact_scan: false,
+                    top_id: None,
+                    top_raw: None,
+                    top_sort_key: None,
+                    step: ctx.step,
+                    level,
+                    current_idx: entry,
+                    current_point: self.point_id(entry),
+                    current_sort_key: entry_score,
+                    visited: visited_count,
+                    expanded,
+                    candidate_len: scratch.candidate_queue.len(),
+                    results_len: results.len(),
+                    worst_score,
+                    stop_reason: Some(stop_reason.to_string()),
+                    elapsed_ms: ctx.start.elapsed().as_secs_f64() * 1000.0,
+                };
+                log_search_trace(&entry);
+            }
 
             if let Some(stats) = stats {
                 stats.visited = visited_count;
@@ -240,15 +365,77 @@ impl HNSWIndex {
             query.clone()
         };
 
+        let mut trace_ctx = search_trace_logger().map(|_| SearchTraceCtx {
+            id: next_search_trace_seq(),
+            step: 0,
+            every: trace_every(),
+            start: Instant::now(),
+        });
+
         let deleted_count = self.deleted.iter().filter(|d| **d).count();
         let collection_size = self.vectors.len().saturating_sub(deleted_count);
         let exact_scan_possible = self.exact_fallback_enabled
             && collection_size <= self.exact_fallback_threshold;
+        if let Some(ctx) = trace_ctx.as_mut() {
+            let entry = SearchTraceEntry {
+                search_id: ctx.id,
+                metric: format!("{:?}", self.metric),
+                ef_search: top_k,
+                exact_fallback_enabled: self.exact_fallback_enabled,
+                exact_fallback_threshold: self.exact_fallback_threshold,
+                collection_size,
+                exact_scan: exact_scan_possible,
+                top_id: None,
+                top_raw: None,
+                top_sort_key: None,
+                step: 0,
+                level: 0,
+                current_idx: 0,
+                current_point: 0,
+                current_sort_key: 0.0,
+                visited: 0,
+                expanded: 0,
+                candidate_len: 0,
+                results_len: 0,
+                worst_score: 0.0,
+                stop_reason: Some("start".to_string()),
+                elapsed_ms: ctx.start.elapsed().as_secs_f64() * 1000.0,
+            };
+            log_search_trace(&entry);
+        }
 
         if exact_scan_possible {
             let scored = self.exact_scan(&prepared_query, normalize_score_flag, top_k);
             let best = scored.first().map(|r| r.sort_key).unwrap_or(0.0);
             let worst = scored.last().map(|r| r.sort_key).unwrap_or(0.0);
+            let top = scored.first();
+            if let Some(ctx) = trace_ctx.as_mut() {
+                let entry = SearchTraceEntry {
+                    search_id: ctx.id,
+                    metric: format!("{:?}", self.metric),
+                    ef_search: top_k,
+                    exact_fallback_enabled: self.exact_fallback_enabled,
+                    exact_fallback_threshold: self.exact_fallback_threshold,
+                    collection_size,
+                    exact_scan: true,
+                    top_id: top.map(|r| r.id),
+                    top_raw: top.map(|r| r.raw_score),
+                    top_sort_key: top.map(|r| r.sort_key),
+                    step: 0,
+                    level: 0,
+                    current_idx: 0,
+                    current_point: 0,
+                    current_sort_key: 0.0,
+                    visited: collection_size,
+                    expanded: collection_size,
+                    candidate_len: 0,
+                    results_len: scored.len(),
+                    worst_score: worst,
+                    stop_reason: Some("exact_scan".to_string()),
+                    elapsed_ms: ctx.start.elapsed().as_secs_f64() * 1000.0,
+                };
+                log_search_trace(&entry);
+            }
             return Ok((
                 scored,
                 SearchStats {
@@ -283,6 +470,7 @@ impl HNSWIndex {
             ef_search,
             normalize_score_flag,
             Some(&mut layer_stats),
+            trace_ctx.as_mut(),
         )?;
         results.sort_by(|a, b| {
             a.sort_key
@@ -339,13 +527,77 @@ impl HNSWIndex {
             query.clone()
         };
 
+        let mut trace_ctx = search_trace_logger().map(|_| SearchTraceCtx {
+            id: next_search_trace_seq(),
+            step: 0,
+            every: trace_every(),
+            start: Instant::now(),
+        });
+
         let deleted_count = self.deleted.iter().filter(|d| **d).count();
         let collection_size = self.vectors.len().saturating_sub(deleted_count);
         let exact_scan_possible = self.exact_fallback_enabled
             && collection_size <= self.exact_fallback_threshold;
+        if let Some(ctx) = trace_ctx.as_mut() {
+            let entry = SearchTraceEntry {
+                search_id: ctx.id,
+                metric: format!("{:?}", self.metric),
+                ef_search: top_k,
+                exact_fallback_enabled: self.exact_fallback_enabled,
+                exact_fallback_threshold: self.exact_fallback_threshold,
+                collection_size,
+                exact_scan: exact_scan_possible,
+                top_id: None,
+                top_raw: None,
+                top_sort_key: None,
+                step: 0,
+                level: 0,
+                current_idx: 0,
+                current_point: 0,
+                current_sort_key: 0.0,
+                visited: 0,
+                expanded: 0,
+                candidate_len: 0,
+                results_len: 0,
+                worst_score: 0.0,
+                stop_reason: Some("start".to_string()),
+                elapsed_ms: ctx.start.elapsed().as_secs_f64() * 1000.0,
+            };
+            log_search_trace(&entry);
+        }
 
         if exact_scan_possible {
-            return Ok(self.exact_scan(&prepared_query, normalize_score_flag, top_k));
+            let scored = self.exact_scan(&prepared_query, normalize_score_flag, top_k);
+            let top = scored.first();
+            if let Some(ctx) = trace_ctx.as_mut() {
+                let worst = scored.last().map(|r| r.sort_key).unwrap_or(0.0);
+                let entry = SearchTraceEntry {
+                    search_id: ctx.id,
+                    metric: format!("{:?}", self.metric),
+                    ef_search: top_k,
+                    exact_fallback_enabled: self.exact_fallback_enabled,
+                    exact_fallback_threshold: self.exact_fallback_threshold,
+                    collection_size,
+                    exact_scan: true,
+                    top_id: top.map(|r| r.id),
+                    top_raw: top.map(|r| r.raw_score),
+                    top_sort_key: top.map(|r| r.sort_key),
+                    step: 0,
+                    level: 0,
+                    current_idx: 0,
+                    current_point: 0,
+                    current_sort_key: 0.0,
+                    visited: collection_size,
+                    expanded: collection_size,
+                    candidate_len: 0,
+                    results_len: scored.len(),
+                    worst_score: worst,
+                    stop_reason: Some("exact_scan".to_string()),
+                    elapsed_ms: ctx.start.elapsed().as_secs_f64() * 1000.0,
+                };
+                log_search_trace(&entry);
+            }
+            return Ok(scored);
         }
 
         let query_for_greedy = &prepared_query;
@@ -370,6 +622,7 @@ impl HNSWIndex {
             ef_search,
             normalize_score_flag,
             if log_enabled { Some(&mut layer_stats) } else { None },
+            trace_ctx.as_mut(),
         )?;
         results.sort_by(|a, b| {
             a.sort_key

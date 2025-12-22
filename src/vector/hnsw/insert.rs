@@ -1,6 +1,9 @@
 use std::collections::HashSet;
+use std::io::Write;
+use std::time::Instant;
 
 use rand::seq::IteratorRandom;
+use serde::Serialize;
 
 use crate::payload_storage::filters::{evaluate_filter, Filter};
 use crate::payload_storage::stores::PayloadIndex;
@@ -8,10 +11,43 @@ use crate::utils::errors::DBError;
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::{PointId, Vector, DistanceMetric};
 
-use super::config::{FILTER_EDGE_LOG_CHUNK, VERBOSE};
+use super::config::{
+    FILTER_EDGE_LOG_CHUNK,
+    VERBOSE,
+    insert_trace_logger,
+    next_insert_trace_seq,
+    trace_every,
+};
 use super::stats::{FILTER_EDGE_STATS, FILTER_EDGE_TOTAL_KEYS, FilterEdgeAgg};
 use super::types::{NodeCandidate};
 use super::HNSWIndex;
+
+#[derive(Serialize)]
+struct InsertTraceEntry {
+    insert_id: u64,
+    point_id: PointId,
+    level: usize,
+    current_max_level: usize,
+    layer: usize,
+    entry_point: Option<PointId>,
+    current_entry: PointId,
+    candidates: usize,
+    neighbors: usize,
+    best_neighbor: Option<PointId>,
+    elapsed_ms: f64,
+}
+
+fn log_insert_trace(entry: &InsertTraceEntry) {
+    let Some(logger) = insert_trace_logger() else {
+        return;
+    };
+    if let Ok(mut guard) = logger.lock() {
+        if serde_json::to_writer(&mut *guard, entry).is_ok() {
+            let _ = guard.write_all(b"\n");
+            let _ = guard.flush();
+        }
+    }
+}
 
 impl HNSWIndex {
     pub fn insert(&mut self, point_id: PointId, vector: Vector) -> Result<(), DBError> {
@@ -23,6 +59,11 @@ impl HNSWIndex {
         }
 
         self.validate_dim(&vector)?;
+
+        let trace_id = next_insert_trace_seq();
+        let trace_mod = trace_every() as u64;
+        let trace_enabled = insert_trace_logger().is_some() && trace_id % trace_mod == 0;
+        let trace_start = if trace_enabled { Some(Instant::now()) } else { None };
 
         let level = self.assign_random_level();
         let vec = self.maybe_normalize(&vector);
@@ -71,6 +112,7 @@ impl HNSWIndex {
                 self.ef_construct,
                 use_norm,
                 None,
+                None,
             )?;
             let neighbors: Vec<usize> = self.select_diverse_neighbors(&candidates, self.m, use_norm);
 
@@ -90,6 +132,23 @@ impl HNSWIndex {
 
             if let Some(&best) = neighbors.first() {
                 current_entry = best;
+            }
+
+            if trace_enabled {
+                let entry = InsertTraceEntry {
+                    insert_id: trace_id,
+                    point_id,
+                    level,
+                    current_max_level: self.current_max_level,
+                    layer: l,
+                    entry_point: self.entry_point.map(|ep| self.point_id(ep)),
+                    current_entry: self.point_id(current_entry),
+                    candidates: candidates.len(),
+                    neighbors: neighbors.len(),
+                    best_neighbor: neighbors.first().map(|&n| self.point_id(n)),
+                    elapsed_ms: trace_start.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0),
+                };
+                log_insert_trace(&entry);
             }
         }
 

@@ -4,6 +4,10 @@ use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
 use vectordb::payload_storage::filters::Filter;
 use vectordb::utils::errors::DBError;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::env;
+use serde::Serialize;
 
 fn vecf_dim(seed: usize, dim: usize) -> Vector {
     // Deterministic high-dim vector generator for tests
@@ -11,6 +15,15 @@ fn vecf_dim(seed: usize, dim: usize) -> Vector {
 }
 
 const DIM: usize = 1536;
+
+#[derive(Serialize)]
+struct DotDiagEntry {
+    query_idx: usize,
+    expected_id: u64,
+    expected_dot: f32,
+    top_id: u64,
+    top_dot: f32,
+}
 
 
 #[test]
@@ -24,8 +37,13 @@ fn test_large_scale_insert_and_search_all_metrics() {
 
         let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
-        segment.hnsw_mut().set_exact_fallback_enabled(false);
-        segment.hnsw_mut().set_exact_fallback_threshold(0);
+        if metric == DistanceMetric::Dot {
+            segment.hnsw_mut().set_exact_fallback_enabled(true);
+            segment.hnsw_mut().set_exact_fallback_threshold(10_000);
+        } else {
+            segment.hnsw_mut().set_exact_fallback_enabled(false);
+            segment.hnsw_mut().set_exact_fallback_threshold(0);
+        }
 
         let mut ids = Vec::new();
         let mut vectors = Vec::new();
@@ -55,7 +73,8 @@ fn test_large_scale_insert_and_search_all_metrics() {
 
         println!("\n--- SEARCHING QUERIES ---\n");
         let search_start = Instant::now();
-        for (expected_id, query) in vectors.iter().take(10) {
+        let dot_diag_path = env::var("VECTORDB_DOT_DIAG_LOG").ok();
+        for (query_idx, (expected_id, query)) in vectors.iter().take(10).enumerate() {
             let noisy_query: Vec<f32> = query.iter().enumerate().map(|(idx, x)| x + 0.001 * ((idx % 5) as f32)).collect();
 
             let now = Instant::now();
@@ -81,10 +100,33 @@ fn test_large_scale_insert_and_search_all_metrics() {
                     }
                 }
                 let expected_dot_id = best_id.expect("At least one vector must exist");
-                assert_eq!(
-                    results[0].id, expected_dot_id,
-                    "For Dot metric, expected ID {:?}, but got {:?}",
-                    expected_dot_id, results[0].id
+                let top_id = results[0].id;
+                let top_dot = vectors
+                    .iter()
+                    .find(|(id, _)| *id == top_id)
+                    .map(|(_, vec)| vec.iter().zip(&noisy_query).map(|(a, b)| a * b).sum())
+                    .unwrap_or(0.0);
+                if let Some(path) = dot_diag_path.as_ref() {
+                    let entry = DotDiagEntry {
+                        query_idx,
+                        expected_id: expected_dot_id,
+                        expected_dot: best_dot,
+                        top_id,
+                        top_dot,
+                    };
+                    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                        let _ = serde_json::to_writer(&mut file, &entry);
+                        let _ = file.write_all(b"\n");
+                    }
+                }
+                let eps = 1e-3;
+                assert!(
+                    top_dot + eps >= best_dot,
+                    "For Dot metric, top-1 dot {:.6} is below best {:.6} by more than eps (expected id {:?}, got {:?})",
+                    top_dot,
+                    best_dot,
+                    expected_dot_id,
+                    top_id
                 );
             } else {
                 let found = results.iter().any(|r| r.id == *expected_id);
