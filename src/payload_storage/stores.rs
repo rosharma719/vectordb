@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use crate::payload_storage::filters::Filter;
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::PointId;
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,45 @@ impl PayloadIndex {
         }
 
         self.index.get(key)?.get(value)
+    }
+
+    /// Returns a candidate set for Match/And/Or filters based on the payload index.
+    /// For And, it intersects all indexable clauses (ignoring non-indexable ones).
+    /// For Or, all clauses must be indexable to return a safe candidate set.
+    pub fn query_filter_ids(&self, filter: &Filter) -> Option<HashSet<PointId>> {
+        match filter {
+            Filter::Match { key, value } => self
+                .query_exact(key, value)
+                .map(|ids| ids.iter().copied().collect()),
+            Filter::And(conds) => {
+                let mut sets: Vec<HashSet<PointId>> = Vec::new();
+                for cond in conds {
+                    if let Some(set) = self.query_filter_ids(cond) {
+                        sets.push(set);
+                    }
+                }
+                if sets.is_empty() {
+                    return None;
+                }
+                sets.sort_by_key(|s| s.len());
+                let mut acc = sets.remove(0);
+                for s in sets {
+                    acc.retain(|id| s.contains(id));
+                }
+                Some(acc)
+            }
+            Filter::Or(conds) => {
+                let mut acc = HashSet::new();
+                for cond in conds {
+                    let Some(set) = self.query_filter_ids(cond) else {
+                        return None;
+                    };
+                    acc.extend(set);
+                }
+                Some(acc)
+            }
+            Filter::Compare { .. } | Filter::Not(_) => None,
+        }
     }
 
     fn is_indexable(value: &PayloadValue) -> bool {

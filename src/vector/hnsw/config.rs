@@ -23,6 +23,8 @@ static INSERT_TRACE_LOG: OnceLock<Option<Mutex<BufWriter<File>>>> = OnceLock::ne
 static TRACE_EVERY: OnceLock<usize> = OnceLock::new();
 static SEARCH_TRACE_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
 static INSERT_TRACE_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
+static EXACT_FALLBACK_ENABLED: OnceLock<Option<bool>> = OnceLock::new();
+static EXACT_FALLBACK_THRESHOLD: OnceLock<Option<usize>> = OnceLock::new();
 
 pub(crate) fn log_unfiltered_enabled() -> bool {
     *LOG_UNFILTERED_SEARCH.get_or_init(|| {
@@ -95,7 +97,7 @@ pub(crate) fn early_exit_patience() -> usize {
         std::env::var("VECTORDB_EARLY_EXIT_PATIENCE")
             .ok()
             .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-            .unwrap_or(0)
+            .unwrap_or(2)
     })
 }
 
@@ -195,4 +197,22 @@ pub(crate) fn next_insert_trace_seq() -> u64 {
     let mut guard = lock.lock().unwrap();
     *guard += 1;
     *guard
+}
+
+pub(crate) fn exact_fallback_enabled_override() -> Option<bool> {
+    *EXACT_FALLBACK_ENABLED.get_or_init(|| {
+        std::env::var("VECTORDB_EXACT_FALLBACK_ENABLED")
+            .ok()
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+    })
+}
+
+pub(crate) fn exact_fallback_threshold_override() -> Option<usize> {
+    EXACT_FALLBACK_THRESHOLD
+        .get_or_init(|| {
+            std::env::var("VECTORDB_EXACT_FALLBACK_THRESHOLD")
+                .ok()
+                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+        })
+        .clone()
 }

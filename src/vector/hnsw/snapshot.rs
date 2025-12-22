@@ -8,6 +8,7 @@ use anyhow::anyhow;
 use crate::utils::errors::DBError;
 use crate::utils::types::PointId;
 
+use super::config::{exact_fallback_enabled_override, exact_fallback_threshold_override};
 use super::{HNSWIndex, HnswSnapshot};
 
 impl HNSWIndex {
@@ -119,8 +120,8 @@ impl HNSWIndex {
             deleted,
             point_to_idx,
             idx_to_point: ids,
-            exact_fallback_enabled: snapshot.exact_fallback_enabled,
-            exact_fallback_threshold: snapshot.exact_fallback_threshold,
+            exact_fallback_enabled: exact_fallback_enabled_override().unwrap_or(false),
+            exact_fallback_threshold: exact_fallback_threshold_override().unwrap_or(snapshot.exact_fallback_threshold),
         }
     }
 

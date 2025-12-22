@@ -6,7 +6,13 @@ use serde::{Deserialize, Serialize};
 use crate::utils::errors::DBError;
 use crate::utils::types::{DistanceMetric, PointId, Vector};
 
-use super::config::{DEFAULT_EXACT_FALLBACK_THRESHOLD, VERBOSE, log_unfiltered_enabled};
+use super::config::{
+    DEFAULT_EXACT_FALLBACK_THRESHOLD,
+    VERBOSE,
+    exact_fallback_enabled_override,
+    exact_fallback_threshold_override,
+    log_unfiltered_enabled,
+};
 use super::stats::UNFILTERED_SEARCH_AGG;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -93,8 +99,8 @@ impl HNSWIndex {
             deleted: Vec::new(),
             point_to_idx: HashMap::new(),
             idx_to_point: Vec::new(),
-            exact_fallback_enabled: true,
-            exact_fallback_threshold: DEFAULT_EXACT_FALLBACK_THRESHOLD,
+            exact_fallback_enabled: exact_fallback_enabled_override().unwrap_or(false),
+            exact_fallback_threshold: exact_fallback_threshold_override().unwrap_or(DEFAULT_EXACT_FALLBACK_THRESHOLD),
         }
     }
 
