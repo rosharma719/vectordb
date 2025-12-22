@@ -9,4 +9,5 @@ mod filter;
 mod snapshot;
 
 pub use core::{HNSWIndex, HnswConfigSummary, HnswSnapshot};
+pub use stats::SearchStats;
 pub use types::ScoredPoint;

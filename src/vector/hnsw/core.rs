@@ -98,6 +98,20 @@ impl HNSWIndex {
         }
     }
 
+    pub fn point_level(&self, point_id: PointId) -> Option<usize> {
+        self.point_to_idx
+            .get(&point_id)
+            .and_then(|&idx| self.levels.get(idx).copied())
+    }
+
+    pub fn point_degree(&self, point_id: PointId, level: usize) -> Option<usize> {
+        let idx = *self.point_to_idx.get(&point_id)?;
+        self.layers
+            .get(level)
+            .and_then(|layer| layer.get(idx))
+            .map(|neighbors| neighbors.len())
+    }
+
     pub(crate) fn assign_random_level(&self) -> usize {
         let r: f64 = rand::rng().random_range(0.0..1.0);
         let l = (-r.ln() * self.level_scale).floor() as usize;

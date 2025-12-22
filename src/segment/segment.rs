@@ -15,7 +15,7 @@ use crate::payload_storage::stores::PayloadIndex;
 use crate::utils::errors::DBError;
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::{PointId, Vector};
-use crate::vector::hnsw::{HNSWIndex, HnswSnapshot, ScoredPoint};
+use crate::vector::hnsw::{HNSWIndex, HnswSnapshot, ScoredPoint, SearchStats};
 
 /// A segment is the core unit that wraps vector storage, indexing, payloads, and deletion.
 pub struct Segment {
@@ -224,6 +224,26 @@ impl Segment {
             .collect();
 
         Ok(filtered)
+    }
+
+    pub fn search_with_stats(
+        &self,
+        query: &Vector,
+        top_k: usize,
+    ) -> Result<(Vec<ScoredPoint>, SearchStats), DBError> {
+        let total_non_deleted = self.hnsw.len() - self.deleted.len();
+        if total_non_deleted == 0 {
+            return Err(DBError::SearchError("No active points available to search.".into()));
+        }
+
+        let (candidates, stats) = self.hnsw.search_with_stats(query, top_k)?;
+        let filtered = candidates
+            .into_iter()
+            .filter(|sp| !self.deleted.contains(&sp.id))
+            .take(top_k)
+            .collect();
+
+        Ok((filtered, stats))
     }
 
     pub fn search_with_filter(

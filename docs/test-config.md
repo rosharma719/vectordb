@@ -1,6 +1,12 @@
 # Recall/Filtering test config cheat sheet
 
-Tests are `#[ignore]` and driven entirely by env vars. Use these knobs consistently across NYT + H&M runs:
+Tests are `#[ignore]` and driven entirely by env vars. Defaults favor loading prebuilt snapshots.
+
+Snapshot defaults (shared):
+- `VECTORDB_PERSIST_PATH` (or dataset-specific overrides below)
+- `VECTORDB_USE_SNAPSHOT` (default `1`)
+- `VECTORDB_ALLOW_BUILD` (default `0` — set to `1` to build if snapshot is missing)
+- `VECTORDB_SAVE_SNAPSHOT` (default `0`)
 
 - Core recall controls (shared):
   - `VECTORDB_EF_SEARCH_LIST` (or dataset-specific overrides below)
@@ -13,23 +19,32 @@ Tests are `#[ignore]` and driven entirely by env vars. Use these knobs consisten
   - `VECTORDB_FILTER_SEARCH_LOG` path to JSONL for per-query traversal stats
   - `VECTORDB_FILTER_PASSING_BUDGET` / `VECTORDB_FILTER_FAILING_BUDGET` (override routing budgets; defaults derive from M: passing≈max(8, 2*M), failing=1)
 
+- Logging/analysis:
+  - `VECTORDB_TEST_LOG` -> `quiet|info|debug` (default `info`)
+  - `VECTORDB_PROGRESS_EVERY` -> progress interval for debug logs (default `100`)
+  - `VECTORDB_QUERY_LOG` -> JSONL path for per-query stats
+  - `VECTORDB_QUERY_LOG_EVERY` -> sample interval for per-query stats (default `1`)
+  - `VECTORDB_FILTER_SEARCH_LOG` -> JSONL with per-query expansions/visited/filter hit rates/seeds/stop_reason.
+  - Parse filter logs with `python scripts/parse_filter_search_log.py <log.jsonl>`.
+
 - NYTimes (unfiltered):
   - `VECTORDB_NYT_DATA_DIR` (default `data/nytimes-256-angular`)
-  - `VECTORDB_NYT_PERSIST_PATH` snapshot path
+  - `VECTORDB_NYT_PERSIST_PATH` (default `data/nytimes-256-angular/index.bin`)
+  - `VECTORDB_NYT_USE_SNAPSHOT` (override `VECTORDB_USE_SNAPSHOT`)
+  - `VECTORDB_NYT_ALLOW_BUILD` / `VECTORDB_NYT_SAVE_SNAPSHOT`
   - `VECTORDB_NYT_EF_SEARCH_LIST` (falls back to `VECTORDB_EF_SEARCH_LIST`)
   - `VECTORDB_EF_CONSTRUCT` / `VECTORDB_NYT_EF_CONSTRUCT`
 
 - H&M (filtered):
   - `VECTORDB_HNM_DATA_DIR` (default `data/hnm`)
-  - `VECTORDB_HNM_PERSIST_PATH` snapshot path (e.g. `data/hnm/index_filtered.bin`)
+  - `VECTORDB_HNM_PERSIST_PATH` (default `data/hnm/index_filtered.bin`)
+  - `VECTORDB_HNM_USE_SNAPSHOT` (override `VECTORDB_USE_SNAPSHOT`)
+  - `VECTORDB_HNM_ALLOW_BUILD` / `VECTORDB_HNM_SAVE_SNAPSHOT`
+  - `VECTORDB_HNM_M` (override HNSW M for rebuilds; default 16)
   - `VECTORDB_HNM_EF_SEARCH_LIST` (falls back to `VECTORDB_EF_SEARCH_LIST`)
   - `VECTORDB_HNM_EF_CONSTRUCT` (build-time)
   - `VECTORDB_HNM_TOPK` (default derived from test cases)
   - `VECTORDB_DISABLE_FILTER_SEEDS` (set to `1` for unseeded runs)
-
-- Logging/analysis:
-  - `VECTORDB_FILTER_SEARCH_LOG` -> JSONL with per-query expansions/visited/filter hit rates/seeds/stop_reason.
-  - Parse with `python scripts/parse_filter_search_log.py <log.jsonl>`.
 
 Example commands:
 

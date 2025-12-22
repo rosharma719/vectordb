@@ -17,6 +17,16 @@ thread_local! {
     pub(crate) static FILTER_EDGE_STATS: RefCell<FilterEdgeAgg> = RefCell::new(FilterEdgeAgg::default());
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SearchStats {
+    pub ef_search: usize,
+    pub visited: usize,
+    pub expanded: usize,
+    pub best_score: f32,
+    pub worst_score: f32,
+    pub exact: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct UnfilteredSearchAgg {
     samples: Vec<UnfilteredSample>,

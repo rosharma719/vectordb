@@ -2,7 +2,12 @@
 
 use std::convert::TryInto;
 use std::env;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::time::Instant;
+
+use serde::Serialize;
+use serde_json;
 
 use vectordb::payload_storage::filters::Filter;
 use vectordb::segment::segment::Segment;
@@ -28,6 +33,279 @@ pub fn env_usize_list_first(keys: &[&str]) -> Option<Vec<usize>> {
                 .collect::<Vec<_>>()
         }).filter(|v| !v.is_empty())
     })
+}
+
+pub fn env_string_first(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| env::var(k).ok())
+}
+
+pub fn env_bool_first(keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|k| {
+        env::var(k)
+            .ok()
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TestLogLevel {
+    Quiet,
+    Info,
+    Debug,
+}
+
+impl TestLogLevel {
+    pub fn from_env() -> Self {
+        let raw = env::var("VECTORDB_TEST_LOG").unwrap_or_else(|_| "info".to_string());
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "quiet" | "silent" | "off" => TestLogLevel::Quiet,
+            "debug" | "trace" => TestLogLevel::Debug,
+            _ => TestLogLevel::Info,
+        }
+    }
+
+    pub fn allows_info(self) -> bool {
+        self >= TestLogLevel::Info
+    }
+
+    pub fn allows_debug(self) -> bool {
+        self >= TestLogLevel::Debug
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TestLogConfig {
+    pub level: TestLogLevel,
+    pub progress_every: usize,
+    pub query_log_path: Option<String>,
+    pub query_log_every: usize,
+}
+
+impl TestLogConfig {
+    pub fn from_env() -> Self {
+        let level = TestLogLevel::from_env();
+        let progress_every = env::var("VECTORDB_PROGRESS_EVERY")
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(100);
+        let query_log_path = env::var("VECTORDB_QUERY_LOG").ok();
+        let query_log_every = env::var("VECTORDB_QUERY_LOG_EVERY")
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(1);
+        Self {
+            level,
+            progress_every,
+            query_log_path,
+            query_log_every,
+        }
+    }
+
+    pub fn log_info(&self, msg: &str) {
+        if self.level.allows_info() {
+            println!("{}", msg);
+        }
+    }
+
+    pub fn log_debug(&self, msg: &str) {
+        if self.level.allows_debug() {
+            println!("{}", msg);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SnapshotConfig {
+    pub persist_path: String,
+    pub use_snapshot: bool,
+    pub allow_build: bool,
+    pub save_snapshot: bool,
+}
+
+impl SnapshotConfig {
+    pub fn from_env(prefix: &str, default_path: &str) -> Self {
+        let persist_path = env_string_first(&[
+            "VECTORDB_PERSIST_PATH",
+            &format!("VECTORDB_{prefix}_PERSIST_PATH"),
+        ])
+        .unwrap_or_else(|| default_path.to_string());
+        let use_snapshot = env_bool_first(&[
+            "VECTORDB_USE_SNAPSHOT",
+            &format!("VECTORDB_{prefix}_USE_SNAPSHOT"),
+        ])
+        .unwrap_or(true);
+        let allow_build = env_bool_first(&[
+            "VECTORDB_ALLOW_BUILD",
+            &format!("VECTORDB_{prefix}_ALLOW_BUILD"),
+        ])
+        .unwrap_or(false);
+        let save_snapshot = env_bool_first(&[
+            "VECTORDB_SAVE_SNAPSHOT",
+            &format!("VECTORDB_{prefix}_SAVE_SNAPSHOT"),
+        ])
+        .unwrap_or(false);
+        Self {
+            persist_path,
+            use_snapshot,
+            allow_build,
+            save_snapshot,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchConfig {
+    pub top_k: Option<usize>,
+    pub ef_values: Vec<usize>,
+    pub queries_cap: usize,
+    pub base_cap: Option<usize>,
+    pub ef_construct: usize,
+}
+
+impl SearchConfig {
+    pub fn from_env(prefix: &str, default_ef_values: &[usize], default_queries: usize) -> Self {
+        let top_k = env_usize_first(&["VECTORDB_TOPK", &format!("VECTORDB_{prefix}_TOPK")]);
+        let ef_values = env_usize_list_first(&[
+            "VECTORDB_EF_SEARCH_LIST",
+            &format!("VECTORDB_{prefix}_EF_SEARCH_LIST"),
+        ])
+        .or_else(|| {
+            env_usize_first(&["VECTORDB_EF_SEARCH", &format!("VECTORDB_{prefix}_EF_SEARCH")])
+                .map(|v| vec![v])
+        })
+        .unwrap_or_else(|| default_ef_values.to_vec());
+        let queries_cap = env_usize_first(&["VECTORDB_QUERIES", &format!("VECTORDB_{prefix}_QUERIES")])
+            .unwrap_or(default_queries);
+        let base_cap = env_usize_first(&["VECTORDB_BASE_LIMIT", &format!("VECTORDB_{prefix}_BASE_LIMIT")]);
+        let ef_construct =
+            env_usize_first(&["VECTORDB_EF_CONSTRUCT", &format!("VECTORDB_{prefix}_EF_CONSTRUCT")])
+                .unwrap_or(100);
+        Self {
+            top_k,
+            ef_values,
+            queries_cap,
+            base_cap,
+            ef_construct,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct StatSummary {
+    pub mean: f64,
+    pub p50: f64,
+    pub p90: f64,
+    pub p99: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+pub fn summarize_f64(vals: &[f64]) -> StatSummary {
+    if vals.is_empty() {
+        return StatSummary {
+            mean: 0.0,
+            p50: 0.0,
+            p90: 0.0,
+            p99: 0.0,
+            min: 0.0,
+            max: 0.0,
+        };
+    }
+    let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+    let mut sorted = vals.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pct = |p: f64| -> f64 {
+        let idx = ((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+        sorted[idx]
+    };
+    StatSummary {
+        mean,
+        p50: pct(50.0),
+        p90: pct(90.0),
+        p99: pct(99.0),
+        min: *sorted.first().unwrap(),
+        max: *sorted.last().unwrap(),
+    }
+}
+
+pub fn summarize_usize(vals: &[usize]) -> StatSummary {
+    let floats: Vec<f64> = vals.iter().map(|&v| v as f64).collect();
+    summarize_f64(&floats)
+}
+
+pub struct QueryStatsAgg {
+    pub elapsed_ms: Vec<f64>,
+    pub visited: Vec<usize>,
+    pub expanded: Vec<usize>,
+    pub recall: Vec<f64>,
+}
+
+impl QueryStatsAgg {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            elapsed_ms: Vec::with_capacity(capacity),
+            visited: Vec::with_capacity(capacity),
+            expanded: Vec::with_capacity(capacity),
+            recall: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn record(&mut self, elapsed_ms: f64, visited: Option<usize>, expanded: Option<usize>, recall: f64) {
+        self.elapsed_ms.push(elapsed_ms);
+        if let Some(v) = visited {
+            self.visited.push(v);
+        }
+        if let Some(e) = expanded {
+            self.expanded.push(e);
+        }
+        self.recall.push(recall);
+    }
+}
+
+#[derive(Default)]
+pub struct MissStats {
+    pub total: usize,
+    pub level_counts: Vec<usize>,
+    pub degree_samples: Vec<usize>,
+}
+
+impl MissStats {
+    pub fn record(&mut self, level: usize, degree: Option<usize>) {
+        if self.level_counts.len() <= level {
+            self.level_counts.resize(level + 1, 0);
+        }
+        self.level_counts[level] += 1;
+        self.total += 1;
+        if let Some(d) = degree {
+            self.degree_samples.push(d);
+        }
+    }
+}
+
+pub struct QueryLogWriter {
+    writer: Option<BufWriter<File>>,
+    every: usize,
+}
+
+impl QueryLogWriter {
+    pub fn new(path: Option<String>, every: usize) -> Self {
+        let writer = path.and_then(|p| File::create(p).ok()).map(BufWriter::new);
+        Self { writer, every: every.max(1) }
+    }
+
+    pub fn write<T: Serialize>(&mut self, idx: usize, entry: &T) {
+        let Some(writer) = self.writer.as_mut() else {
+            return;
+        };
+        if idx % self.every != 0 {
+            return;
+        }
+        if serde_json::to_writer(&mut *writer, entry).is_ok() {
+            let _ = writer.write_all(b"\n");
+        }
+    }
 }
 
 pub fn vecf(v: &[f32]) -> Vector {

@@ -3,7 +3,7 @@ use crate::utils::types::{DistanceMetric, Vector};
 
 use super::config::{disable_early_exit, early_exit_patience, log_unfiltered_enabled, search_expansion_cap_override, search_expansion_multiplier};
 use super::scratch::SEARCH_SCRATCH;
-use super::stats::{SearchLayerStats, UnfilteredSample, UNFILTERED_SEARCH_AGG};
+use super::stats::{SearchLayerStats, SearchStats, UnfilteredSample, UNFILTERED_SEARCH_AGG};
 use super::types::{NodeCandidate, NodeResult, ScoredPoint};
 use super::HNSWIndex;
 
@@ -216,6 +216,109 @@ impl HNSWIndex {
 
             Ok(results)
         })
+    }
+
+    pub fn search_with_stats(
+        &self,
+        query: &Vector,
+        top_k: usize,
+    ) -> Result<(Vec<ScoredPoint>, SearchStats), DBError> {
+        if self.entry_point.is_none() {
+            return Ok((vec![], SearchStats { ef_search: top_k, ..SearchStats::default() }));
+        }
+        self.validate_dim(query)?;
+
+        let (normalize_query, normalize_score_flag) = match self.metric {
+            DistanceMetric::Cosine => (true, true),
+            DistanceMetric::Dot => (false, true),
+            DistanceMetric::Euclidean => (false, false),
+        };
+
+        let prepared_query = if normalize_query {
+            self.maybe_normalize(query)
+        } else {
+            query.clone()
+        };
+
+        let deleted_count = self.deleted.iter().filter(|d| **d).count();
+        let collection_size = self.vectors.len().saturating_sub(deleted_count);
+        let exact_scan_possible = self.exact_fallback_enabled
+            && collection_size <= self.exact_fallback_threshold;
+
+        if exact_scan_possible {
+            let scored = self.exact_scan(&prepared_query, normalize_score_flag, top_k);
+            let best = scored.first().map(|r| r.sort_key).unwrap_or(0.0);
+            let worst = scored.last().map(|r| r.sort_key).unwrap_or(0.0);
+            return Ok((
+                scored,
+                SearchStats {
+                    ef_search: top_k,
+                    visited: collection_size,
+                    expanded: collection_size,
+                    best_score: best,
+                    worst_score: worst,
+                    exact: true,
+                },
+            ));
+        }
+
+        let query_for_greedy = &prepared_query;
+        let mut current = self.entry_point.unwrap();
+        for l in (1..=self.current_max_level).rev() {
+            current = self.greedy_search_layer_unfiltered(query_for_greedy, current, l);
+        }
+
+        let final_query = &prepared_query;
+        let ef_search = if self.metric == DistanceMetric::Dot {
+            self.vectors.len().max(top_k)
+        } else {
+            self.ef.max(top_k)
+        };
+
+        let mut layer_stats = SearchLayerStats::default();
+        let mut results = self.search_layer_unfiltered(
+            final_query,
+            current,
+            0,
+            ef_search,
+            normalize_score_flag,
+            Some(&mut layer_stats),
+        )?;
+        results.sort_by(|a, b| {
+            a.sort_key
+                .partial_cmp(&b.sort_key)
+                .unwrap()
+                .then_with(|| self.point_id(a.idx).cmp(&self.point_id(b.idx)))
+        });
+        results.truncate(top_k);
+        let mut scored = results
+            .into_iter()
+            .map(|cand| ScoredPoint {
+                id: self.point_id(cand.idx),
+                raw_score: cand.raw_score,
+                sort_key: cand.sort_key,
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|a, b| {
+            a.sort_key
+                .partial_cmp(&b.sort_key)
+                .unwrap()
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        scored.truncate(top_k);
+
+        let best = scored.first().map(|r| r.sort_key).unwrap_or(0.0);
+        let worst = scored.last().map(|r| r.sort_key).unwrap_or(0.0);
+        let stats = SearchStats {
+            ef_search,
+            visited: layer_stats.visited,
+            expanded: layer_stats.expanded,
+            best_score: best,
+            worst_score: worst,
+            exact: false,
+        };
+
+        Ok((scored, stats))
     }
 
     pub fn search(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
