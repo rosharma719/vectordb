@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::io::Write;
 
 use crate::payload_storage::filters::{evaluate_filter, Filter};
@@ -11,6 +13,7 @@ use super::config::{
     disable_early_exit,
     early_exit_patience,
     filter_expansion_cap,
+    filter_entry_candidates,
     filter_failing_budget,
     filter_passing_budget,
     filter_search_logger,
@@ -23,11 +26,47 @@ use super::types::{NodeCandidate, NodeResult, NodeRoutingEntry, ScoredPoint};
 use super::HNSWIndex;
 
 impl HNSWIndex {
-    fn best_entry_in_mask(mask: &HashSet<usize>, levels: &[usize], deleted: &[bool]) -> Option<usize> {
-        mask.iter()
-            .copied()
-            .filter(|&idx| !deleted.get(idx).copied().unwrap_or(false))
-            .max_by_key(|&idx| levels.get(idx).copied().unwrap_or(0))
+    fn best_entry_in_mask(mask: &[bool], levels: &[usize], deleted: &[bool]) -> Option<usize> {
+        let mut best: Option<(usize, usize)> = None;
+        for (idx, &allowed) in mask.iter().enumerate() {
+            if !allowed || deleted.get(idx).copied().unwrap_or(false) {
+                continue;
+            }
+            let level = levels.get(idx).copied().unwrap_or(0);
+            if best.map_or(true, |(_, best_level)| level > best_level) {
+                best = Some((idx, level));
+            }
+        }
+        best.map(|(idx, _)| idx)
+    }
+
+    fn top_entries_in_mask(mask: &[bool], levels: &[usize], deleted: &[bool], cap: usize) -> Vec<usize> {
+        if cap == 0 {
+            return Vec::new();
+        }
+        let mut best: Vec<(usize, usize)> = Vec::with_capacity(cap);
+        for (idx, &allowed) in mask.iter().enumerate() {
+            if !allowed || deleted.get(idx).copied().unwrap_or(false) {
+                continue;
+            }
+            let level = levels.get(idx).copied().unwrap_or(0);
+            if best.len() < cap {
+                best.push((idx, level));
+                if best.len() == cap {
+                    best.sort_by_key(|&(_, lvl)| lvl);
+                }
+                continue;
+            }
+            if let Some(&(worst_idx, worst_level)) = best.first() {
+                if level > worst_level {
+                    let _ = worst_idx;
+                    best[0] = (idx, level);
+                    best.sort_by_key(|&(_, lvl)| lvl);
+                }
+            }
+        }
+        best.sort_by_key(|&(_, lvl)| std::cmp::Reverse(lvl));
+        best.into_iter().map(|(idx, _)| idx).collect()
     }
 
     pub fn find_entry_point_matching_filter(
@@ -120,51 +159,72 @@ impl HNSWIndex {
         let query_for_search = &prepared_query;
 
         let match_filter = self.extract_match_filter(full_filter);
-        let mut allowed_idx: Option<HashSet<usize>> = None;
+        let mut allowed_mask: Option<Arc<Vec<bool>>> = None;
 
         if let Some(f) = full_filter {
-            if let Some(candidate_ids) = payload_index.query_filter_ids(f) {
-                if candidate_ids.is_empty() {
-                    return Ok(vec![]);
-                }
-                if self.exact_fallback_enabled && candidate_ids.len() <= self.exact_fallback_threshold {
-                    let mut out = Vec::with_capacity(candidate_ids.len().min(top_k));
-                    for id in candidate_ids {
-                        let Some(idx) = self.idx_of(id) else { continue; };
-                        if self.deleted.get(idx).copied().unwrap_or(false) {
-                            continue;
-                        }
-                        let Some(payload) = payloads.get(&id) else { continue; };
-                        if !evaluate_filter(f, payload)? {
-                            continue;
-                        }
-                        let Some(vec) = self.get_vector_by_idx(idx) else { continue; };
-                        let raw = self.fast_score(query_for_search, vec);
-                        let sk = if use_normalize_score { self.normalize_score(raw) } else { raw };
-                        out.push(ScoredPoint {
-                            id,
-                            raw_score: raw,
-                            sort_key: sk,
-                        });
+            let mask_key = {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                f.hash(&mut hasher);
+                payload_index.revision().hash(&mut hasher);
+                self.vectors.len().hash(&mut hasher);
+                hasher.finish()
+            };
+            if let Some(mask) = SEARCH_SCRATCH.with(|cell| {
+                let mut scratch = cell.borrow_mut();
+                scratch.get_filter_mask(mask_key, self.vectors.len())
+            }) {
+                allowed_mask = Some(mask);
+            }
+            if self.exact_fallback_enabled {
+                if let Some(candidate_ids) = payload_index.query_filter_ids(f) {
+                    if candidate_ids.is_empty() {
+                        return Ok(vec![]);
                     }
-                    out.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
-                    out.truncate(top_k);
-                    return Ok(out);
-                }
-                let mut mask = HashSet::with_capacity(candidate_ids.len());
-                for id in candidate_ids {
-                    if let Some(&idx) = self.point_to_idx.get(&id) {
-                        mask.insert(idx);
+                    if candidate_ids.len() <= self.exact_fallback_threshold {
+                        let mut out = Vec::with_capacity(candidate_ids.len().min(top_k));
+                        for id in candidate_ids {
+                            let Some(idx) = self.idx_of(id) else { continue; };
+                            if self.deleted.get(idx).copied().unwrap_or(false) {
+                                continue;
+                            }
+                            let Some(payload) = payloads.get(&id) else { continue; };
+                            if !evaluate_filter(f, payload)? {
+                                continue;
+                            }
+                            let Some(vec) = self.get_vector_by_idx(idx) else { continue; };
+                            let raw = self.fast_score(query_for_search, vec);
+                            let sk = if use_normalize_score { self.normalize_score(raw) } else { raw };
+                            out.push(ScoredPoint {
+                                id,
+                                raw_score: raw,
+                                sort_key: sk,
+                            });
+                        }
+                        out.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
+                        out.truncate(top_k);
+                        return Ok(out);
                     }
                 }
-                allowed_idx = Some(mask);
+            }
+            if allowed_mask.is_none() {
+                if let Some(mask) = payload_index.build_filter_mask(f, &self.point_to_idx, self.point_to_idx.len()) {
+                    if !mask.iter().any(|v| *v) {
+                        return Ok(vec![]);
+                    }
+                    let arc = Arc::new(mask);
+                    SEARCH_SCRATCH.with(|cell| {
+                        let mut scratch = cell.borrow_mut();
+                        scratch.put_filter_mask(mask_key, Arc::clone(&arc));
+                    });
+                    allowed_mask = Some(arc);
+                }
             }
         }
 
         let mut entry = match self.entry_point {
             Some(idx) => {
-                if let Some(mask) = allowed_idx.as_ref() {
-                    if mask.contains(&idx) && !self.deleted.get(idx).copied().unwrap_or(false) {
+                if let Some(mask) = allowed_mask.as_ref() {
+                    if mask.get(idx).copied().unwrap_or(false) && !self.deleted.get(idx).copied().unwrap_or(false) {
                         idx
                     } else {
                         match Self::best_entry_in_mask(mask, &self.levels, &self.deleted) {
@@ -190,7 +250,7 @@ impl HNSWIndex {
                 }
             }
             None => {
-                if let Some(mask) = allowed_idx.as_ref() {
+                if let Some(mask) = allowed_mask.as_ref() {
                     match Self::best_entry_in_mask(mask, &self.levels, &self.deleted) {
                         Some(best) => best,
                         None => return Ok(vec![]),
@@ -212,7 +272,7 @@ impl HNSWIndex {
                 entry,
                 level,
                 payloads,
-                if allowed_idx.is_some() { full_filter } else { match_filter.as_ref() },
+                if allowed_mask.is_some() { full_filter } else { match_filter.as_ref() },
             )?;
         }
 
@@ -275,6 +335,59 @@ impl HNSWIndex {
             }
             if scratch.mark_visited(entry) {
                 visited_count += 1;
+            }
+
+            let mut worst = scratch.results_pq.peek().map(|rp| rp.0.sort_key).unwrap_or(f32::MAX);
+
+            if let Some(mask) = allowed_mask.as_ref() {
+                let cap = filter_entry_candidates().unwrap_or(self.ef).max(1);
+                let entry_candidates = Self::top_entries_in_mask(mask, &self.levels, &self.deleted, cap);
+                for idx in entry_candidates {
+                    if idx == entry {
+                        continue;
+                    }
+                    if !scratch.mark_visited(idx) {
+                        continue;
+                    }
+                    visited_count += 1;
+                    let Some(vec) = self.get_vector_by_idx(idx) else { continue; };
+                    let d = self.fast_score(query_for_search, vec);
+                    let sk = if use_normalize_score { self.normalize_score(d) } else { d };
+                    let sp = NodeCandidate {
+                        idx,
+                        raw_score: d,
+                        sort_key: sk,
+                    };
+                    let passes = full_filter.map_or(true, |f| {
+                        filter_checked += 1;
+                        let id = self.point_id(idx);
+                        let ok = payloads
+                            .get(&id)
+                            .map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+                        if ok {
+                            filter_passed += 1;
+                        }
+                        ok
+                    });
+                    let budget = if passes { passing_budget } else { failing_budget };
+                    if budget > 0 {
+                        scratch.routing_pq.push(NodeRoutingEntry {
+                            node: sp.clone(),
+                            passes_filter: passes,
+                            budget,
+                        });
+                    }
+                    if passes {
+                        scratch.results_pq.push(NodeResult(sp));
+                        results_inserted += 1;
+                        if scratch.results_pq.len() > result_cap {
+                            scratch.results_pq.pop();
+                        }
+                        if scratch.results_pq.len() >= top_k {
+                            worst = scratch.results_pq.peek().unwrap().0.sort_key;
+                        }
+                    }
+                }
             }
 
             let seed_limit = self.ef;
@@ -376,7 +489,7 @@ impl HNSWIndex {
                     if seeds_added >= seed_limit {
                         break;
                     }
-                    if allowed_idx.as_ref().map_or(false, |mask| !mask.contains(&idx)) {
+                    if allowed_mask.as_ref().map_or(false, |mask| !mask.get(idx).copied().unwrap_or(false)) {
                         continue;
                     }
                     if self.deleted.get(idx).copied().unwrap_or(false) || !scratch.mark_visited(idx) {
@@ -415,8 +528,6 @@ impl HNSWIndex {
                     seeds_added += 1;
                 }
             }
-
-            let mut worst = scratch.results_pq.peek().map(|rp| rp.0.sort_key).unwrap_or(f32::MAX);
 
             let mut expansions = 0usize;
             let mut stop_reason = "queue_exhausted".to_string();
@@ -462,7 +573,7 @@ impl HNSWIndex {
 
                 if let Some(neighs) = self.layer_neighbors(0, curr.node.idx) {
                     for &nb in neighs {
-                        if allowed_idx.as_ref().map_or(false, |mask| !mask.contains(&nb)) {
+                        if allowed_mask.as_ref().map_or(false, |mask| !mask.get(nb).copied().unwrap_or(false)) {
                             continue;
                         }
                         if self.deleted.get(nb).copied().unwrap_or(false) || !scratch.mark_visited(nb) {

@@ -1,9 +1,11 @@
 use std::cell::RefCell;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::sync::Arc;
 
 use super::types::{NodeCandidate, NodeResult, NodeRoutingEntry};
 
-#[derive(Default)]
+const FILTER_MASK_CACHE_CAP: usize = 64;
+
 pub(crate) struct SearchScratch {
     pub(crate) visited_epoch: Vec<u32>,
     pub(crate) epoch: u32,
@@ -17,6 +19,31 @@ pub(crate) struct SearchScratch {
     pub(crate) temp_epoch: Vec<u32>,
     pub(crate) temp_epoch_val: u32,
     pub(crate) temp_list: Vec<usize>,
+    pub(crate) filter_mask_cache: HashMap<u64, Arc<Vec<bool>>>,
+    pub(crate) filter_mask_lru: VecDeque<u64>,
+    pub(crate) filter_mask_cap: usize,
+}
+
+impl Default for SearchScratch {
+    fn default() -> Self {
+        Self {
+            visited_epoch: Vec::new(),
+            epoch: 0,
+            candidate_queue: BinaryHeap::new(),
+            result_set: BinaryHeap::new(),
+            routing_pq: BinaryHeap::new(),
+            results_pq: BinaryHeap::new(),
+            seed_epoch: Vec::new(),
+            seed_epoch_val: 0,
+            seed_list: Vec::new(),
+            temp_epoch: Vec::new(),
+            temp_epoch_val: 0,
+            temp_list: Vec::new(),
+            filter_mask_cache: HashMap::new(),
+            filter_mask_lru: VecDeque::new(),
+            filter_mask_cap: FILTER_MASK_CACHE_CAP,
+        }
+    }
 }
 
 impl SearchScratch {
@@ -96,6 +123,35 @@ impl SearchScratch {
 
     pub(crate) fn is_temp(&self, idx: usize) -> bool {
         self.temp_epoch.get(idx).copied().unwrap_or(0) == self.temp_epoch_val
+    }
+
+    pub(crate) fn get_filter_mask(&mut self, key: u64, len: usize) -> Option<Arc<Vec<bool>>> {
+        let Some(mask) = self.filter_mask_cache.get(&key) else {
+            return None;
+        };
+        if mask.len() != len {
+            self.filter_mask_cache.remove(&key);
+            self.filter_mask_lru.retain(|k| *k != key);
+            return None;
+        }
+        self.filter_mask_lru.retain(|k| *k != key);
+        self.filter_mask_lru.push_back(key);
+        Some(Arc::clone(mask))
+    }
+
+    pub(crate) fn put_filter_mask(&mut self, key: u64, mask: Arc<Vec<bool>>) {
+        if self.filter_mask_cap == 0 {
+            return;
+        }
+        if self.filter_mask_cache.contains_key(&key) {
+            self.filter_mask_lru.retain(|k| *k != key);
+        } else if self.filter_mask_cache.len() >= self.filter_mask_cap {
+            if let Some(oldest) = self.filter_mask_lru.pop_front() {
+                self.filter_mask_cache.remove(&oldest);
+            }
+        }
+        self.filter_mask_cache.insert(key, Arc::clone(&mask));
+        self.filter_mask_lru.push_back(key);
     }
 }
 

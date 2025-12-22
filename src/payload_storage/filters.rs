@@ -2,7 +2,7 @@ use crate::utils::errors::DBError;
 use crate::utils::payload::{Payload, PayloadValue, ScalarComparisonOp}; 
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Filter {
     Match {
         key: String,

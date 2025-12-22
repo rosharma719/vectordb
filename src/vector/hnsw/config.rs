@@ -25,6 +25,7 @@ static SEARCH_TRACE_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
 static INSERT_TRACE_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
 static EXACT_FALLBACK_ENABLED: OnceLock<Option<bool>> = OnceLock::new();
 static EXACT_FALLBACK_THRESHOLD: OnceLock<Option<usize>> = OnceLock::new();
+static FILTER_ENTRY_CANDIDATES: OnceLock<Option<usize>> = OnceLock::new();
 
 pub(crate) fn log_unfiltered_enabled() -> bool {
     *LOG_UNFILTERED_SEARCH.get_or_init(|| {
@@ -213,6 +214,17 @@ pub(crate) fn exact_fallback_threshold_override() -> Option<usize> {
             std::env::var("VECTORDB_EXACT_FALLBACK_THRESHOLD")
                 .ok()
                 .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+        })
+        .clone()
+}
+
+pub(crate) fn filter_entry_candidates() -> Option<usize> {
+    FILTER_ENTRY_CANDIDATES
+        .get_or_init(|| {
+            std::env::var("VECTORDB_FILTER_ENTRY_CANDIDATES")
+                .ok()
+                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+                .filter(|v| *v > 0)
         })
         .clone()
 }
