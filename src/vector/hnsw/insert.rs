@@ -14,6 +14,7 @@ use crate::utils::types::{PointId, Vector, DistanceMetric};
 use super::config::{
     FILTER_EDGE_LOG_CHUNK,
     VERBOSE,
+    diversity_alpha,
     insert_trace_logger,
     next_insert_trace_seq,
     trace_every,
@@ -404,6 +405,7 @@ impl HNSWIndex {
         m: usize,
         normalize_scores: bool,
     ) -> Vec<usize> {
+        let alpha = diversity_alpha();
         let mut result = Vec::with_capacity(m);
         for cand in candidates {
             if result.len() >= m {
@@ -416,7 +418,7 @@ impl HNSWIndex {
                 let Some(r_vec) = self.get_vector_by_idx(r_id) else { continue; };
                 let d_cr_raw = self.fast_score(cand_vec, r_vec);
                 let d_cr = if normalize_scores { self.normalize_score(d_cr_raw) } else { d_cr_raw };
-                if d_cr < d_qc {
+                if d_cr < d_qc * alpha {
                     too_close = true;
                     break;
                 }

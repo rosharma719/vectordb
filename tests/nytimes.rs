@@ -16,6 +16,7 @@ use common::{
     SearchConfig,
     SnapshotConfig,
     TestLogConfig,
+    env_usize_first,
     summarize_f64,
     summarize_usize,
     MissStats,
@@ -202,12 +203,13 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
                 let dim = base.first().map(|v| v.len()).unwrap_or(0);
                 assert_eq!(dim, 256, "expected 256-d vectors");
                 let metric = DistanceMetric::Cosine;
-                let m = 16;
+                let m = env_usize_first(&["VECTORDB_M", "VECTORDB_NYT_M"]).unwrap_or(16);
+                let max_level = env_usize_first(&["VECTORDB_MAX_LEVEL", "VECTORDB_NYT_MAX_LEVEL"]).unwrap_or(16);
                 let mut segment = Segment::new(HNSWIndex::new(
                     metric,
                     m,
                     search.ef_values.iter().copied().max().unwrap_or(1).max(top_k),
-                    16,
+                    max_level,
                     dim,
                 ));
                 segment.hnsw_mut().set_ef_construct(search.ef_construct);
@@ -230,12 +232,13 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
         let dim = base.first().map(|v| v.len()).unwrap_or(0);
         assert_eq!(dim, 256, "expected 256-d vectors");
         let metric = DistanceMetric::Cosine;
-        let m = 16;
+        let m = env_usize_first(&["VECTORDB_M", "VECTORDB_NYT_M"]).unwrap_or(16);
+        let max_level = env_usize_first(&["VECTORDB_MAX_LEVEL", "VECTORDB_NYT_MAX_LEVEL"]).unwrap_or(16);
         let mut segment = Segment::new(HNSWIndex::new(
             metric,
             m,
             search.ef_values.iter().copied().max().unwrap_or(1).max(top_k),
-            16,
+            max_level,
             dim,
         ));
         segment.hnsw_mut().set_ef_construct(search.ef_construct);

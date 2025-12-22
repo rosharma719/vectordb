@@ -26,6 +26,7 @@ static INSERT_TRACE_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
 static EXACT_FALLBACK_ENABLED: OnceLock<Option<bool>> = OnceLock::new();
 static EXACT_FALLBACK_THRESHOLD: OnceLock<Option<usize>> = OnceLock::new();
 static FILTER_ENTRY_CANDIDATES: OnceLock<Option<usize>> = OnceLock::new();
+static DIVERSITY_ALPHA: OnceLock<Option<f32>> = OnceLock::new();
 
 pub(crate) fn log_unfiltered_enabled() -> bool {
     *LOG_UNFILTERED_SEARCH.get_or_init(|| {
@@ -227,4 +228,15 @@ pub(crate) fn filter_entry_candidates() -> Option<usize> {
                 .filter(|v| *v > 0)
         })
         .clone()
+}
+
+pub(crate) fn diversity_alpha() -> f32 {
+    DIVERSITY_ALPHA
+        .get_or_init(|| {
+            std::env::var("VECTORDB_DIVERSITY_ALPHA")
+                .ok()
+                .and_then(|v| v.replace('_', "").parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v > 0.0)
+        })
+        .unwrap_or(1.0)
 }
