@@ -69,13 +69,27 @@ Requires an `HF_TOKEN` with repo read access for `open-vdb/nytimes-256-angular` 
 cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocapture
 ```
 
-### Recall/Latency Curve with ef_construct = 100 
+### Build a snapshot (with insert trace logging)
+```
+VECTORDB_NYT_PERSIST_PATH=data/nytimes-256-angular/index_m16_m0_32_efc100.bin \
+VECTORDB_NYT_M=16 \
+VECTORDB_NYT_M0=32 \
+VECTORDB_NYT_EF_CONSTRUCT=100 \
+VECTORDB_NYT_EF_SEARCH_LIST=100 \
+VECTORDB_DIVERSITY_ALPHA=1 \
+VECTORDB_INSERT_TRACE_LOG=logs/nytimes_insert_m16_m0_32_efc100.jsonl \
+VECTORDB_NYT_ALLOW_BUILD=1 \
+VECTORDB_NYT_SAVE_SNAPSHOT=1 \
+cargo test --release nytimes_build_and_persist_snapshot_only -- --ignored --nocapture
+```
+
+### Recall/Latency Curve with ef_construct = 100 (M=16, M0=32, diversity_alpha=1)
 **Recall / Latency (ms/query):**
-  32 -> 0.743, 0.294 ms/query
-  64 -> 0.818, 0.441 ms/query
-  128 -> 0.860, 0.770 ms/query
-  256 -> 0.894, 1.510 ms/query
-  512 -> 0.926, 2.898 ms/query
+  32 -> 0.725, 0.300 ms/query
+  64 -> 0.807, 0.472 ms/query
+  128 -> 0.857, 0.848 ms/query
+  256 -> 0.891, 1.552 ms/query
+  512 -> 0.922, 3.432 ms/query
 ---
 
 ## Performance Benchmarks  

@@ -204,6 +204,7 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
                 assert_eq!(dim, 256, "expected 256-d vectors");
                 let metric = DistanceMetric::Cosine;
                 let m = env_usize_first(&["VECTORDB_M", "VECTORDB_NYT_M"]).unwrap_or(16);
+                let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_NYT_M0"]).unwrap_or(m);
                 let max_level = env_usize_first(&["VECTORDB_MAX_LEVEL", "VECTORDB_NYT_MAX_LEVEL"]).unwrap_or(16);
                 let mut segment = Segment::new(HNSWIndex::new(
                     metric,
@@ -212,6 +213,7 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
                     max_level,
                     dim,
                 ));
+                segment.hnsw_mut().set_m0(m0);
                 segment.hnsw_mut().set_ef_construct(search.ef_construct);
                 build_nytimes_segment(&mut segment, &base, &logs);
                 if snapshot.save_snapshot {
@@ -233,6 +235,7 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
         assert_eq!(dim, 256, "expected 256-d vectors");
         let metric = DistanceMetric::Cosine;
         let m = env_usize_first(&["VECTORDB_M", "VECTORDB_NYT_M"]).unwrap_or(16);
+        let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_NYT_M0"]).unwrap_or(m);
         let max_level = env_usize_first(&["VECTORDB_MAX_LEVEL", "VECTORDB_NYT_MAX_LEVEL"]).unwrap_or(16);
         let mut segment = Segment::new(HNSWIndex::new(
             metric,
@@ -241,6 +244,7 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
             max_level,
             dim,
         ));
+        segment.hnsw_mut().set_m0(m0);
         segment.hnsw_mut().set_ef_construct(search.ef_construct);
         build_nytimes_segment(&mut segment, &base, &logs);
         if snapshot.save_snapshot {
@@ -416,10 +420,11 @@ fn run_nytimes_recall_only() {
         segment.payloads().len()
     ));
     logs.log_info(&format!(
-        "🧭 HNSW config: metric={:?} dim={} m={} ef={} ef_construct={} level_cap={} level_scale={:.3} max_level={} exact_fallback={} threshold={}",
+        "🧭 HNSW config: metric={:?} dim={} m={} m0={} ef={} ef_construct={} level_cap={} level_scale={:.3} max_level={} exact_fallback={} threshold={}",
         cfg.metric,
         cfg.dim,
         cfg.m,
+        cfg.m0,
         cfg.ef,
         cfg.ef_construct,
         cfg.max_level_cap,

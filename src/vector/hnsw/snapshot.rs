@@ -1,15 +1,61 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use anyhow::anyhow;
+use serde::{Deserialize, Serialize};
 
 use crate::utils::errors::DBError;
-use crate::utils::types::PointId;
+use crate::utils::types::{DistanceMetric, PointId, Vector};
 
 use super::config::{exact_fallback_enabled_override, exact_fallback_threshold_override};
 use super::{HNSWIndex, HnswSnapshot};
+
+const HNSW_SNAPSHOT_MAGIC: [u8; 4] = *b"VDBH";
+const HNSW_SNAPSHOT_VERSION: u32 = 2;
+
+#[derive(Serialize, Deserialize)]
+struct HnswSnapshotV1 {
+    layers: HashMap<usize, HashMap<PointId, Vec<PointId>>>,
+    vectors: HashMap<PointId, Vector>,
+    levels: HashMap<PointId, usize>,
+    entry_point: Option<PointId>,
+    metric: DistanceMetric,
+    m: usize,
+    ef: usize,
+    ef_construct: usize,
+    max_level_cap: usize,
+    level_scale: f64,
+    current_max_level: usize,
+    dim: usize,
+    deleted: HashSet<PointId>,
+    exact_fallback_enabled: bool,
+    exact_fallback_threshold: usize,
+}
+
+impl From<HnswSnapshotV1> for HnswSnapshot {
+    fn from(snapshot: HnswSnapshotV1) -> Self {
+        Self {
+            layers: snapshot.layers,
+            vectors: snapshot.vectors,
+            levels: snapshot.levels,
+            entry_point: snapshot.entry_point,
+            metric: snapshot.metric,
+            m: snapshot.m,
+            m0: snapshot.m,
+            ef: snapshot.ef,
+            ef_construct: snapshot.ef_construct,
+            max_level_cap: snapshot.max_level_cap,
+            level_scale: snapshot.level_scale,
+            current_max_level: snapshot.current_max_level,
+            dim: snapshot.dim,
+            deleted: snapshot.deleted,
+            exact_fallback_enabled: snapshot.exact_fallback_enabled,
+            exact_fallback_threshold: snapshot.exact_fallback_threshold,
+        }
+    }
+}
 
 impl HNSWIndex {
     pub fn to_snapshot(&self) -> HnswSnapshot {
@@ -48,6 +94,7 @@ impl HNSWIndex {
             entry_point: self.entry_point.map(|idx| self.point_id(idx)),
             metric: self.metric,
             m: self.m,
+            m0: self.m0,
             ef: self.ef,
             ef_construct: self.ef_construct,
             max_level_cap: self.max_level_cap,
@@ -61,6 +108,7 @@ impl HNSWIndex {
     }
 
     pub fn from_snapshot(snapshot: HnswSnapshot) -> Self {
+        let m0 = if snapshot.m0 == 0 { snapshot.m } else { snapshot.m0 };
         let mut ids: Vec<PointId> = snapshot.vectors.keys().copied().collect();
         ids.sort_unstable();
         let mut point_to_idx = HashMap::with_capacity(ids.len());
@@ -89,7 +137,15 @@ impl HNSWIndex {
             .unwrap_or(0)
             .max(snapshot.current_max_level)
             + 1;
-        let mut layers = vec![vec![Vec::with_capacity(snapshot.m + 1); ids.len()]; num_levels];
+        let mut layers = Vec::with_capacity(num_levels);
+        for level in 0..num_levels {
+            let cap = if level == 0 { m0 + 1 } else { snapshot.m + 1 };
+            let mut layer = Vec::with_capacity(ids.len());
+            for _ in 0..ids.len() {
+                layer.push(Vec::with_capacity(cap));
+            }
+            layers.push(layer);
+        }
         for (level, layer_map) in snapshot.layers.iter() {
             if *level >= layers.len() {
                 continue;
@@ -111,6 +167,7 @@ impl HNSWIndex {
             entry_point: snapshot.entry_point.and_then(|id| point_to_idx.get(&id).copied()),
             metric: snapshot.metric,
             m: snapshot.m,
+            m0,
             ef: snapshot.ef,
             ef_construct: snapshot.ef_construct,
             max_level_cap: snapshot.max_level_cap,
@@ -128,16 +185,36 @@ impl HNSWIndex {
     pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), DBError> {
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
+        writer.write_all(&HNSW_SNAPSHOT_MAGIC)?;
+        writer.write_all(&HNSW_SNAPSHOT_VERSION.to_le_bytes())?;
         bincode::serialize_into(&mut writer, &self.to_snapshot())
             .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
         Ok(())
     }
 
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        let snapshot: HnswSnapshot = bincode::deserialize_from(&mut reader)
+        let bytes = std::fs::read(path)?;
+        if bytes.len() >= 8 && bytes[..4] == HNSW_SNAPSHOT_MAGIC {
+            let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+            return match version {
+                2 => {
+                    let snapshot: HnswSnapshot = bincode::deserialize(&bytes[8..])
+                        .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+                    Ok(Self::from_snapshot(snapshot))
+                }
+                _ => Err(DBError::SerializationError(anyhow!(
+                    "unsupported HNSW snapshot version {}",
+                    version
+                ))),
+            };
+        }
+
+        if let Ok(snapshot) = bincode::deserialize::<HnswSnapshot>(&bytes) {
+            return Ok(Self::from_snapshot(snapshot));
+        }
+
+        let snapshot_v1: HnswSnapshotV1 = bincode::deserialize(&bytes)
             .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
-        Ok(Self::from_snapshot(snapshot))
+        Ok(Self::from_snapshot(snapshot_v1.into()))
     }
 }

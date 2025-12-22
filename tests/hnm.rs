@@ -378,8 +378,10 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
                 assert_eq!(dim, 2048, "expected 2048-d vectors");
                 let metric = DistanceMetric::Cosine;
                 let m = env_usize_first(&["VECTORDB_M", "VECTORDB_HNM_M"]).unwrap_or(16);
+                let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_HNM_M0"]).unwrap_or(m);
                 let max_ef = search.ef_values.iter().copied().max().unwrap_or(1).max(top_k);
                 let mut segment = Segment::new(HNSWIndex::new(metric, m, max_ef, 16, dim));
+                segment.hnsw_mut().set_m0(m0);
                 segment.hnsw_mut().set_ef_construct(search.ef_construct);
                 build_hnm_segment(&mut segment, &base, &payloads, &logs);
                 if snapshot.save_snapshot {
@@ -404,8 +406,10 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
         assert_eq!(dim, 2048, "expected 2048-d vectors");
         let metric = DistanceMetric::Cosine;
         let m = env_usize_first(&["VECTORDB_M", "VECTORDB_HNM_M"]).unwrap_or(16);
+        let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_HNM_M0"]).unwrap_or(m);
         let max_ef = search.ef_values.iter().copied().max().unwrap_or(1).max(top_k);
         let mut segment = Segment::new(HNSWIndex::new(metric, m, max_ef, 16, dim));
+        segment.hnsw_mut().set_m0(m0);
         segment.hnsw_mut().set_ef_construct(search.ef_construct);
         build_hnm_segment(&mut segment, &base, &payloads, &logs);
         if snapshot.save_snapshot {

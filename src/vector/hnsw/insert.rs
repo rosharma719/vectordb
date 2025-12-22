@@ -115,7 +115,8 @@ impl HNSWIndex {
                 None,
                 None,
             )?;
-            let neighbors: Vec<usize> = self.select_diverse_neighbors(&candidates, self.m, use_norm);
+            let m_for_layer = if l == 0 { self.m0 } else { self.m };
+            let neighbors: Vec<usize> = self.select_diverse_neighbors(&candidates, m_for_layer, use_norm);
 
             let layer = self.layers.get_mut(l).unwrap();
             let mut linked = neighbors.clone();
@@ -188,12 +189,12 @@ impl HNSWIndex {
         };
 
         let mut extra_neighbors = HashSet::new();
-        let m = self.m();
+        let m = self.m0();
         let log_edges_agg = std::env::var("VECTORDB_LOG_FILTER_EDGES_AGG")
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
 
-        let sample_limit: usize = self.m().saturating_mul(2);
+        let sample_limit: usize = m.saturating_mul(2);
 
         for key in filter_keys {
             if let Some(value) = payload.get(key) {

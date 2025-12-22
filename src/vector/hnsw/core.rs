@@ -23,6 +23,8 @@ pub struct HnswSnapshot {
     pub entry_point: Option<PointId>,
     pub metric: DistanceMetric,
     pub m: usize,
+    #[serde(default)]
+    pub m0: usize,
     pub ef: usize,
     pub ef_construct: usize,
     pub max_level_cap: usize,
@@ -41,6 +43,7 @@ pub struct HNSWIndex {
     pub(crate) entry_point: Option<usize>,
     pub(crate) metric: DistanceMetric,
     pub(crate) m: usize,
+    pub(crate) m0: usize,
     pub(crate) ef: usize,
     pub(crate) ef_construct: usize,
     pub(crate) max_level_cap: usize,
@@ -58,6 +61,7 @@ pub struct HNSWIndex {
 pub struct HnswConfigSummary {
     pub metric: DistanceMetric,
     pub m: usize,
+    pub m0: usize,
     pub ef: usize,
     pub ef_construct: usize,
     pub max_level_cap: usize,
@@ -90,6 +94,7 @@ impl HNSWIndex {
             entry_point: None,
             metric,
             m,
+            m0: m,
             ef,
             ef_construct: ef,
             max_level_cap,
@@ -190,16 +195,21 @@ impl HNSWIndex {
     }
 
     #[inline]
-    pub(crate) fn neighbor_list(&self) -> Vec<usize> {
-        Vec::with_capacity(self.m + 1)
+    pub(crate) fn neighbor_list_capacity(&self, level: usize) -> usize {
+        if level == 0 {
+            self.m0 + 1
+        } else {
+            self.m + 1
+        }
     }
 
     pub(crate) fn ensure_level_capacity(&mut self, level: usize, nodes_len: usize) {
         if self.layers.len() <= level {
-            for _ in self.layers.len()..=level {
+            let start = self.layers.len();
+            for level_idx in start..=level {
                 let mut layer = Vec::with_capacity(nodes_len);
                 for _ in 0..nodes_len {
-                    layer.push(self.neighbor_list());
+                    layer.push(Vec::with_capacity(self.neighbor_list_capacity(level_idx)));
                 }
                 self.layers.push(layer);
             }
@@ -207,8 +217,10 @@ impl HNSWIndex {
     }
 
     pub(crate) fn extend_layers_for_new_node(&mut self, nodes_len: usize) {
-        let cap = self.m + 1;
-        for layer in &mut self.layers {
+        let m = self.m;
+        let m0 = self.m0;
+        for (level, layer) in self.layers.iter_mut().enumerate() {
+            let cap = if level == 0 { m0 + 1 } else { m + 1 };
             if layer.len() < nodes_len {
                 layer.push(Vec::with_capacity(cap));
             }
@@ -227,6 +239,7 @@ impl HNSWIndex {
         HnswConfigSummary {
             metric: self.metric,
             m: self.m,
+            m0: self.m0,
             ef: self.ef,
             ef_construct: self.ef_construct,
             max_level_cap: self.max_level_cap,
@@ -257,6 +270,10 @@ impl HNSWIndex {
         self.m
     }
 
+    pub fn m0(&self) -> usize {
+        self.m0
+    }
+
     pub fn ef(&self) -> usize {
         self.ef
     }
@@ -270,6 +287,10 @@ impl HNSWIndex {
             UNFILTERED_SEARCH_AGG.with(|cell| cell.borrow_mut().flush());
         }
         self.ef = ef;
+    }
+
+    pub fn set_m0(&mut self, m0: usize) {
+        self.m0 = m0.max(1);
     }
 
     pub fn flush_unfiltered_search_stats(&self) {

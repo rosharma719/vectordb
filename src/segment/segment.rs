@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::thread_local;
 use std::time::{Duration, Instant};
@@ -34,6 +34,72 @@ struct SegmentSnapshot {
     payloads: HashMap<PointId, Payload>,
     deleted: HashSet<PointId>,
     next_id: PointId,
+}
+
+const SEGMENT_SNAPSHOT_MAGIC: [u8; 4] = *b"VDBS";
+const SEGMENT_SNAPSHOT_VERSION: u32 = 2;
+
+#[derive(Serialize, Deserialize)]
+struct HnswSnapshotV1 {
+    layers: HashMap<usize, HashMap<PointId, Vec<PointId>>>,
+    vectors: HashMap<PointId, Vector>,
+    levels: HashMap<PointId, usize>,
+    entry_point: Option<PointId>,
+    metric: crate::utils::types::DistanceMetric,
+    m: usize,
+    ef: usize,
+    ef_construct: usize,
+    max_level_cap: usize,
+    level_scale: f64,
+    current_max_level: usize,
+    dim: usize,
+    deleted: HashSet<PointId>,
+    exact_fallback_enabled: bool,
+    exact_fallback_threshold: usize,
+}
+
+impl From<HnswSnapshotV1> for HnswSnapshot {
+    fn from(snapshot: HnswSnapshotV1) -> Self {
+        Self {
+            layers: snapshot.layers,
+            vectors: snapshot.vectors,
+            levels: snapshot.levels,
+            entry_point: snapshot.entry_point,
+            metric: snapshot.metric,
+            m: snapshot.m,
+            m0: snapshot.m,
+            ef: snapshot.ef,
+            ef_construct: snapshot.ef_construct,
+            max_level_cap: snapshot.max_level_cap,
+            level_scale: snapshot.level_scale,
+            current_max_level: snapshot.current_max_level,
+            dim: snapshot.dim,
+            deleted: snapshot.deleted,
+            exact_fallback_enabled: snapshot.exact_fallback_enabled,
+            exact_fallback_threshold: snapshot.exact_fallback_threshold,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SegmentSnapshotV1 {
+    hnsw: HnswSnapshotV1,
+    payload_index: PayloadIndex,
+    payloads: HashMap<PointId, Payload>,
+    deleted: HashSet<PointId>,
+    next_id: PointId,
+}
+
+impl From<SegmentSnapshotV1> for SegmentSnapshot {
+    fn from(snapshot: SegmentSnapshotV1) -> Self {
+        Self {
+            hnsw: snapshot.hnsw.into(),
+            payload_index: snapshot.payload_index,
+            payloads: snapshot.payloads,
+            deleted: snapshot.deleted,
+            next_id: snapshot.next_id,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -388,6 +454,8 @@ impl Segment {
         };
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
+        writer.write_all(&SEGMENT_SNAPSHOT_MAGIC)?;
+        writer.write_all(&SEGMENT_SNAPSHOT_VERSION.to_le_bytes())?;
         bincode::serialize_into(&mut writer, &snapshot)
             .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
         Ok(())
@@ -395,10 +463,26 @@ impl Segment {
 
     /// Restore a segment that was previously persisted with `save_to_path`.
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        let snapshot: SegmentSnapshot = bincode::deserialize_from(&mut reader)
-            .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+        let bytes = std::fs::read(path)?;
+        let snapshot: SegmentSnapshot = if bytes.len() >= 8 && bytes[..4] == SEGMENT_SNAPSHOT_MAGIC {
+            let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+            match version {
+                2 => bincode::deserialize(&bytes[8..])
+                    .map_err(|e| DBError::SerializationError(anyhow!(e)))?,
+                _ => {
+                    return Err(DBError::SerializationError(anyhow!(
+                        "unsupported segment snapshot version {}",
+                        version
+                    )))
+                }
+            }
+        } else if let Ok(snapshot) = bincode::deserialize::<SegmentSnapshot>(&bytes) {
+            snapshot
+        } else {
+            let legacy: SegmentSnapshotV1 = bincode::deserialize(&bytes)
+                .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+            legacy.into()
+        };
         Ok(Self {
             hnsw: HNSWIndex::from_snapshot(snapshot.hnsw),
             payload_index: snapshot.payload_index,

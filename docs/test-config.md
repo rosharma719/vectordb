@@ -9,6 +9,7 @@ Snapshot defaults (shared):
 - `VECTORDB_SAVE_SNAPSHOT` (default `0`)
 
 - Core recall controls (shared):
+  - `VECTORDB_M` / `VECTORDB_M0` (graph connectivity; M0 defaults to M)
   - `VECTORDB_EF_SEARCH_LIST` (or dataset-specific overrides below)
   - `VECTORDB_EARLY_EXIT_PATIENCE`
   - `VECTORDB_DISABLE_EARLY_EXIT` (set to `1` to turn it off)
@@ -35,6 +36,7 @@ Snapshot defaults (shared):
   - `VECTORDB_NYT_PERSIST_PATH` (default `data/nytimes-256-angular/index.bin`)
   - `VECTORDB_NYT_USE_SNAPSHOT` (override `VECTORDB_USE_SNAPSHOT`)
   - `VECTORDB_NYT_ALLOW_BUILD` / `VECTORDB_NYT_SAVE_SNAPSHOT`
+  - `VECTORDB_NYT_M` / `VECTORDB_NYT_M0`
   - `VECTORDB_NYT_EF_SEARCH_LIST` (falls back to `VECTORDB_EF_SEARCH_LIST`)
   - `VECTORDB_EF_CONSTRUCT` / `VECTORDB_NYT_EF_CONSTRUCT`
 
@@ -43,7 +45,7 @@ Snapshot defaults (shared):
   - `VECTORDB_HNM_PERSIST_PATH` (default `data/hnm/index_filtered.bin`)
   - `VECTORDB_HNM_USE_SNAPSHOT` (override `VECTORDB_USE_SNAPSHOT`)
   - `VECTORDB_HNM_ALLOW_BUILD` / `VECTORDB_HNM_SAVE_SNAPSHOT`
-  - `VECTORDB_HNM_M` (override HNSW M for rebuilds; default 16)
+  - `VECTORDB_HNM_M` / `VECTORDB_HNM_M0` (override HNSW M/M0 for rebuilds; M0 defaults to M)
   - `VECTORDB_HNM_EF_SEARCH_LIST` (falls back to `VECTORDB_EF_SEARCH_LIST`)
   - `VECTORDB_HNM_EF_CONSTRUCT` (build-time)
   - `VECTORDB_HNM_TOPK` (default derived from test cases)
