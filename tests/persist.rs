@@ -453,3 +453,182 @@ fn background_snapshot_respects_deletes() -> Result<(), DBError> {
     let _ = fs::remove_file(path);
     Ok(())
 }
+
+#[test]
+fn wal_replay_applies_post_snapshot_ops() -> Result<(), DBError> {
+    let snapshot_path = tmp_path("segment_wal_snapshot");
+    let wal_path = Segment::wal_path_for_snapshot(&snapshot_path);
+
+    let mut seg = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2));
+    seg.enable_wal(&wal_path)?;
+
+    let mut payload = Payload(HashMap::new());
+    payload.set("tag", PayloadValue::Str("v1".to_string()));
+    seg.insert_with_id(1, vecf(&[1.0, 0.0]), Some(payload.clone()))?;
+
+    seg.save_to_path(&snapshot_path)?;
+
+    payload.set("tag", PayloadValue::Str("v2".to_string()));
+    seg.update_payload(1, payload.clone())?;
+    seg.insert_with_id(2, vecf(&[2.0, 0.0]), None)?;
+    seg.delete(2)?;
+
+    let restored = Segment::load_from_path(&snapshot_path)?;
+    assert!(restored.get_vector(2).is_none());
+    assert_eq!(restored.get_payload(1), Some(&payload));
+
+    let _ = fs::remove_file(snapshot_path);
+    let _ = fs::remove_file(wal_path);
+    Ok(())
+}
+
+#[test]
+fn wal_checkpoint_truncates_log() -> Result<(), DBError> {
+    let snapshot_path = tmp_path("segment_wal_checkpoint");
+    let wal_path = Segment::wal_path_for_snapshot(&snapshot_path);
+
+    let mut seg = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2));
+    seg.enable_wal(&wal_path)?;
+    seg.insert_with_id(1, vecf(&[1.0, 0.0]), None)?;
+    assert!(fs::metadata(&wal_path)?.len() > 0);
+
+    seg.save_to_path_and_checkpoint(&snapshot_path)?;
+    let size = fs::metadata(&wal_path)?.len();
+    assert!(size > 0, "wal header should remain after truncate");
+
+    let mut seg2 = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2));
+    seg2.enable_wal(&wal_path)?;
+    seg2.insert_with_id(2, vecf(&[2.0, 0.0]), None)?;
+
+    let restored = Segment::load_from_path(&snapshot_path)?;
+    assert!(restored.get_vector(1).is_some());
+    assert!(restored.get_vector(2).is_some());
+
+    let _ = fs::remove_file(snapshot_path);
+    let _ = fs::remove_file(wal_path);
+    Ok(())
+}
+
+#[test]
+fn wal_auto_replay_can_be_disabled() -> Result<(), DBError> {
+    let snapshot_path = tmp_path("segment_wal_no_replay");
+    let wal_path = Segment::wal_path_for_snapshot(&snapshot_path);
+
+    let mut seg = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2));
+    seg.enable_wal(&wal_path)?;
+    seg.insert_with_id(1, vecf(&[1.0, 0.0]), None)?;
+    seg.save_to_path(&snapshot_path)?;
+    seg.insert_with_id(2, vecf(&[2.0, 0.0]), None)?;
+
+    unsafe {
+        std::env::set_var("VECTORDB_WAL_AUTO_REPLAY", "0");
+    }
+    let restored = Segment::load_from_path(&snapshot_path)?;
+    unsafe {
+        std::env::remove_var("VECTORDB_WAL_AUTO_REPLAY");
+    }
+
+    assert!(restored.get_vector(1).is_some());
+    assert!(restored.get_vector(2).is_none());
+
+    let _ = fs::remove_file(snapshot_path);
+    let _ = fs::remove_file(wal_path);
+    Ok(())
+}
+
+#[test]
+fn wal_corruption_is_detected() -> Result<(), DBError> {
+    let snapshot_path = tmp_path("segment_wal_corrupt_snapshot");
+    let wal_path = Segment::wal_path_for_snapshot(&snapshot_path);
+
+    let mut seg = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2));
+    seg.enable_wal(&wal_path)?;
+    seg.insert_with_id(1, vecf(&[1.0, 0.0]), None)?;
+    seg.save_to_path(&snapshot_path)?;
+    seg.insert_with_id(2, vecf(&[2.0, 0.0]), None)?;
+
+    let mut bytes = fs::read(&wal_path)?;
+    assert!(bytes.len() > 12, "wal too small to corrupt");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    fs::write(&wal_path, bytes)?;
+
+    let res = Segment::load_from_path(&snapshot_path);
+    assert!(res.is_err());
+
+    let _ = fs::remove_file(snapshot_path);
+    let _ = fs::remove_file(wal_path);
+    Ok(())
+}
+
+#[test]
+fn wal_and_background_snapshot_together() -> Result<(), DBError> {
+    let snapshot_path = tmp_path("segment_wal_background_snapshot");
+    let wal_path = Segment::wal_path_for_snapshot(&snapshot_path);
+
+    let segment = Arc::new(RwLock::new(Segment::new(HNSWIndex::new(
+        DistanceMetric::Euclidean,
+        16,
+        32,
+        8,
+        2,
+    ))));
+    {
+        let mut guard = segment.write().unwrap();
+        guard.enable_wal(&wal_path)?;
+    }
+
+    let mut config = SnapshotConfig::new(&snapshot_path);
+    config.interval = Duration::from_millis(100);
+    config.max_ops = 10;
+    config.check_every = Duration::from_millis(10);
+    let handle = start_background_snapshots(segment.clone(), config);
+
+    {
+        let mut guard = segment.write().unwrap();
+        for i in 0..50u64 {
+            guard.insert_with_id(i, vecf(&[i as f32, 0.0]), None)?;
+        }
+    }
+
+    let start = Instant::now();
+    while !snapshot_path.exists() && start.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.stop();
+
+    let restored = Segment::load_from_path(&snapshot_path)?;
+    let len = restored.hnsw().len();
+    assert!(len > 0);
+
+    let _ = fs::remove_file(snapshot_path);
+    let _ = fs::remove_file(wal_path);
+    Ok(())
+}
+
+#[test]
+fn wal_with_deletes_and_purge_replay() -> Result<(), DBError> {
+    let snapshot_path = tmp_path("segment_wal_purge_snapshot");
+    let wal_path = Segment::wal_path_for_snapshot(&snapshot_path);
+
+    let mut seg = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2));
+    seg.enable_wal(&wal_path)?;
+
+    for i in 0..500u64 {
+        seg.insert_with_id(i, vecf(&[i as f32, 0.0]), None)?;
+    }
+    seg.save_to_path(&snapshot_path)?;
+
+    for i in 0..200u64 {
+        seg.delete(i)?;
+    }
+
+    let restored = Segment::load_from_path(&snapshot_path)?;
+    assert!(restored.get_vector(0).is_none());
+    assert!(restored.get_vector(199).is_none());
+    assert!(restored.get_vector(300).is_some());
+
+    let _ = fs::remove_file(snapshot_path);
+    let _ = fs::remove_file(wal_path);
+    Ok(())
+}

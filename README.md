@@ -109,6 +109,26 @@ let snapshotter = start_background_snapshots(segment.clone(), cfg);
 // keep `snapshotter` alive; call snapshotter.stop() on shutdown
 ```
 
+### WAL (write-ahead log)
+Enable a WAL to make inserts/deletes/payload updates durable between snapshots. WAL replay is automatic on
+`Segment::load_from_path` when `<snapshot>.wal` exists.
+
+```
+use vectordb::segment::Segment;
+
+let mut segment = Segment::new(hnsw);
+segment.enable_wal("data/segment.wal")?;
+
+segment.insert_with_id(1, vec![1.0, 0.0], None)?;
+segment.save_to_path("data/segment_snapshot.bin")?;
+
+let restored = Segment::load_from_path("data/segment_snapshot.bin")?;
+```
+
+Notes:
+- Auto-replay can be disabled with `VECTORDB_WAL_AUTO_REPLAY=0`.
+- Use `save_to_path_and_checkpoint` to save a snapshot and truncate the WAL after a successful write.
+
 ### Recall/Latency Curve with ef_construct = 100 (M=16, M0=32, diversity_alpha=1)
 **Recall / Latency (ms/query):**
 - 32 -> 0.725, 0.300 ms/query

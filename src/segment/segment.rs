@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread_local;
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::payload_storage::filters::Filter;
 use crate::payload_storage::stores::PayloadIndex;
+use crate::segment::wal::{WalConfig, WalReader, WalRecord, WalWriter};
 use crate::utils::errors::DBError;
 use crate::utils::io::{adler32, write_atomic_with_checksum};
 use crate::utils::payload::{Payload, PayloadValue};
@@ -26,6 +27,7 @@ pub struct Segment {
     deleted: HashSet<PointId>,
     next_id: PointId,
     op_count: u64,
+    wal: Option<WalWriter>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -127,6 +129,7 @@ impl Segment {
             deleted: HashSet::new(),
             next_id: 1,
             op_count: 0,
+            wal: None,
         }
     }
 
@@ -143,6 +146,16 @@ impl Segment {
         vector: Vector,
         payload: Option<Payload>,
     ) -> Result<PointId, DBError> {
+        self.insert_with_id_internal(point_id, vector, payload, true)
+    }
+
+    fn insert_with_id_internal(
+        &mut self,
+        point_id: PointId,
+        vector: Vector,
+        payload: Option<Payload>,
+        write_wal: bool,
+    ) -> Result<PointId, DBError> {
         let log_timing = Self::log_insert_timing();
         let total_start = if log_timing { Some(Instant::now()) } else { None };
         let mut last = total_start;
@@ -153,6 +166,14 @@ impl Segment {
 
         if self.hnsw.contains(&point_id) || self.payloads.contains_key(&point_id) || self.deleted.contains(&point_id) {
             return Err(DBError::DuplicatePointId(point_id));
+        }
+
+        if write_wal {
+            self.append_wal(WalRecord::Insert {
+                point_id,
+                vector: vector.clone(),
+                payload: payload.clone(),
+            })?;
         }
 
         self.hnsw.insert(point_id, vector.clone())?;
@@ -241,12 +262,20 @@ impl Segment {
     }
 
     pub fn delete(&mut self, point_id: PointId) -> Result<(), DBError> {
+        self.delete_internal(point_id, true)
+    }
+
+    fn delete_internal(&mut self, point_id: PointId, write_wal: bool) -> Result<(), DBError> {
         // If the point is already marked as deleted OR is no longer in the index,
         // treat it as already deleted.
         if self.deleted.contains(&point_id) || !self.hnsw.contains(&point_id) {
             return Ok(());
         }
-    
+
+        if write_wal {
+            self.append_wal(WalRecord::Delete { point_id })?;
+        }
+
         if let Some(p) = self.payloads.get(&point_id) {
             self.payload_index.remove(point_id, p);
         }
@@ -274,6 +303,37 @@ impl Segment {
         }
 
     
+        Ok(())
+    }
+
+    /// Update payload for an existing point ID.
+    pub fn update_payload(&mut self, point_id: PointId, payload: Payload) -> Result<(), DBError> {
+        self.update_payload_internal(point_id, payload, true)
+    }
+
+    fn update_payload_internal(
+        &mut self,
+        point_id: PointId,
+        payload: Payload,
+        write_wal: bool,
+    ) -> Result<(), DBError> {
+        if self.deleted.contains(&point_id) || !self.hnsw.contains(&point_id) {
+            return Err(DBError::NotFound(point_id));
+        }
+
+        if write_wal {
+            self.append_wal(WalRecord::UpdatePayload {
+                point_id,
+                payload: payload.clone(),
+            })?;
+        }
+
+        if let Some(old) = self.payloads.get(&point_id) {
+            self.payload_index.remove(point_id, old);
+        }
+        self.payload_index.insert(point_id, &payload);
+        self.payloads.insert(point_id, payload);
+        self.op_count = self.op_count.saturating_add(1);
         Ok(())
     }
     
@@ -456,7 +516,15 @@ impl Segment {
 
     /// Restore a segment that was previously persisted with `save_to_path`.
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
-        let bytes = std::fs::read(path)?;
+        Self::load_from_path_with_wal(path, None)
+    }
+
+    /// Restore a segment and optionally replay a WAL (defaults to `<snapshot>.wal` if present).
+    pub fn load_from_path_with_wal<P: AsRef<Path>>(
+        path: P,
+        wal_path: Option<PathBuf>,
+    ) -> Result<Self, DBError> {
+        let bytes = std::fs::read(&path)?;
         let (payload, checksum) = if bytes.len() >= 8
             && bytes[bytes.len() - 8..bytes.len() - 4] == SEGMENT_SNAPSHOT_FOOTER
         {
@@ -499,14 +567,48 @@ impl Segment {
                 .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
             legacy.into()
         };
-        Ok(Self {
+        let mut segment = Self {
             hnsw: HNSWIndex::from_snapshot(snapshot.hnsw),
             payload_index: snapshot.payload_index,
             payloads: snapshot.payloads,
             deleted: snapshot.deleted,
             next_id: snapshot.next_id,
             op_count: 0,
-        })
+            wal: None,
+        };
+
+        let wal_path = wal_path.unwrap_or_else(|| Self::default_wal_path(path.as_ref()));
+        let auto_replay = std::env::var("VECTORDB_WAL_AUTO_REPLAY")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
+        if auto_replay && wal_path.exists() {
+            let reader = WalReader::new(&wal_path);
+            reader.replay(|record| segment.apply_wal_record(record))?;
+            segment.wal = Some(WalWriter::open(WalConfig::new(wal_path))?);
+        }
+
+        Ok(segment)
+    }
+
+    pub fn enable_wal<P: AsRef<Path>>(&mut self, path: P) -> Result<(), DBError> {
+        let writer = WalWriter::open(WalConfig::new(path.as_ref().to_path_buf()))?;
+        self.wal = Some(writer);
+        Ok(())
+    }
+
+    pub fn save_to_path_and_checkpoint<P: AsRef<Path>>(&mut self, path: P) -> Result<(), DBError> {
+        let snapshot = self.build_snapshot();
+        Self::persist_snapshot(&snapshot, &path)?;
+        self.checkpoint_wal()?;
+        Ok(())
+    }
+
+    pub fn wal_path_for_snapshot<P: AsRef<Path>>(path: P) -> PathBuf {
+        Self::default_wal_path(path.as_ref())
+    }
+
+    fn default_wal_path(path: &Path) -> PathBuf {
+        path.with_extension("wal")
     }
 
     pub(crate) fn build_snapshot(&self) -> SegmentSnapshot {
@@ -534,6 +636,38 @@ impl Segment {
 
     pub(crate) fn op_count(&self) -> u64 {
         self.op_count
+    }
+
+    pub fn checkpoint_wal(&mut self) -> Result<(), DBError> {
+        if let Some(wal) = &mut self.wal {
+            wal.truncate()?;
+        }
+        Ok(())
+    }
+
+    fn append_wal(&mut self, record: WalRecord) -> Result<(), DBError> {
+        if let Some(wal) = &mut self.wal {
+            wal.append(&record)?;
+        }
+        Ok(())
+    }
+
+    fn apply_wal_record(&mut self, record: WalRecord) -> Result<(), DBError> {
+        match record {
+            WalRecord::Insert {
+                point_id,
+                vector,
+                payload,
+            } => match self.insert_with_id_internal(point_id, vector, payload, false) {
+                Ok(_) => Ok(()),
+                Err(DBError::DuplicatePointId(_)) => Ok(()),
+                Err(err) => Err(err),
+            },
+            WalRecord::Delete { point_id } => self.delete_internal(point_id, false),
+            WalRecord::UpdatePayload { point_id, payload } => {
+                self.update_payload_internal(point_id, payload, false)
+            }
+        }
     }
 
     /// Build the list of payload keys to use for filter-aware edges, honoring an optional allowlist,
