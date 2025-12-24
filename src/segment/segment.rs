@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread_local;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,24 @@ pub struct Segment {
     next_id: PointId,
     op_count: u64,
     wal: Option<WalWriter>,
+    rebuilding: AtomicBool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::types::DistanceMetric;
+
+    #[test]
+    fn searches_fail_when_rebuilding_flag_set() {
+        let mut seg = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2));
+        for i in 0..5u64 {
+            seg.insert_with_id(i, vec![i as f32, 0.0], None).unwrap();
+        }
+        seg.rebuilding.store(true, Ordering::SeqCst);
+        let res = seg.search(&vec![1.0, 0.0], 1);
+        assert!(matches!(res, Err(DBError::SearchError(_))));
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -130,6 +149,7 @@ impl Segment {
             next_id: 1,
             op_count: 0,
             wal: None,
+            rebuilding: AtomicBool::new(false),
         }
     }
 
@@ -290,8 +310,10 @@ impl Segment {
         const MIN_DELETIONS_BEFORE_PURGE: usize = 100;
         const MAX_DELETION_RATIO: f32 = 0.25;
 
-        if deleted_count >= MIN_DELETIONS_BEFORE_PURGE &&
-        (deleted_count as f32 / total_count as f32) >= MAX_DELETION_RATIO {
+        if Self::purge_on_delete_enabled()
+            && deleted_count >= MIN_DELETIONS_BEFORE_PURGE
+            && (deleted_count as f32 / total_count as f32) >= MAX_DELETION_RATIO
+        {
             log::info!(
                 target: "segment",
                 "[DELETE] Triggering purge: {}/{} ({:.2}%) deleted",
@@ -340,6 +362,7 @@ impl Segment {
 
 
     pub fn search(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
+        self.ensure_not_rebuilding()?;
         let total_non_deleted = self.hnsw.len() - self.deleted.len();
         if total_non_deleted == 0 {
             return Err(DBError::SearchError("No active points available to search.".into()));
@@ -362,6 +385,7 @@ impl Segment {
         query: &Vector,
         top_k: usize,
     ) -> Result<(Vec<ScoredPoint>, SearchStats), DBError> {
+        self.ensure_not_rebuilding()?;
         let total_non_deleted = self.hnsw.len() - self.deleted.len();
         if total_non_deleted == 0 {
             return Err(DBError::SearchError("No active points available to search.".into()));
@@ -383,6 +407,7 @@ impl Segment {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<ScoredPoint>, DBError> {
+        self.ensure_not_rebuilding()?;
         let total_non_deleted = self.hnsw.len() - self.deleted.len();
         if total_non_deleted == 0 {
             return Err(DBError::SearchError("No active points available to search.".into()));
@@ -409,6 +434,7 @@ impl Segment {
 
     /// Internal unfiltered search (used for diagnostics or filtered versions).
     pub fn search_unfiltered(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
+        self.ensure_not_rebuilding()?;
         self.hnsw.search(query, top_k)
     }
 
@@ -423,6 +449,20 @@ impl Segment {
     }
 
     pub fn purge(&mut self) -> Result<(), DBError> {
+        if self.rebuilding.swap(true, Ordering::SeqCst) {
+            return Err(DBError::SearchError("Segment rebuild already in progress.".into()));
+        }
+        struct RebuildGuard<'a> {
+            flag: &'a AtomicBool,
+        }
+        impl<'a> Drop for RebuildGuard<'a> {
+            fn drop(&mut self) {
+                self.flag.store(false, Ordering::SeqCst);
+            }
+        }
+        let _guard = RebuildGuard {
+            flag: &self.rebuilding,
+        };
         let mut new_hnsw = HNSWIndex::new(
             self.hnsw.metric(),
             self.hnsw.m(),
@@ -508,6 +548,13 @@ impl Segment {
             .unwrap_or(false)
     }
 
+    /// Toggle purge-on-delete behavior. Defaults to false (keep tombstones).
+    fn purge_on_delete_enabled() -> bool {
+        env::var("VECTORDB_PURGE_DELETIONS")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false)
+    }
+
     /// Persist the entire segment (graph, vectors, payloads, and inverted index) to disk.
     pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), DBError> {
         let snapshot = self.build_snapshot();
@@ -575,6 +622,7 @@ impl Segment {
             next_id: snapshot.next_id,
             op_count: 0,
             wal: None,
+            rebuilding: AtomicBool::new(false),
         };
 
         let wal_path = wal_path.unwrap_or_else(|| Self::default_wal_path(path.as_ref()));
@@ -638,6 +686,15 @@ impl Segment {
         self.op_count
     }
 
+    fn ensure_not_rebuilding(&self) -> Result<(), DBError> {
+        if self.rebuilding.load(Ordering::SeqCst) {
+            return Err(DBError::SearchError(
+                "Segment rebuild in progress. Retry later.".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn checkpoint_wal(&mut self) -> Result<(), DBError> {
         if let Some(wal) = &mut self.wal {
             wal.truncate()?;
@@ -666,9 +723,9 @@ impl Segment {
             WalRecord::Delete { point_id } => self.delete_internal(point_id, false),
             WalRecord::UpdatePayload { point_id, payload } => {
                 self.update_payload_internal(point_id, payload, false)
-            }
         }
     }
+}
 
     /// Build the list of payload keys to use for filter-aware edges, honoring an optional allowlist,
     /// a max count, and a type preference (Bool -> Str -> Int -> Float).

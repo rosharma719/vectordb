@@ -155,6 +155,12 @@ fn nytimes_recall_from_snapshot() {
     run_nytimes_recall_only();
 }
 
+#[test]
+#[ignore]
+fn nytimes_qps_latency_curve() {
+    run_nytimes_qps_latency_curve();
+}
+
 #[derive(Clone, Copy)]
 enum TestMode {
     Default,
@@ -167,7 +173,10 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
     let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
         .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
     let search = SearchConfig::from_env("NYT", &[32, 64, 128, 256, 512], 1000);
-    let mut snapshot = SnapshotConfig::from_env("NYT", "data/nytimes-256-angular/index.bin");
+    let mut snapshot = SnapshotConfig::from_env(
+        "NYT",
+        "data/nytimes-256-angular/index_m16_m0_32_efc100.bin",
+    );
     if matches!(mode, TestMode::BuildOnly) {
         snapshot.use_snapshot = false;
         snapshot.allow_build = true;
@@ -390,7 +399,10 @@ fn run_nytimes_recall_only() {
     let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
         .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
     let search = SearchConfig::from_env("NYT", &[32, 64, 128, 256, 512], 1000);
-    let snapshot = SnapshotConfig::from_env("NYT", "data/nytimes-256-angular/index.bin");
+    let snapshot = SnapshotConfig::from_env(
+        "NYT",
+        "data/nytimes-256-angular/index_m16_m0_32_efc100.bin",
+    );
     let top_k = search.top_k.unwrap_or(20);
 
     let queries_path = Path::new(&data_dir).join("queries.npy");
@@ -560,5 +572,139 @@ fn run_nytimes_recall_only() {
     logs.log_info("\nSummary (ef_search -> recall, ms/query):");
     for (ef, recall, ms) in summary {
         logs.log_info(&format!("  {} -> {:.3}, {:.3} ms/query", ef, recall, ms));
+    }
+}
+
+fn run_nytimes_qps_latency_curve() {
+    let t0 = Instant::now();
+    let logs = TestLogConfig::from_env();
+    let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
+        .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
+    let search = SearchConfig::from_env("NYT", &[32, 64, 128, 256, 512], 1000);
+    let snapshot = SnapshotConfig::from_env(
+        "NYT",
+        "data/nytimes-256-angular/index_m16_m0_32_efc100.bin",
+    );
+    let top_k = search.top_k.unwrap_or(20);
+
+    let queries_path = Path::new(&data_dir).join("queries.npy");
+    let truth_path = Path::new(&data_dir).join("ground_truth.json");
+    ensure_exists(&queries_path);
+    ensure_exists(&truth_path);
+    log_search_caps(&logs);
+
+    let queries = load_vectors(&queries_path);
+    let ground_truth = load_ground_truth(&truth_path);
+    assert_eq!(ground_truth.len(), queries.len(), "ground truth length must match queries");
+    logs.log_info(&format!("⏱️  Queries and truth loaded in {:?}", t0.elapsed()));
+
+    if !snapshot.use_snapshot {
+        panic!("nytimes_qps_latency_curve requires VECTORDB_USE_SNAPSHOT=1");
+    }
+    if !Path::new(&snapshot.persist_path).exists() {
+        panic!(
+            "missing snapshot at {} (run nytimes_build_and_persist_snapshot_only first)",
+            snapshot.persist_path
+        );
+    }
+    logs.log_info(&format!(
+        "💾 Loading persisted NYTimes segment from {} ...",
+        snapshot.persist_path
+    ));
+    let mut segment = Segment::load_from_path(&snapshot.persist_path)
+        .expect("failed to load persisted NYTimes segment");
+    let cfg = segment.hnsw().config_summary();
+    logs.log_info(&format!(
+        "✅ Loaded persisted segment with {} vectors (payloads={})",
+        segment.hnsw().len(),
+        segment.payloads().len()
+    ));
+    logs.log_info(&format!(
+        "🧭 HNSW config: metric={:?} dim={} m={} m0={} ef={} ef_construct={} level_cap={} level_scale={:.3} max_level={} exact_fallback={} threshold={}",
+        cfg.metric,
+        cfg.dim,
+        cfg.m,
+        cfg.m0,
+        cfg.ef,
+        cfg.ef_construct,
+        cfg.max_level_cap,
+        cfg.level_scale,
+        cfg.current_max_level,
+        cfg.exact_fallback_enabled,
+        cfg.exact_fallback_threshold
+    ));
+
+    let num_queries = queries.len().min(search.queries_cap);
+    let mut query_logger = QueryLogWriter::new(logs.query_log_path.clone(), logs.query_log_every);
+    logs.log_info(&format!(
+        "🔍 Sweeping ef_search over {:?} for {} queries (top_k={})...",
+        search.ef_values, num_queries, top_k
+    ));
+
+    let mut summary: Vec<(usize, f64, f64, f64)> = Vec::new();
+    for &ef in &search.ef_values {
+        let ef_search = ef.max(top_k);
+        segment.hnsw_mut().set_ef_search(ef_search);
+        let mut hits = 0usize;
+        let mut total_targets = 0usize;
+        let mut stats = QueryStatsAgg::new(num_queries);
+        let start_search = Instant::now();
+        for (qi, q) in queries.iter().take(num_queries).enumerate() {
+            let q_start = Instant::now();
+            let (approx, qstats) = segment.search_with_stats(q, top_k).unwrap();
+            let truth = &ground_truth[qi];
+            let truth_k = truth.len().min(top_k);
+            let truth_set: HashSet<_> = truth
+                .iter()
+                .take(truth_k)
+                .map(|&id| id as u64)
+                .collect();
+            total_targets += truth_set.len();
+            let query_hits = approx.iter().filter(|r| truth_set.contains(&r.id)).count();
+            hits += query_hits;
+            let recall = query_hits as f64 / truth_set.len().max(1) as f64;
+            let elapsed_ms = q_start.elapsed().as_secs_f64() * 1000.0;
+            stats.record(elapsed_ms, Some(qstats.visited), Some(qstats.expanded), recall);
+            query_logger.write(
+                qi,
+                &QueryLogEntry {
+                    dataset: "nytimes-256-angular",
+                    query_idx: qi,
+                    ef_search,
+                    top_k,
+                    elapsed_ms,
+                    visited: Some(qstats.visited),
+                    expanded: Some(qstats.expanded),
+                    results_len: approx.len(),
+                    recall,
+                    misses: truth_set.len().saturating_sub(query_hits),
+                },
+            );
+        }
+        let search_dur = start_search.elapsed();
+        let avg_ms = search_dur.as_secs_f64() * 1000.0 / num_queries as f64;
+        let qps = num_queries as f64 / search_dur.as_secs_f64();
+        let recall = hits as f64 / total_targets.max(1) as f64;
+        let latency = summarize_f64(&stats.elapsed_ms);
+        logs.log_info(&format!(
+            "📈 [ef_search={}] qps={:.1} avg_ms={:.3} p50/p90/p99={:.3}/{:.3}/{:.3} recall@{}={:.3}",
+            ef_search,
+            qps,
+            avg_ms,
+            latency.p50,
+            latency.p90,
+            latency.p99,
+            top_k,
+            recall
+        ));
+        summary.push((ef_search, qps, avg_ms, recall));
+    }
+
+    logs.log_info("\nSummary (ef_search -> qps, ms/query, recall):");
+    for (ef, qps, ms, recall) in summary {
+        logs.log_info(&format!(
+            "  {} -> {:.1} qps, {:.3} ms/query, {:.3} recall",
+            ef, qps, ms, recall
+        ));
     }
 }

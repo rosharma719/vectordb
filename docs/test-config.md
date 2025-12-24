@@ -33,7 +33,7 @@ Snapshot defaults (shared):
 
 - NYTimes (unfiltered):
   - `VECTORDB_NYT_DATA_DIR` (default `data/nytimes-256-angular`)
-  - `VECTORDB_NYT_PERSIST_PATH` (default `data/nytimes-256-angular/index.bin`)
+  - `VECTORDB_NYT_PERSIST_PATH` (default `data/nytimes-256-angular/index_m16_m0_32_efc100.bin`)
   - `VECTORDB_NYT_USE_SNAPSHOT` (override `VECTORDB_USE_SNAPSHOT`)
   - `VECTORDB_NYT_ALLOW_BUILD` / `VECTORDB_NYT_SAVE_SNAPSHOT`
   - `VECTORDB_NYT_M` / `VECTORDB_NYT_M0`

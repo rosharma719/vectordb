@@ -69,6 +69,13 @@ Requires an `HF_TOKEN` with repo read access for `open-vdb/nytimes-256-angular` 
 cargo test --release nytimes_256_angular_perf_and_recall -- --ignored --nocapture
 ```
 
+### QPS/Latency curve (from snapshot)
+```
+VECTORDB_USE_SNAPSHOT=1 \
+VECTORDB_NYT_PERSIST_PATH=data/nytimes-256-angular/index_m16_m0_32_efc100.bin \
+cargo test --release nytimes_qps_latency_curve -- --ignored --nocapture
+```
+
 ### Build a snapshot (with insert trace logging)
 ```
 VECTORDB_NYT_PERSIST_PATH=data/nytimes-256-angular/index_m16_m0_32_efc100.bin \
@@ -129,26 +136,43 @@ Notes:
 - Auto-replay can be disabled with `VECTORDB_WAL_AUTO_REPLAY=0`.
 - Use `save_to_path_and_checkpoint` to save a snapshot and truncate the WAL after a successful write.
 
-### Recall/Latency Curve with ef_construct = 100 (M=16, M0=32, diversity_alpha=1)
-**Recall / Latency (ms/query):**
-- 32 -> 0.725, 0.300 ms/query
-- 64 -> 0.807, 0.472 ms/query
-- 128 -> 0.857, 0.848 ms/query
-- 256 -> 0.891, 1.552 ms/query
-- 512 -> 0.922, 3.432 ms/query
+### Deletion purge
+By default, deletions leave tombstones in place. To enable automatic purge/rebuild after a deletion threshold:
+`VECTORDB_PURGE_DELETIONS=1`.
+
+During a rebuild, queries return a `SearchError` ("Segment rebuild in progress. Retry later.").
+
+### Unfiltered Recall/Latency Curve with ef_construct = 100 (M=16, M0=32, diversity_alpha=1)
+**Dataset: NYT-256-Angular**
+**EF/ Queries per Second / Latency (ms/query) / recall**
+  32 -> 1894.6 qps, 0.528 ms/query, 0.816 recall
+  64 -> 1307.5 qps, 0.765 ms/query, 0.860 recall
+  128 -> 719.4 qps, 1.390 ms/query, 0.895 recall
+  256 -> 383.7 qps, 2.606 ms/query, 0.926 recall
+  512 -> 200.8 qps, 4.980 ms/query, 0.953 recall
+---
+
+### Filtered Recall/Latency Curve with ef_construct = 100 (M=16)
+**Dataset: H&M 2048D Cosine**
+**EF / Recall / Latency (ms/query)**
+  32 -> 0.566, 0.752 ms/query
+  64 -> 0.709, 0.773 ms/query
+  128 -> 0.859, 1.270 ms/query
+  256 -> 0.907, 1.994 ms/query
+  512 -> 0.939, 2.952 ms/query
 ---
 
 ## Performance Benchmarks  
 **(Euclidean, dim=1536, top_k=20, ef_construct=100, m=16, ef_search=64)**
 
 ### 20,000 vectors
-- Insert: **16.33 s** (~1.2k vec/s)  
-- Search: **0.644 ms/query**
+- Insert: **5.24 s** (~3.8k vec/s)  
+- Search: **0.198 ms/query**
 
 ### 100,000 vectors
-- Insert: **102.33 s** (~0.9k vec/s)  
-- Search: **0.919 ms/query**
+- Insert: **33.24 s** (~3.1k vec/s)  
+- Search: **0.310 ms/query**
 
 ### 1,000,000 vectors
-- Insert: **1312.07 s** (~0.76k vec/s)  
-- Search: **1.165 ms/query**
+- Insert: **475.81 s** (~2.1k vec/s)  
+- Search: **0.495 ms/query**
