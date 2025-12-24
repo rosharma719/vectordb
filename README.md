@@ -83,13 +83,39 @@ VECTORDB_NYT_SAVE_SNAPSHOT=1 \
 cargo test --release nytimes_build_and_persist_snapshot_only -- --ignored --nocapture
 ```
 
+### Snapshot notes
+- Snapshots are written atomically and include a checksum footer for corruption detection.
+- New snapshots load with `Segment::load_from_path`; older snapshots without a footer are still supported.
+- Background snapshotting is opt-in (see `start_background_snapshots` in `src/segment/background.rs`).
+- Inspect a snapshot with `cargo run --bin snapshot_info -- <path>` or `scripts/nyt_snapshot_info.sh <path>`.
+
+### Autosave (background snapshots)
+```
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use vectordb::segment::{Segment, SnapshotConfig, start_background_snapshots};
+use vectordb::vector::hnsw::HNSWIndex;
+use vectordb::utils::types::DistanceMetric;
+
+let segment = Arc::new(RwLock::new(Segment::new(
+    HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2),
+)));
+
+let mut cfg = SnapshotConfig::new("data/segment_autosave.bin");
+cfg.interval = Duration::from_secs(30);
+cfg.max_ops = 5_000;
+
+let snapshotter = start_background_snapshots(segment.clone(), cfg);
+// keep `snapshotter` alive; call snapshotter.stop() on shutdown
+```
+
 ### Recall/Latency Curve with ef_construct = 100 (M=16, M0=32, diversity_alpha=1)
 **Recall / Latency (ms/query):**
-  32 -> 0.725, 0.300 ms/query
-  64 -> 0.807, 0.472 ms/query
-  128 -> 0.857, 0.848 ms/query
-  256 -> 0.891, 1.552 ms/query
-  512 -> 0.922, 3.432 ms/query
+- 32 -> 0.725, 0.300 ms/query
+- 64 -> 0.807, 0.472 ms/query
+- 128 -> 0.857, 0.848 ms/query
+- 256 -> 0.891, 1.552 ms/query
+- 512 -> 0.922, 3.432 ms/query
 ---
 
 ## Performance Benchmarks  

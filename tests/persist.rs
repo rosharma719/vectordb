@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use std::path::PathBuf;
 
 use rand::Rng;
 
 use vectordb::payload_storage::filters::Filter;
-use vectordb::segment::Segment;
+use vectordb::segment::{start_background_snapshots, Segment, SnapshotConfig};
 use vectordb::utils::errors::DBError;
 use vectordb::utils::payload::{Payload, PayloadValue};
 use vectordb::utils::types::{DistanceMetric, Vector};
@@ -237,5 +239,217 @@ fn segment_snapshot_checksum_detects_corruption() -> Result<(), DBError> {
     let res = Segment::load_from_path(&path);
     let _ = fs::remove_file(path);
     assert!(res.is_err());
+    Ok(())
+}
+
+#[test]
+fn background_snapshot_writes_file() -> Result<(), DBError> {
+    let path = tmp_path("segment_background_snapshot");
+    let segment = Arc::new(RwLock::new(Segment::new(HNSWIndex::new(
+        DistanceMetric::Euclidean,
+        16,
+        32,
+        8,
+        2,
+    ))));
+
+    let mut config = SnapshotConfig::new(&path);
+    config.interval = Duration::from_millis(50);
+    config.max_ops = 1;
+    config.check_every = Duration::from_millis(10);
+
+    let handle = start_background_snapshots(segment.clone(), config);
+
+    {
+        let mut guard = segment.write().unwrap();
+        guard.insert_with_id(1, vecf(&[1.0, 0.0]), None)?;
+    }
+
+    let start = Instant::now();
+    while !path.exists() && start.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    handle.stop();
+
+    assert!(path.exists(), "snapshot file was not created");
+    let restored = Segment::load_from_path(&path)?;
+    assert_eq!(restored.hnsw().len(), 1);
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn background_snapshot_handles_concurrent_writes() -> Result<(), DBError> {
+    let path = tmp_path("segment_background_concurrent");
+    let segment = Arc::new(RwLock::new(Segment::new(HNSWIndex::new(
+        DistanceMetric::Euclidean,
+        16,
+        32,
+        8,
+        2,
+    ))));
+
+    let mut config = SnapshotConfig::new(&path);
+    config.interval = Duration::from_millis(100);
+    config.max_ops = 25;
+    config.check_every = Duration::from_millis(10);
+    let handle = start_background_snapshots(segment.clone(), config);
+
+    let writer = {
+        let segment = segment.clone();
+        std::thread::spawn(move || {
+            for i in 0..200u64 {
+                let mut guard = segment.write().unwrap();
+                let _ = guard.insert_with_id(i, vecf(&[i as f32, 0.0]), None);
+            }
+        })
+    };
+
+    writer.join().expect("writer thread panicked");
+    let start = Instant::now();
+    while !path.exists() && start.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    handle.stop();
+    assert!(path.exists(), "snapshot file was not created");
+
+    let restored = Segment::load_from_path(&path)?;
+    let final_len = segment.read().unwrap().hnsw().len();
+    assert!(restored.hnsw().len() > 0);
+    assert!(restored.hnsw().len() <= final_len);
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn background_snapshot_updates_over_time() -> Result<(), DBError> {
+    let path = tmp_path("segment_background_updates");
+    let segment = Arc::new(RwLock::new(Segment::new(HNSWIndex::new(
+        DistanceMetric::Euclidean,
+        16,
+        32,
+        8,
+        2,
+    ))));
+
+    let mut config = SnapshotConfig::new(&path);
+    config.interval = Duration::from_millis(200);
+    config.max_ops = 5;
+    config.check_every = Duration::from_millis(10);
+    let handle = start_background_snapshots(segment.clone(), config);
+
+    {
+        let mut guard = segment.write().unwrap();
+        for i in 0..10u64 {
+            guard.insert_with_id(i, vecf(&[i as f32, 0.0]), None)?;
+        }
+    }
+
+    let start = Instant::now();
+    while !path.exists() && start.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(path.exists(), "snapshot file was not created");
+    let first_size = fs::metadata(&path)?.len();
+
+    {
+        let mut guard = segment.write().unwrap();
+        for i in 10..40u64 {
+            guard.insert_with_id(i, vecf(&[i as f32, 0.0]), None)?;
+        }
+    }
+
+    let start = Instant::now();
+    let mut grew = false;
+    while start.elapsed() < Duration::from_secs(3) {
+        let size = fs::metadata(&path)?.len();
+        if size > first_size {
+            grew = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    handle.stop();
+    assert!(grew, "snapshot file size did not grow after more inserts");
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn background_snapshot_stop_is_clean() -> Result<(), DBError> {
+    let path = tmp_path("segment_background_stop");
+    let segment = Arc::new(RwLock::new(Segment::new(HNSWIndex::new(
+        DistanceMetric::Euclidean,
+        16,
+        32,
+        8,
+        2,
+    ))));
+
+    let mut config = SnapshotConfig::new(&path);
+    config.interval = Duration::from_millis(50);
+    config.max_ops = 1;
+    config.check_every = Duration::from_millis(10);
+    let handle = start_background_snapshots(segment.clone(), config);
+
+    {
+        let mut guard = segment.write().unwrap();
+        guard.insert_with_id(1, vecf(&[1.0, 0.0]), None)?;
+    }
+
+    let start = Instant::now();
+    while !path.exists() && start.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    handle.stop();
+    assert!(path.exists(), "snapshot file was not created");
+    Segment::load_from_path(&path)?;
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn background_snapshot_respects_deletes() -> Result<(), DBError> {
+    let path = tmp_path("segment_background_deletes");
+    let segment = Arc::new(RwLock::new(Segment::new(HNSWIndex::new(
+        DistanceMetric::Euclidean,
+        16,
+        32,
+        8,
+        2,
+    ))));
+
+    let mut config = SnapshotConfig::new(&path);
+    config.interval = Duration::from_millis(100);
+    config.max_ops = 1;
+    config.check_every = Duration::from_millis(10);
+    let handle = start_background_snapshots(segment.clone(), config);
+
+    {
+        let mut guard = segment.write().unwrap();
+        for i in 0..10u64 {
+            guard.insert_with_id(i, vecf(&[i as f32, 0.0]), None)?;
+        }
+        guard.delete(2)?;
+        guard.delete(7)?;
+    }
+
+    let start = Instant::now();
+    while !path.exists() && start.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    handle.stop();
+    let restored = Segment::load_from_path(&path)?;
+    assert!(restored.get_vector(2).is_none());
+    assert!(restored.get_vector(7).is_none());
+    assert!(restored.get_vector(1).is_some());
+
+    let _ = fs::remove_file(path);
     Ok(())
 }

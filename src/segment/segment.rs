@@ -25,10 +25,11 @@ pub struct Segment {
     // This set is maintained in parallel with the HNSW deletion set.
     deleted: HashSet<PointId>,
     next_id: PointId,
+    op_count: u64,
 }
 
 #[derive(Serialize, Deserialize)]
-struct SegmentSnapshot {
+pub(crate) struct SegmentSnapshot {
     hnsw: HnswSnapshot,
     payload_index: PayloadIndex,
     payloads: HashMap<PointId, Payload>,
@@ -125,6 +126,7 @@ impl Segment {
             payloads: HashMap::new(),
             deleted: HashSet::new(),
             next_id: 1,
+            op_count: 0,
         }
     }
 
@@ -226,6 +228,7 @@ impl Segment {
             });
         }
 
+        self.op_count = self.op_count.saturating_add(1);
         Ok(point_id)
     }
 
@@ -250,6 +253,7 @@ impl Segment {
     
         self.deleted.insert(point_id);
         self.hnsw.mark_deleted(point_id);
+        self.op_count = self.op_count.saturating_add(1);
     
         let deleted_count = self.deleted.len();
         let total_count = self.hnsw.len();
@@ -446,20 +450,8 @@ impl Segment {
 
     /// Persist the entire segment (graph, vectors, payloads, and inverted index) to disk.
     pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), DBError> {
-        let snapshot = SegmentSnapshot {
-            hnsw: self.hnsw.to_snapshot(),
-            payload_index: self.payload_index.clone(),
-            payloads: self.payloads.clone(),
-            deleted: self.deleted.clone(),
-            next_id: self.next_id,
-        };
-        write_atomic_with_checksum(path, SEGMENT_SNAPSHOT_FOOTER, |writer| {
-            writer.write_all(&SEGMENT_SNAPSHOT_MAGIC)?;
-            writer.write_all(&SEGMENT_SNAPSHOT_VERSION.to_le_bytes())?;
-            bincode::serialize_into(writer, &snapshot)
-                .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
-            Ok(())
-        })
+        let snapshot = self.build_snapshot();
+        Self::persist_snapshot(&snapshot, path)
     }
 
     /// Restore a segment that was previously persisted with `save_to_path`.
@@ -513,7 +505,35 @@ impl Segment {
             payloads: snapshot.payloads,
             deleted: snapshot.deleted,
             next_id: snapshot.next_id,
+            op_count: 0,
         })
+    }
+
+    pub(crate) fn build_snapshot(&self) -> SegmentSnapshot {
+        SegmentSnapshot {
+            hnsw: self.hnsw.to_snapshot(),
+            payload_index: self.payload_index.clone(),
+            payloads: self.payloads.clone(),
+            deleted: self.deleted.clone(),
+            next_id: self.next_id,
+        }
+    }
+
+    pub(crate) fn persist_snapshot<P: AsRef<Path>>(
+        snapshot: &SegmentSnapshot,
+        path: P,
+    ) -> Result<(), DBError> {
+        write_atomic_with_checksum(path, SEGMENT_SNAPSHOT_FOOTER, |writer| {
+            writer.write_all(&SEGMENT_SNAPSHOT_MAGIC)?;
+            writer.write_all(&SEGMENT_SNAPSHOT_VERSION.to_le_bytes())?;
+            bincode::serialize_into(writer, snapshot)
+                .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn op_count(&self) -> u64 {
+        self.op_count
     }
 
     /// Build the list of payload keys to use for filter-aware edges, honoring an optional allowlist,

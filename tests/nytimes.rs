@@ -69,10 +69,16 @@ fn build_nytimes_segment(segment: &mut Segment, base: &[Vector], logs: &TestLogC
 
 fn persist_segment(segment: &Segment, path: &str, logs: &TestLogConfig) {
     logs.log_info(&format!("💾 Persisting NYTimes segment to {} ...", path));
+    let start = Instant::now();
     segment
         .save_to_path(path)
         .expect("failed to persist NYTimes segment");
-    logs.log_info(&format!("✅ Saved NYTimes segment to {}", path));
+    let elapsed = start.elapsed();
+    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    logs.log_info(&format!(
+        "✅ Saved NYTimes segment to {} (size={} bytes, elapsed={:?})",
+        path, size, elapsed
+    ));
 }
 
 fn ensure_exists(path: &Path) {
