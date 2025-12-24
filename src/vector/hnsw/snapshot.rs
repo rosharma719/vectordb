@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
 use crate::utils::errors::DBError;
+use crate::utils::io::{adler32, write_atomic_with_checksum};
 use crate::utils::types::{DistanceMetric, PointId, Vector};
 
 use super::config::{exact_fallback_enabled_override, exact_fallback_threshold_override};
@@ -14,6 +14,7 @@ use super::{HNSWIndex, HnswSnapshot};
 
 const HNSW_SNAPSHOT_MAGIC: [u8; 4] = *b"VDBH";
 const HNSW_SNAPSHOT_VERSION: u32 = 2;
+const HNSW_SNAPSHOT_FOOTER: [u8; 4] = *b"VDBF";
 
 #[derive(Serialize, Deserialize)]
 struct HnswSnapshotV1 {
@@ -183,22 +184,44 @@ impl HNSWIndex {
     }
 
     pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), DBError> {
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        writer.write_all(&HNSW_SNAPSHOT_MAGIC)?;
-        writer.write_all(&HNSW_SNAPSHOT_VERSION.to_le_bytes())?;
-        bincode::serialize_into(&mut writer, &self.to_snapshot())
-            .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
-        Ok(())
+        write_atomic_with_checksum(path, HNSW_SNAPSHOT_FOOTER, |writer| {
+            writer.write_all(&HNSW_SNAPSHOT_MAGIC)?;
+            writer.write_all(&HNSW_SNAPSHOT_VERSION.to_le_bytes())?;
+            bincode::serialize_into(writer, &self.to_snapshot())
+                .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+            Ok(())
+        })
     }
 
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
         let bytes = std::fs::read(path)?;
-        if bytes.len() >= 8 && bytes[..4] == HNSW_SNAPSHOT_MAGIC {
-            let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let (payload, checksum) = if bytes.len() >= 8 && bytes[bytes.len() - 8..bytes.len() - 4] == HNSW_SNAPSHOT_FOOTER
+        {
+            let checksum = u32::from_le_bytes([
+                bytes[bytes.len() - 4],
+                bytes[bytes.len() - 3],
+                bytes[bytes.len() - 2],
+                bytes[bytes.len() - 1],
+            ]);
+            (&bytes[..bytes.len() - 8], Some(checksum))
+        } else {
+            (bytes.as_slice(), None)
+        };
+
+        if let Some(expected) = checksum {
+            let actual = adler32(payload);
+            if actual != expected {
+                return Err(DBError::SerializationError(anyhow!(
+                    "HNSW snapshot checksum mismatch"
+                )));
+            }
+        }
+
+        if payload.len() >= 8 && payload[..4] == HNSW_SNAPSHOT_MAGIC {
+            let version = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
             return match version {
                 2 => {
-                    let snapshot: HnswSnapshot = bincode::deserialize(&bytes[8..])
+                    let snapshot: HnswSnapshot = bincode::deserialize(&payload[8..])
                         .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
                     Ok(Self::from_snapshot(snapshot))
                 }
@@ -209,11 +232,11 @@ impl HNSWIndex {
             };
         }
 
-        if let Ok(snapshot) = bincode::deserialize::<HnswSnapshot>(&bytes) {
+        if let Ok(snapshot) = bincode::deserialize::<HnswSnapshot>(payload) {
             return Ok(Self::from_snapshot(snapshot));
         }
 
-        let snapshot_v1: HnswSnapshotV1 = bincode::deserialize(&bytes)
+        let snapshot_v1: HnswSnapshotV1 = bincode::deserialize(payload)
             .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
         Ok(Self::from_snapshot(snapshot_v1.into()))
     }

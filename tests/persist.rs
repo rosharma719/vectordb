@@ -195,3 +195,47 @@ fn segment_persist_append_and_reload() -> Result<(), DBError> {
     let _ = fs::remove_file(path2);
     Ok(())
 }
+
+#[test]
+fn hnsw_snapshot_checksum_detects_corruption() -> Result<(), DBError> {
+    let mut hnsw = HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 3);
+    for i in 0..10u64 {
+        hnsw.insert(i, vecf(&[i as f32, (i * 2) as f32, 1.0]))?;
+    }
+
+    let path = tmp_path("hnsw_snapshot_corrupt");
+    hnsw.save_to_path(&path)?;
+
+    let mut bytes = fs::read(&path)?;
+    assert!(!bytes.is_empty());
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    fs::write(&path, bytes)?;
+
+    let res = HNSWIndex::load_from_path(&path);
+    let _ = fs::remove_file(path);
+    assert!(res.is_err());
+    Ok(())
+}
+
+#[test]
+fn segment_snapshot_checksum_detects_corruption() -> Result<(), DBError> {
+    let mut seg = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2));
+    for i in 0..10u64 {
+        seg.insert_with_id(i, vecf(&[i as f32, 0.0]), None)?;
+    }
+
+    let path = tmp_path("segment_snapshot_corrupt");
+    seg.save_to_path(&path)?;
+
+    let mut bytes = fs::read(&path)?;
+    assert!(!bytes.is_empty());
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    fs::write(&path, bytes)?;
+
+    let res = Segment::load_from_path(&path);
+    let _ = fs::remove_file(path);
+    assert!(res.is_err());
+    Ok(())
+}

@@ -1,8 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::Path;
 use std::thread_local;
 use std::time::{Duration, Instant};
@@ -13,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::payload_storage::filters::Filter;
 use crate::payload_storage::stores::PayloadIndex;
 use crate::utils::errors::DBError;
+use crate::utils::io::{adler32, write_atomic_with_checksum};
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::{PointId, Vector};
 use crate::vector::hnsw::{HNSWIndex, HnswSnapshot, ScoredPoint, SearchStats};
@@ -38,6 +38,7 @@ struct SegmentSnapshot {
 
 const SEGMENT_SNAPSHOT_MAGIC: [u8; 4] = *b"VDBS";
 const SEGMENT_SNAPSHOT_VERSION: u32 = 2;
+const SEGMENT_SNAPSHOT_FOOTER: [u8; 4] = *b"VDBF";
 
 #[derive(Serialize, Deserialize)]
 struct HnswSnapshotV1 {
@@ -452,22 +453,45 @@ impl Segment {
             deleted: self.deleted.clone(),
             next_id: self.next_id,
         };
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        writer.write_all(&SEGMENT_SNAPSHOT_MAGIC)?;
-        writer.write_all(&SEGMENT_SNAPSHOT_VERSION.to_le_bytes())?;
-        bincode::serialize_into(&mut writer, &snapshot)
-            .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
-        Ok(())
+        write_atomic_with_checksum(path, SEGMENT_SNAPSHOT_FOOTER, |writer| {
+            writer.write_all(&SEGMENT_SNAPSHOT_MAGIC)?;
+            writer.write_all(&SEGMENT_SNAPSHOT_VERSION.to_le_bytes())?;
+            bincode::serialize_into(writer, &snapshot)
+                .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+            Ok(())
+        })
     }
 
     /// Restore a segment that was previously persisted with `save_to_path`.
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
         let bytes = std::fs::read(path)?;
-        let snapshot: SegmentSnapshot = if bytes.len() >= 8 && bytes[..4] == SEGMENT_SNAPSHOT_MAGIC {
-            let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let (payload, checksum) = if bytes.len() >= 8
+            && bytes[bytes.len() - 8..bytes.len() - 4] == SEGMENT_SNAPSHOT_FOOTER
+        {
+            let checksum = u32::from_le_bytes([
+                bytes[bytes.len() - 4],
+                bytes[bytes.len() - 3],
+                bytes[bytes.len() - 2],
+                bytes[bytes.len() - 1],
+            ]);
+            (&bytes[..bytes.len() - 8], Some(checksum))
+        } else {
+            (bytes.as_slice(), None)
+        };
+
+        if let Some(expected) = checksum {
+            let actual = adler32(payload);
+            if actual != expected {
+                return Err(DBError::SerializationError(anyhow!(
+                    "segment snapshot checksum mismatch"
+                )));
+            }
+        }
+
+        let snapshot: SegmentSnapshot = if payload.len() >= 8 && payload[..4] == SEGMENT_SNAPSHOT_MAGIC {
+            let version = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
             match version {
-                2 => bincode::deserialize(&bytes[8..])
+                2 => bincode::deserialize(&payload[8..])
                     .map_err(|e| DBError::SerializationError(anyhow!(e)))?,
                 _ => {
                     return Err(DBError::SerializationError(anyhow!(
@@ -476,10 +500,10 @@ impl Segment {
                     )))
                 }
             }
-        } else if let Ok(snapshot) = bincode::deserialize::<SegmentSnapshot>(&bytes) {
+        } else if let Ok(snapshot) = bincode::deserialize::<SegmentSnapshot>(payload) {
             snapshot
         } else {
-            let legacy: SegmentSnapshotV1 = bincode::deserialize(&bytes)
+            let legacy: SegmentSnapshotV1 = bincode::deserialize(payload)
                 .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
             legacy.into()
         };
