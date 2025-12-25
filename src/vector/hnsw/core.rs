@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 

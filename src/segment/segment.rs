@@ -882,10 +882,7 @@ impl Segment {
             payload[version_start + 3],
         ]);
         if version != SEGMENT_SNAPSHOT_META_VERSION {
-            return Err(DBError::SerializationError(anyhow!(
-                "unsupported snapshot metadata version {}",
-                version
-            )));
+            return Ok((payload, None));
         }
         let meta_len = u32::from_le_bytes([
             payload[len_start],
@@ -894,17 +891,15 @@ impl Segment {
             payload[len_start + 3],
         ]) as usize;
         if payload.len() < 12 + meta_len {
-            return Err(DBError::SerializationError(anyhow!(
-                "snapshot metadata length {} exceeds payload size {}",
-                meta_len,
-                payload.len()
-            )));
+            return Ok((payload, None));
         }
         let meta_start = payload.len() - 12 - meta_len;
         let meta_bytes = &payload[meta_start..meta_start + meta_len];
         let snapshot_bytes = &payload[..meta_start];
-        let metadata = bincode::deserialize(meta_bytes)
-            .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+        let metadata = match bincode::deserialize(meta_bytes) {
+            Ok(meta) => meta,
+            Err(_) => return Ok((payload, None)),
+        };
         Ok((snapshot_bytes, Some(metadata)))
     }
 

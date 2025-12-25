@@ -4,13 +4,6 @@
 
 VectorDB is a lightweight, high-performance in-memory vector search engine implementing HNSW for approximate nearest neighbor search with payload-aware filtering.
 
-## Logging Levels
-- `error` / `warn`: unexpected conditions (e.g., length mismatch, invalid payload)
-- `info`: lifecycle and maintenance events (purge triggers)
-- `debug`: per-operation details (inserts, entry point changes, filter misses)
-- `trace`: reserved for hot-loop diagnostics (currently off by default)
-Logging uses `log` targets (e.g., `vector::hnsw`, `segment`, `payload`, `filter`). Control verbosity with your logger backend/env (e.g., `RUST_LOG=vector::hnsw=debug`).
-
 ## Features
 
 ### Current Capabilities
@@ -35,18 +28,6 @@ Logging uses `log` targets (e.g., `vector::hnsw`, `segment`, `payload`, `filter`
 
 ---
 
-## H&M (2048-D Cosine) Filtered Recall
-
-- Download the dataset (`vectors.npy`, `payloads.jsonl`, `tests.jsonl`) — see `docs/data-download.md` for CLI commands.
-- Place the files under `data/hnm` (or override with `VECTORDB_HNM_DATA_DIR`).
-- Run the harness:
-  ```
-  cargo test --release hnm_filtered_cosine_recall -- --ignored --nocapture
-  ```
-- Knobs: `VECTORDB_HNM_TOPK` (defaults to truth length), `VECTORDB_HNM_EF_SEARCH_LIST` (comma list, default `64,128,256`), `VECTORDB_HNM_QUERIES` (default `200`), `VECTORDB_HNM_BASE_LIMIT` (cap inserts), `VECTORDB_HNM_EF_CONSTRUCT` (default `200`).
-
----
-
 ### Filtering & Payloads
 - Schema: schema-agnostic; payloads are per-point key/value maps. Missing fields simply evaluate to false for match/compare checks.
 - Types: ints, floats, strings, bools, and homogeneous lists of those.
@@ -58,6 +39,7 @@ Logging uses `log` targets (e.g., `vector::hnsw`, `segment`, `payload`, `filter`
 - Indexing: simple inverted index on indexable scalar types (int/float/str/bool) for fast equality matching; lists are not indexed.
 - Filter-aware search: `search_with_filter` uses in-graph filter-aware entry selection and in-place filtering during HNSW search (see `HNSWIndex::in_place_filtered_search`).
 
+---
 
 ## NYTimes (256-D Angular) Results
 
@@ -75,6 +57,19 @@ VECTORDB_USE_SNAPSHOT=1 \
 VECTORDB_NYT_PERSIST_PATH=data/nytimes-256-angular/index_m16_m0_32_efc100.bin \
 cargo test --release nytimes_qps_latency_curve -- --ignored --nocapture
 ```
+
+---
+
+## H&M (2048-D Cosine) Filtered Recall
+
+- Download the dataset (`vectors.npy`, `payloads.jsonl`, `tests.jsonl`) — see `docs/data-download.md` for CLI commands.
+- Place the files under `data/hnm` (or override with `VECTORDB_HNM_DATA_DIR`).
+- Run the harness:
+  ```
+  cargo test --release hnm_filtered_cosine_recall -- --ignored --nocapture
+  ```
+- Knobs: `VECTORDB_HNM_TOPK` (defaults to truth length), `VECTORDB_HNM_EF_SEARCH_LIST` (comma list, default `64,128,256`), `VECTORDB_HNM_QUERIES` (default `200`), `VECTORDB_HNM_BASE_LIMIT` (cap inserts), `VECTORDB_HNM_EF_CONSTRUCT` (default `200`).
+
 
 ### Build a snapshot (with insert trace logging)
 ```
@@ -148,21 +143,21 @@ During a rebuild, queries return a `SearchError` ("Segment rebuild in progress. 
 ### Unfiltered Recall/Latency Curve with ef_construct = 100 (M=16, M0=32, diversity_alpha=1)
 **Dataset: NYT-256-Angular**
 **EF/ Queries per Second / Latency (ms/query) / recall**
-  32 -> 1894.6 qps, 0.528 ms/query, 0.816 recall
-  64 -> 1307.5 qps, 0.765 ms/query, 0.860 recall
-  128 -> 719.4 qps, 1.390 ms/query, 0.895 recall
-  256 -> 383.7 qps, 2.606 ms/query, 0.926 recall
-  512 -> 200.8 qps, 4.980 ms/query, 0.953 recall
+- 32 -> 1894.6 qps, 0.528 ms/query, 0.816 recall
+- 64 -> 1307.5 qps, 0.765 ms/query, 0.860 recall
+- 128 -> 719.4 qps, 1.390 ms/query, 0.895 recall
+- 256 -> 383.7 qps, 2.606 ms/query, 0.926 recall
+- 512 -> 200.8 qps, 4.980 ms/query, 0.953 recall
 ---
 
 ### Filtered Recall/Latency Curve with ef_construct = 100 (M=16)
 **Dataset: H&M 2048D Cosine**
 **EF / Recall / Latency (ms/query)**
-  32 -> 0.566, 0.752 ms/query
-  64 -> 0.709, 0.773 ms/query
-  128 -> 0.859, 1.270 ms/query
-  256 -> 0.907, 1.994 ms/query
-  512 -> 0.939, 2.952 ms/query
+- 32 -> 1329.8 qps, 0.752 ms/query, 0.566 recall
+- 64 -> 1293.8 qps, 0.773 ms/query, 0.709 recall
+- 128 -> 787.4 qps, 1.270 ms/query, 0.859 recall
+- 256 -> 501.5 qps, 1.994 ms/query, 0.907 recall
+- 512 -> 338.8 qps, 2.952 ms/query, 0.939 recall
 ---
 
 ## Performance Benchmarks  
@@ -179,3 +174,10 @@ During a rebuild, queries return a `SearchError` ("Segment rebuild in progress. 
 ### 1,000,000 vectors
 - Insert: **475.81 s** (~2.1k vec/s)  
 - Search: **0.495 ms/query**
+
+## Logging Levels
+- `error` / `warn`: unexpected conditions (e.g., length mismatch, invalid payload)
+- `info`: lifecycle and maintenance events (purge triggers)
+- `debug`: per-operation details (inserts, entry point changes, filter misses)
+- `trace`: reserved for hot-loop diagnostics (currently off by default)
+Logging uses `log` targets (e.g., `vector::hnsw`, `segment`, `payload`, `filter`). Control verbosity with your logger backend/env (e.g., `RUST_LOG=vector::hnsw=debug`).

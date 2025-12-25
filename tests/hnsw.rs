@@ -367,4 +367,3 @@ fn test_high_dimensional_accuracy() {
 
     assert_eq!(results[0].id, 1, "Expected ID 1 to be closest to query");
 }
-
