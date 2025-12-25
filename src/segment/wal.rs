@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,8 @@ const WAL_VERSION: u32 = 1;
 pub struct WalConfig {
     pub path: PathBuf,
     pub fsync: bool,
+    pub fsync_every: usize,
+    pub fsync_interval: Duration,
 }
 
 impl WalConfig {
@@ -24,7 +27,27 @@ impl WalConfig {
         Self {
             path: path.into(),
             fsync: true,
+            fsync_every: 1,
+            fsync_interval: Duration::from_millis(0),
         }
+    }
+
+    pub fn from_env<P: Into<PathBuf>>(path: P) -> Self {
+        let mut cfg = Self::new(path);
+        if let Ok(v) = std::env::var("VECTORDB_WAL_FSYNC") {
+            cfg.fsync = v != "0" && !v.eq_ignore_ascii_case("false");
+        }
+        if let Ok(v) = std::env::var("VECTORDB_WAL_FSYNC_EVERY") {
+            if let Ok(n) = v.replace('_', "").parse::<usize>() {
+                cfg.fsync_every = n.max(1);
+            }
+        }
+        if let Ok(v) = std::env::var("VECTORDB_WAL_FSYNC_MS") {
+            if let Ok(ms) = v.replace('_', "").parse::<u64>() {
+                cfg.fsync_interval = Duration::from_millis(ms);
+            }
+        }
+        cfg
     }
 }
 
@@ -48,6 +71,10 @@ pub struct WalWriter {
     path: PathBuf,
     file: File,
     fsync: bool,
+    fsync_every: usize,
+    fsync_interval: Duration,
+    ops_since_sync: usize,
+    last_sync: Instant,
 }
 
 impl WalWriter {
@@ -61,6 +88,10 @@ impl WalWriter {
             path: config.path,
             file,
             fsync: config.fsync,
+            fsync_every: config.fsync_every,
+            fsync_interval: config.fsync_interval,
+            ops_since_sync: 0,
+            last_sync: Instant::now(),
         };
         writer.ensure_header()?;
         Ok(writer)
@@ -74,15 +105,22 @@ impl WalWriter {
         self.file.write_all(&payload)?;
         self.file.write_all(&checksum.to_le_bytes())?;
         self.file.flush()?;
-        if self.fsync {
+        self.ops_since_sync = self.ops_since_sync.saturating_add(1);
+        if self.should_fsync() {
             self.file.sync_data()?;
+            self.ops_since_sync = 0;
+            self.last_sync = Instant::now();
         }
         Ok(())
     }
 
     pub fn truncate(&mut self) -> Result<(), DBError> {
         self.file.set_len(0)?;
-        self.file.sync_data()?;
+        if self.fsync {
+            self.file.sync_data()?;
+            self.last_sync = Instant::now();
+            self.ops_since_sync = 0;
+        }
         self.ensure_header()?;
         Ok(())
     }
@@ -99,9 +137,24 @@ impl WalWriter {
             self.file.flush()?;
             if self.fsync {
                 self.file.sync_data()?;
+                self.last_sync = Instant::now();
+                self.ops_since_sync = 0;
             }
         }
         Ok(())
+    }
+
+    fn should_fsync(&self) -> bool {
+        if !self.fsync {
+            return false;
+        }
+        if self.fsync_every <= 1 && self.fsync_interval.is_zero() {
+            return true;
+        }
+        let op_ready = self.fsync_every > 0 && self.ops_since_sync >= self.fsync_every;
+        let time_ready = !self.fsync_interval.is_zero()
+            && self.last_sync.elapsed() >= self.fsync_interval;
+        op_ready || time_ready
     }
 }
 

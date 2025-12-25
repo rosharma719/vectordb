@@ -31,6 +31,14 @@ Snapshot defaults (shared):
   - `VECTORDB_FILTER_SEARCH_LOG` -> JSONL with per-query expansions/visited/filter hit rates/seeds/stop_reason.
   - Parse filter logs with `python scripts/parse_filter_search_log.py <log.jsonl>`.
 
+- WAL:
+  - `VECTORDB_WAL_PATH` (auto-enable WAL for new segments when set)
+  - `VECTORDB_WAL_DIR` (auto-enable WAL; uses `<dir>/segment.wal`)
+  - `VECTORDB_WAL_AUTO_REPLAY` (default `1`)
+  - `VECTORDB_WAL_FSYNC` (default `1`)
+  - `VECTORDB_WAL_FSYNC_EVERY` (default `1`)
+  - `VECTORDB_WAL_FSYNC_MS` (default `0`)
+
 - NYTimes (unfiltered):
   - `VECTORDB_NYT_DATA_DIR` (default `data/nytimes-256-angular`)
   - `VECTORDB_NYT_PERSIST_PATH` (default `data/nytimes-256-angular/index_m16_m0_32_efc100.bin`)

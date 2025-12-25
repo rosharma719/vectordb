@@ -135,6 +135,8 @@ let restored = Segment::load_from_path("data/segment_snapshot.bin")?;
 Notes:
 - Auto-replay can be disabled with `VECTORDB_WAL_AUTO_REPLAY=0`.
 - Use `save_to_path_and_checkpoint` to save a snapshot and truncate the WAL after a successful write.
+- You can auto-enable WAL by setting `VECTORDB_WAL_PATH` or `VECTORDB_WAL_DIR` (uses `<dir>/segment.wal`).
+- Fsync tuning: `VECTORDB_WAL_FSYNC` (0/1), `VECTORDB_WAL_FSYNC_EVERY` (N ops), `VECTORDB_WAL_FSYNC_MS` (time-based).
 
 ### Deletion purge
 By default, deletions leave tombstones in place. To enable automatic purge/rebuild after a deletion threshold:

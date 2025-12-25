@@ -57,7 +57,7 @@ pub struct HNSWIndex {
     pub(crate) exact_fallback_threshold: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct HnswConfigSummary {
     pub metric: DistanceMetric,
     pub m: usize,

@@ -47,6 +47,37 @@ pub fn env_bool_first(keys: &[&str]) -> Option<bool> {
     })
 }
 
+#[cfg(unix)]
+pub fn peak_rss_bytes() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let res = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if res != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+    let raw = usage.ru_maxrss as u64;
+    #[cfg(target_os = "macos")]
+    {
+        Some(raw)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(raw.saturating_mul(1024))
+    }
+}
+
+#[cfg(not(unix))]
+pub fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
+pub fn log_peak_rss(label: &str) {
+    if let Some(bytes) = peak_rss_bytes() {
+        let mb = bytes as f64 / (1024.0 * 1024.0);
+        println!("🧠 peak_rss {} = {:.2} MiB", label, mb);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TestLogLevel {
     Quiet,

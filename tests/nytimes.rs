@@ -17,6 +17,7 @@ use common::{
     SnapshotConfig,
     TestLogConfig,
     env_usize_first,
+    log_peak_rss,
     summarize_f64,
     summarize_usize,
     MissStats,
@@ -242,8 +243,19 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
                 );
             }
         } else {
-            logs.log_info(&format!("💾 Loading persisted NYTimes segment from {} ...", snapshot.persist_path));
-            Segment::load_from_path(&snapshot.persist_path).expect("failed to load persisted NYTimes segment")
+            logs.log_info(&format!(
+                "💾 Loading persisted NYTimes segment from {} ...",
+                snapshot.persist_path
+            ));
+            let (segment, metadata) = Segment::load_from_path_with_metadata(&snapshot.persist_path)
+                .expect("failed to load persisted NYTimes segment");
+            if let Some(meta) = metadata {
+                logs.log_info(&format!(
+                    "🧾 Snapshot metadata: created_at_ms={} points={} payloads={}",
+                    meta.created_at_ms, meta.points, meta.payloads
+                ));
+            }
+            segment
         }
     } else {
         let dim = base.first().map(|v| v.len()).unwrap_or(0);
@@ -415,6 +427,8 @@ fn run_nytimes_recall_only() {
     let ground_truth = load_ground_truth(&truth_path);
     assert_eq!(ground_truth.len(), queries.len(), "ground truth length must match queries");
     logs.log_info(&format!("⏱️  Queries and truth loaded in {:?}", t0.elapsed()));
+    log_peak_rss("nytimes_qps_loaded_queries");
+    log_peak_rss("nytimes_loaded_queries");
 
     if !snapshot.use_snapshot {
         panic!("nytimes_recall_from_snapshot requires VECTORDB_USE_SNAPSHOT=1");
@@ -429,7 +443,7 @@ fn run_nytimes_recall_only() {
         "💾 Loading persisted NYTimes segment from {} ...",
         snapshot.persist_path
     ));
-    let mut segment = Segment::load_from_path(&snapshot.persist_path)
+    let (mut segment, metadata) = Segment::load_from_path_with_metadata(&snapshot.persist_path)
         .expect("failed to load persisted NYTimes segment");
     let cfg = segment.hnsw().config_summary();
     logs.log_info(&format!(
@@ -437,6 +451,8 @@ fn run_nytimes_recall_only() {
         segment.hnsw().len(),
         segment.payloads().len()
     ));
+    log_peak_rss("nytimes_qps_loaded_snapshot");
+    log_peak_rss("nytimes_loaded_snapshot");
     logs.log_info(&format!(
         "🧭 HNSW config: metric={:?} dim={} m={} m0={} ef={} ef_construct={} level_cap={} level_scale={:.3} max_level={} exact_fallback={} threshold={}",
         cfg.metric,
@@ -451,6 +467,12 @@ fn run_nytimes_recall_only() {
         cfg.exact_fallback_enabled,
         cfg.exact_fallback_threshold
     ));
+    if let Some(meta) = metadata {
+        logs.log_info(&format!(
+            "🧾 Snapshot metadata: created_at_ms={} points={} payloads={}",
+            meta.created_at_ms, meta.points, meta.payloads
+        ));
+    }
 
     let num_queries = queries.len().min(search.queries_cap);
     let mut query_logger = QueryLogWriter::new(logs.query_log_path.clone(), logs.query_log_every);
@@ -458,6 +480,8 @@ fn run_nytimes_recall_only() {
         "🔍 Sweeping ef_search over {:?} for {} queries (top_k={})...",
         search.ef_values, num_queries, top_k
     ));
+    log_peak_rss("nytimes_qps_before_sweep");
+    log_peak_rss("nytimes_before_sweep");
 
     let mut summary: Vec<(usize, f64, f64)> = Vec::new();
     for &ef in &search.ef_values {
@@ -573,6 +597,7 @@ fn run_nytimes_recall_only() {
     for (ef, recall, ms) in summary {
         logs.log_info(&format!("  {} -> {:.3}, {:.3} ms/query", ef, recall, ms));
     }
+    log_peak_rss("nytimes_recall_complete");
 }
 
 fn run_nytimes_qps_latency_curve() {
@@ -611,7 +636,7 @@ fn run_nytimes_qps_latency_curve() {
         "💾 Loading persisted NYTimes segment from {} ...",
         snapshot.persist_path
     ));
-    let mut segment = Segment::load_from_path(&snapshot.persist_path)
+    let (mut segment, metadata) = Segment::load_from_path_with_metadata(&snapshot.persist_path)
         .expect("failed to load persisted NYTimes segment");
     let cfg = segment.hnsw().config_summary();
     logs.log_info(&format!(
@@ -633,6 +658,12 @@ fn run_nytimes_qps_latency_curve() {
         cfg.exact_fallback_enabled,
         cfg.exact_fallback_threshold
     ));
+    if let Some(meta) = metadata {
+        logs.log_info(&format!(
+            "🧾 Snapshot metadata: created_at_ms={} points={} payloads={}",
+            meta.created_at_ms, meta.points, meta.payloads
+        ));
+    }
 
     let num_queries = queries.len().min(search.queries_cap);
     let mut query_logger = QueryLogWriter::new(logs.query_log_path.clone(), logs.query_log_every);
@@ -707,4 +738,5 @@ fn run_nytimes_qps_latency_curve() {
             ef, qps, ms, recall
         ));
     }
+    log_peak_rss("nytimes_qps_complete");
 }

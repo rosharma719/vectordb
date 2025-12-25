@@ -455,6 +455,79 @@ fn background_snapshot_respects_deletes() -> Result<(), DBError> {
 }
 
 #[test]
+fn background_snapshot_retains_last_n() -> Result<(), DBError> {
+    let path = tmp_path("segment_background_retain");
+    let dir = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::temp_dir());
+    let base_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("segment_background_retain.bin")
+        .to_string();
+
+    let segment = Arc::new(RwLock::new(Segment::new(HNSWIndex::new(
+        DistanceMetric::Euclidean,
+        16,
+        32,
+        8,
+        2,
+    ))));
+
+    let mut config = SnapshotConfig::new(&path);
+    config.interval = Duration::from_millis(50);
+    config.max_ops = 1;
+    config.check_every = Duration::from_millis(10);
+    config.retain_last = 2;
+    let handle = start_background_snapshots(segment.clone(), config);
+
+    for i in 0..6u64 {
+        {
+            let mut guard = segment.write().unwrap();
+            guard.insert_with_id(i, vecf(&[i as f32, 0.0]), None)?;
+        }
+        std::thread::sleep(Duration::from_millis(60));
+    }
+
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(3) {
+        let rotated = fs::read_dir(&dir)?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|name| name.starts_with(&(base_name.clone() + ".")))
+            .count();
+        if rotated >= 1 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    handle.stop();
+
+    let rotated_after = fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| name.starts_with(&(base_name.clone() + ".")))
+        .collect::<Vec<_>>();
+    assert!(
+        rotated_after.len() <= 2,
+        "expected at most 2 retained snapshots, found {}",
+        rotated_after.len()
+    );
+    assert!(
+        path.exists(),
+        "base snapshot was not written"
+    );
+
+    let _ = fs::remove_file(&path);
+    for name in rotated_after {
+        let _ = fs::remove_file(dir.join(name));
+    }
+    Ok(())
+}
+
+#[test]
 fn wal_replay_applies_post_snapshot_ops() -> Result<(), DBError> {
     let snapshot_path = tmp_path("segment_wal_snapshot");
     let wal_path = Segment::wal_path_for_snapshot(&snapshot_path);

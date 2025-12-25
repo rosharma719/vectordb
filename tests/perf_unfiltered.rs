@@ -2,7 +2,7 @@ use std::env;
 use std::time::Instant;
 
 mod common;
-use common::generate_vector_dim;
+use common::{generate_vector_dim, log_peak_rss};
 use vectordb::segment::segment::Segment;
 use vectordb::utils::types::DistanceMetric;
 use vectordb::vector::hnsw::HNSWIndex;
@@ -40,6 +40,7 @@ fn bench_unfiltered_large_scale() {
         "✅ Inserted {} vectors in {:?} ({:.2} vec/s)",
         size, insert_dur, vps
     );
+    log_peak_rss("unfiltered_large_inserted");
 
     let queries: Vec<_> = (0..500).map(|i| generate_vector_dim(i + size, dim)).collect();
     let start_search = Instant::now();
@@ -55,6 +56,7 @@ fn bench_unfiltered_large_scale() {
         search_dur,
         avg_ms
     );
+    log_peak_rss("unfiltered_large_complete");
     segment.hnsw().flush_unfiltered_search_stats();
 }
 
@@ -100,6 +102,7 @@ fn bench_unfiltered_param_scale() {
         "✅ Inserted {} vectors in {:?} ({:.2} vec/s)",
         size, insert_dur, vps
     );
+    log_peak_rss("unfiltered_param_inserted");
 
     let queries: Vec<_> = (0..500).map(|i| generate_vector_dim(i + size, dim)).collect();
     let start_search = Instant::now();
@@ -115,6 +118,7 @@ fn bench_unfiltered_param_scale() {
         search_dur,
         avg_ms
     );
+    log_peak_rss("unfiltered_param_complete");
     segment.hnsw().flush_unfiltered_search_stats();
 }
 
@@ -151,6 +155,7 @@ fn bench_unfiltered_million_scale() {
         "✅ Inserted {} vectors in {:?} ({:.2} vec/s)",
         size, insert_dur, vps
     );
+    log_peak_rss("unfiltered_million_inserted");
 
     let queries: Vec<_> = (0..500).map(|i| generate_vector_dim(i + size, dim)).collect();
     let start_search = Instant::now();
@@ -166,5 +171,6 @@ fn bench_unfiltered_million_scale() {
         search_dur,
         avg_ms
     );
+    log_peak_rss("unfiltered_million_complete");
     segment.hnsw().flush_unfiltered_search_stats();
 }

@@ -17,7 +17,7 @@ use crate::utils::errors::DBError;
 use crate::utils::io::{adler32, write_atomic_with_checksum};
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::{PointId, Vector};
-use crate::vector::hnsw::{HNSWIndex, HnswSnapshot, ScoredPoint, SearchStats};
+use crate::vector::hnsw::{HNSWIndex, HnswConfigSummary, HnswSnapshot, ScoredPoint, SearchStats};
 
 /// A segment is the core unit that wraps vector storage, indexing, payloads, and deletion.
 pub struct Segment {
@@ -59,8 +59,18 @@ pub(crate) struct SegmentSnapshot {
 }
 
 const SEGMENT_SNAPSHOT_MAGIC: [u8; 4] = *b"VDBS";
-const SEGMENT_SNAPSHOT_VERSION: u32 = 2;
+const SEGMENT_SNAPSHOT_VERSION: u32 = 3;
 const SEGMENT_SNAPSHOT_FOOTER: [u8; 4] = *b"VDBF";
+const SEGMENT_SNAPSHOT_META_MAGIC: [u8; 4] = *b"VDBM";
+const SEGMENT_SNAPSHOT_META_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SnapshotMetadata {
+    pub created_at_ms: u64,
+    pub hnsw: HnswConfigSummary,
+    pub points: usize,
+    pub payloads: usize,
+}
 
 #[derive(Serialize, Deserialize)]
 struct HnswSnapshotV1 {
@@ -141,7 +151,7 @@ thread_local! {
 
 impl Segment {
     pub fn new(hnsw: HNSWIndex) -> Self {
-        Self {
+        let mut segment = Self {
             hnsw,
             payload_index: PayloadIndex::new(),
             payloads: HashMap::new(),
@@ -150,7 +160,11 @@ impl Segment {
             op_count: 0,
             wal: None,
             rebuilding: AtomicBool::new(false),
+        };
+        if let Err(err) = segment.enable_wal_from_env_default_dir(None) {
+            log::warn!(target: "segment::wal", "failed to enable WAL from env: {}", err);
         }
+        segment
     }
 
     /// Insert a new vector and optional payload. Auto-generates ID.
@@ -558,12 +572,14 @@ impl Segment {
     /// Persist the entire segment (graph, vectors, payloads, and inverted index) to disk.
     pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), DBError> {
         let snapshot = self.build_snapshot();
-        Self::persist_snapshot(&snapshot, path)
+        let metadata = self.snapshot_metadata();
+        Self::persist_snapshot(&snapshot, Some(&metadata), path)
     }
 
     /// Restore a segment that was previously persisted with `save_to_path`.
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
-        Self::load_from_path_with_wal(path, None)
+        let (segment, _metadata) = Self::load_from_path_with_wal_and_metadata(path, None)?;
+        Ok(segment)
     }
 
     /// Restore a segment and optionally replay a WAL (defaults to `<snapshot>.wal` if present).
@@ -571,6 +587,22 @@ impl Segment {
         path: P,
         wal_path: Option<PathBuf>,
     ) -> Result<Self, DBError> {
+        let (segment, _metadata) = Self::load_from_path_with_wal_and_metadata(path, wal_path)?;
+        Ok(segment)
+    }
+
+    /// Restore a segment and return snapshot metadata when available.
+    pub fn load_from_path_with_metadata<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<(Self, Option<SnapshotMetadata>), DBError> {
+        Self::load_from_path_with_wal_and_metadata(path, None)
+    }
+
+    /// Restore a segment and optionally replay a WAL, returning snapshot metadata when available.
+    pub fn load_from_path_with_wal_and_metadata<P: AsRef<Path>>(
+        path: P,
+        wal_path: Option<PathBuf>,
+    ) -> Result<(Self, Option<SnapshotMetadata>), DBError> {
         let bytes = std::fs::read(&path)?;
         let (payload, checksum) = if bytes.len() >= 8
             && bytes[bytes.len() - 8..bytes.len() - 4] == SEGMENT_SNAPSHOT_FOOTER
@@ -595,25 +627,38 @@ impl Segment {
             }
         }
 
-        let snapshot: SegmentSnapshot = if payload.len() >= 8 && payload[..4] == SEGMENT_SNAPSHOT_MAGIC {
-            let version = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-            match version {
-                2 => bincode::deserialize(&payload[8..])
-                    .map_err(|e| DBError::SerializationError(anyhow!(e)))?,
-                _ => {
-                    return Err(DBError::SerializationError(anyhow!(
-                        "unsupported segment snapshot version {}",
-                        version
-                    )))
+        let (snapshot, metadata): (SegmentSnapshot, Option<SnapshotMetadata>) =
+            if payload.len() >= 8 && payload[..4] == SEGMENT_SNAPSHOT_MAGIC {
+                let version = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                let body = &payload[8..];
+                match version {
+                    2 => (
+                        bincode::deserialize(body)
+                            .map_err(|e| DBError::SerializationError(anyhow!(e)))?,
+                        None,
+                    ),
+                    3 => {
+                        let (snapshot_bytes, metadata) = Self::parse_snapshot_metadata(body)?;
+                        (
+                            bincode::deserialize(snapshot_bytes)
+                                .map_err(|e| DBError::SerializationError(anyhow!(e)))?,
+                            metadata,
+                        )
+                    }
+                    _ => {
+                        return Err(DBError::SerializationError(anyhow!(
+                            "unsupported segment snapshot version {}",
+                            version
+                        )))
+                    }
                 }
-            }
-        } else if let Ok(snapshot) = bincode::deserialize::<SegmentSnapshot>(payload) {
-            snapshot
-        } else {
-            let legacy: SegmentSnapshotV1 = bincode::deserialize(payload)
-                .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
-            legacy.into()
-        };
+            } else if let Ok(snapshot) = bincode::deserialize::<SegmentSnapshot>(payload) {
+                (snapshot, None)
+            } else {
+                let legacy: SegmentSnapshotV1 = bincode::deserialize(payload)
+                    .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+                (legacy.into(), None)
+            };
         let mut segment = Self {
             hnsw: HNSWIndex::from_snapshot(snapshot.hnsw),
             payload_index: snapshot.payload_index,
@@ -632,21 +677,44 @@ impl Segment {
         if auto_replay && wal_path.exists() {
             let reader = WalReader::new(&wal_path);
             reader.replay(|record| segment.apply_wal_record(record))?;
-            segment.wal = Some(WalWriter::open(WalConfig::new(wal_path))?);
+            segment.wal = Some(WalWriter::open(WalConfig::from_env(wal_path))?);
         }
 
-        Ok(segment)
+        Ok((segment, metadata))
     }
 
     pub fn enable_wal<P: AsRef<Path>>(&mut self, path: P) -> Result<(), DBError> {
-        let writer = WalWriter::open(WalConfig::new(path.as_ref().to_path_buf()))?;
+        let writer = WalWriter::open(WalConfig::from_env(path.as_ref().to_path_buf()))?;
         self.wal = Some(writer);
+        Ok(())
+    }
+
+    pub fn enable_wal_from_env_default_dir(
+        &mut self,
+        default_dir: Option<PathBuf>,
+    ) -> Result<(), DBError> {
+        if let Ok(path) = env::var("VECTORDB_WAL_PATH") {
+            if !path.is_empty() {
+                return self.enable_wal(path);
+            }
+        }
+        if let Ok(dir) = env::var("VECTORDB_WAL_DIR") {
+            if !dir.is_empty() {
+                let wal_path = Path::new(&dir).join("segment.wal");
+                return self.enable_wal(wal_path);
+            }
+        }
+        if let Some(dir) = default_dir {
+            let wal_path = dir.join("segment.wal");
+            return self.enable_wal(wal_path);
+        }
         Ok(())
     }
 
     pub fn save_to_path_and_checkpoint<P: AsRef<Path>>(&mut self, path: P) -> Result<(), DBError> {
         let snapshot = self.build_snapshot();
-        Self::persist_snapshot(&snapshot, &path)?;
+        let metadata = self.snapshot_metadata();
+        Self::persist_snapshot(&snapshot, Some(&metadata), &path)?;
         self.checkpoint_wal()?;
         Ok(())
     }
@@ -669,17 +737,99 @@ impl Segment {
         }
     }
 
+    pub fn snapshot_metadata(&self) -> SnapshotMetadata {
+        let cfg = self.hnsw.config_summary();
+        let created_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        SnapshotMetadata {
+            created_at_ms,
+            hnsw: cfg,
+            points: self.hnsw.len(),
+            payloads: self.payloads.len(),
+        }
+    }
+
+    pub fn snapshot_name_with_config(&self, prefix: &str) -> String {
+        let cfg = self.hnsw.config_summary();
+        let metric = match cfg.metric {
+            crate::utils::types::DistanceMetric::Cosine => "cosine",
+            crate::utils::types::DistanceMetric::Dot => "dot",
+            crate::utils::types::DistanceMetric::Euclidean => "euclidean",
+        };
+        format!(
+            "{}_m{}_m0_{}_efc{}_dim{}_{}.bin",
+            prefix, cfg.m, cfg.m0, cfg.ef_construct, cfg.dim, metric
+        )
+    }
+
+    pub fn snapshot_path_with_config<P: AsRef<Path>>(&self, dir: P, prefix: &str) -> PathBuf {
+        dir.as_ref().join(self.snapshot_name_with_config(prefix))
+    }
+
     pub(crate) fn persist_snapshot<P: AsRef<Path>>(
         snapshot: &SegmentSnapshot,
+        metadata: Option<&SnapshotMetadata>,
         path: P,
     ) -> Result<(), DBError> {
         write_atomic_with_checksum(path, SEGMENT_SNAPSHOT_FOOTER, |writer| {
             writer.write_all(&SEGMENT_SNAPSHOT_MAGIC)?;
             writer.write_all(&SEGMENT_SNAPSHOT_VERSION.to_le_bytes())?;
-            bincode::serialize_into(writer, snapshot)
+            bincode::serialize_into(&mut *writer, snapshot)
                 .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+            if let Some(meta) = metadata {
+                let meta_bytes =
+                    bincode::serialize(meta).map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+                let meta_len = meta_bytes.len() as u32;
+                writer.write_all(&meta_bytes)?;
+                writer.write_all(&meta_len.to_le_bytes())?;
+                writer.write_all(&SEGMENT_SNAPSHOT_META_VERSION.to_le_bytes())?;
+                writer.write_all(&SEGMENT_SNAPSHOT_META_MAGIC)?;
+            }
             Ok(())
         })
+    }
+
+    fn parse_snapshot_metadata<'a>(
+        payload: &'a [u8],
+    ) -> Result<(&'a [u8], Option<SnapshotMetadata>), DBError> {
+        if payload.len() < 12 || payload[payload.len() - 4..] != SEGMENT_SNAPSHOT_META_MAGIC {
+            return Ok((payload, None));
+        }
+        let version_start = payload.len() - 8;
+        let len_start = payload.len() - 12;
+        let version = u32::from_le_bytes([
+            payload[version_start],
+            payload[version_start + 1],
+            payload[version_start + 2],
+            payload[version_start + 3],
+        ]);
+        if version != SEGMENT_SNAPSHOT_META_VERSION {
+            return Err(DBError::SerializationError(anyhow!(
+                "unsupported snapshot metadata version {}",
+                version
+            )));
+        }
+        let meta_len = u32::from_le_bytes([
+            payload[len_start],
+            payload[len_start + 1],
+            payload[len_start + 2],
+            payload[len_start + 3],
+        ]) as usize;
+        if payload.len() < 12 + meta_len {
+            return Err(DBError::SerializationError(anyhow!(
+                "snapshot metadata length {} exceeds payload size {}",
+                meta_len,
+                payload.len()
+            )));
+        }
+        let meta_start = payload.len() - 12 - meta_len;
+        let meta_bytes = &payload[meta_start..meta_start + meta_len];
+        let snapshot_bytes = &payload[..meta_start];
+        let metadata = bincode::deserialize(meta_bytes)
+            .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+        Ok((snapshot_bytes, Some(metadata)))
     }
 
     pub(crate) fn op_count(&self) -> u64 {

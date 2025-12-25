@@ -21,6 +21,7 @@ use vectordb::vector::hnsw::HNSWIndex;
 mod common;
 use common::{
     env_usize_first,
+    log_peak_rss,
     QueryLogWriter,
     QueryStatsAgg,
     SearchConfig,
@@ -581,6 +582,7 @@ fn run_hnm_recall_only() {
     // Load only the test cases; vectors/payloads come from the persisted segment.
     let raw_tests = load_test_cases(&tests_path);
     logs.log_info(&format!("⏱️  Tests loaded in {:?}", t0.elapsed()));
+    log_peak_rss("hnm_loaded_tests");
 
     let default_topk = raw_tests
         .first()
@@ -624,18 +626,41 @@ fn run_hnm_recall_only() {
         "💾 Loading persisted H&M segment from {} ...",
         snapshot.persist_path
     ));
-    let mut segment =
-        Segment::load_from_path(&snapshot.persist_path).expect("failed to load persisted H&M segment");
+    let (mut segment, metadata) = Segment::load_from_path_with_metadata(&snapshot.persist_path)
+        .expect("failed to load persisted H&M segment");
     logs.log_info(&format!(
         "✅ Loaded persisted segment with {} payloads, ef_search={}",
         segment.payloads().len(),
         segment.hnsw().ef()
     ));
+    log_peak_rss("hnm_loaded_snapshot");
+    let cfg = segment.hnsw().config_summary();
+    logs.log_info(&format!(
+        "🧭 HNSW config: metric={:?} dim={} m={} m0={} ef={} ef_construct={} level_cap={} level_scale={:.3} max_level={} exact_fallback={} threshold={}",
+        cfg.metric,
+        cfg.dim,
+        cfg.m,
+        cfg.m0,
+        cfg.ef,
+        cfg.ef_construct,
+        cfg.max_level_cap,
+        cfg.level_scale,
+        cfg.current_max_level,
+        cfg.exact_fallback_enabled,
+        cfg.exact_fallback_threshold
+    ));
+    if let Some(meta) = metadata {
+        logs.log_info(&format!(
+            "🧾 Snapshot metadata: created_at_ms={} points={} payloads={}",
+            meta.created_at_ms, meta.points, meta.payloads
+        ));
+    }
     let collection_len = segment.hnsw().len();
 
     let num_queries = prepared_cases.len();
     let mut summary: Vec<(usize, f64, f64)> = Vec::new();
     let mut query_logger = QueryLogWriter::new(logs.query_log_path.clone(), logs.query_log_every);
+    log_peak_rss("hnm_before_sweep");
     for &ef in &search.ef_values {
         let ef_search = ef.max(top_k);
         segment.hnsw_mut().set_ef_search(ef_search);
@@ -769,4 +794,5 @@ fn run_hnm_recall_only() {
     for (ef, recall, ms) in summary {
         logs.log_info(&format!("  {} -> {:.3}, {:.3} ms/query", ef, recall, ms));
     }
+    log_peak_rss("hnm_recall_complete");
 }
