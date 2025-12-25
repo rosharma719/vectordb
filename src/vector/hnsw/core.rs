@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::env;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -75,7 +76,10 @@ impl HNSWIndex {
     pub fn new(metric: DistanceMetric, m: usize, ef: usize, max_level_cap: usize, dim: usize) -> Self {
         // Touch the flag early so the enable banner shows up before long inserts.
         let _ = log_unfiltered_enabled();
-        let level_scale = 1.0 / (m as f64).ln();
+        let base_level_scale = 1.0 / (m as f64).ln();
+        let level_scale = Self::level_scale_from_env(base_level_scale)
+            .unwrap_or(base_level_scale * 1.15);
+        let max_level_cap = Self::max_level_cap_from_env(max_level_cap);
         if VERBOSE {
             log::debug!(
                 target: "vector::hnsw",
@@ -339,6 +343,42 @@ impl HNSWIndex {
 
     pub fn set_exact_fallback_threshold(&mut self, threshold: usize) {
         self.exact_fallback_threshold = threshold;
+    }
+
+    fn level_scale_from_env(base: f64) -> Option<f64> {
+        if let Ok(raw) = env::var("VECTORDB_LEVEL_SCALE") {
+            if let Ok(value) = raw.replace('_', "").parse::<f64>() {
+                if value.is_finite() && value > 0.0 {
+                    return Some(value);
+                }
+            }
+        }
+        if let Ok(raw) = env::var("VECTORDB_LEVEL_SCALE_MULT") {
+            if let Ok(mult) = raw.replace('_', "").parse::<f64>() {
+                if mult.is_finite() && mult > 0.0 {
+                    return Some(base * mult);
+                }
+            }
+        }
+        None
+    }
+
+    fn max_level_cap_from_env(default_cap: usize) -> usize {
+        if let Ok(raw) = env::var("VECTORDB_MAX_LEVEL_CAP") {
+            if let Ok(value) = raw.replace('_', "").parse::<usize>() {
+                if value > 0 {
+                    return value;
+                }
+            }
+        }
+        if let Ok(raw) = env::var("VECTORDB_MAX_LEVEL") {
+            if let Ok(value) = raw.replace('_', "").parse::<usize>() {
+                if value > 0 {
+                    return value;
+                }
+            }
+        }
+        default_cap
     }
 
     pub fn maybe_normalize(&self, vec: &Vector) -> Vector {

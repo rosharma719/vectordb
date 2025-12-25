@@ -14,7 +14,8 @@ use crate::utils::types::{PointId, Vector, DistanceMetric};
 use super::config::{
     FILTER_EDGE_LOG_CHUNK,
     VERBOSE,
-    diversity_alpha,
+    diversity_alpha_for_level,
+    diversity_prune_floor,
     insert_trace_logger,
     next_insert_trace_seq,
     trace_every,
@@ -116,7 +117,7 @@ impl HNSWIndex {
                 None,
             )?;
             let m_for_layer = if l == 0 { self.m0 } else { self.m };
-            let neighbors: Vec<usize> = self.select_diverse_neighbors(&candidates, m_for_layer, use_norm);
+            let neighbors: Vec<usize> = self.select_diverse_neighbors(&candidates, m_for_layer, use_norm, l);
 
             let layer = self.layers.get_mut(l).unwrap();
             let mut linked = neighbors.clone();
@@ -405,15 +406,24 @@ impl HNSWIndex {
         candidates: &[NodeCandidate],
         m: usize,
         normalize_scores: bool,
+        level: usize,
     ) -> Vec<usize> {
-        let alpha = diversity_alpha();
+        let alpha = diversity_alpha_for_level(level);
+        let prune_floor = diversity_prune_floor().min(m);
         let mut result = Vec::with_capacity(m);
         for cand in candidates {
             if result.len() >= m {
                 break;
             }
+            if result.contains(&cand.idx) {
+                continue;
+            }
             let Some(cand_vec) = self.get_vector_by_idx(cand.idx) else { continue; };
             let d_qc = cand.sort_key;
+            if result.len() < prune_floor {
+                result.push(cand.idx);
+                continue;
+            }
             let mut too_close = false;
             for &r_id in &result {
                 let Some(r_vec) = self.get_vector_by_idx(r_id) else { continue; };

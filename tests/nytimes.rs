@@ -26,6 +26,7 @@ use common::{
 use vectordb::segment::segment::Segment;
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::vector::hnsw::HNSWIndex;
+use vectordb::vector::hnsw::config::search_expansion_multiplier;
 
 fn load_vectors(path: &Path) -> Vec<Vector> {
     let arr: Array2<f32> = read_npy(path).expect("failed to read .npy");
@@ -94,11 +95,7 @@ fn read_search_caps_from_env() -> (bool, usize, Option<usize>) {
     let disable_early_exit = env::var("VECTORDB_DISABLE_EARLY_EXIT")
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(false);
-    let expansion_mult = env::var("VECTORDB_SEARCH_EXPANSION_MULT")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(4);
+    let expansion_mult = search_expansion_multiplier();
     let expansion_cap = env::var("VECTORDB_SEARCH_EXPANSION_CAP")
         .ok()
         .and_then(|v| v.replace('_', "").parse::<usize>().ok())

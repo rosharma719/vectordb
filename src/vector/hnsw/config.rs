@@ -26,7 +26,11 @@ static INSERT_TRACE_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
 static EXACT_FALLBACK_ENABLED: OnceLock<Option<bool>> = OnceLock::new();
 static EXACT_FALLBACK_THRESHOLD: OnceLock<Option<usize>> = OnceLock::new();
 static FILTER_ENTRY_CANDIDATES: OnceLock<Option<usize>> = OnceLock::new();
+static NEIGHBOR_SCAN_CAP_LEVEL0: OnceLock<Option<usize>> = OnceLock::new();
 static DIVERSITY_ALPHA: OnceLock<Option<f32>> = OnceLock::new();
+static DIVERSITY_ALPHA_LOW: OnceLock<Option<f32>> = OnceLock::new();
+static DIVERSITY_ALPHA_HIGH: OnceLock<Option<f32>> = OnceLock::new();
+static DIVERSITY_PRUNE_FLOOR: OnceLock<Option<usize>> = OnceLock::new();
 
 pub(crate) fn log_unfiltered_enabled() -> bool {
     *LOG_UNFILTERED_SEARCH.get_or_init(|| {
@@ -72,7 +76,7 @@ pub(crate) fn disable_early_exit() -> bool {
     })
 }
 
-pub(crate) fn search_expansion_multiplier() -> usize {
+pub fn search_expansion_multiplier() -> usize {
     *SEARCH_EXPANSION_MULT.get_or_init(|| {
         std::env::var("VECTORDB_SEARCH_EXPANSION_MULT")
             .ok()
@@ -230,13 +234,56 @@ pub(crate) fn filter_entry_candidates() -> Option<usize> {
         .clone()
 }
 
-pub(crate) fn diversity_alpha() -> f32 {
-    DIVERSITY_ALPHA
+pub(crate) fn neighbor_scan_cap(level: usize) -> usize {
+    if level == 0 {
+        NEIGHBOR_SCAN_CAP_LEVEL0
+            .get_or_init(|| {
+                std::env::var("VECTORDB_NEIGHBOR_SCAN_CAP_LEVEL0")
+                    .ok()
+                    .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+                    .map(|v| if v == 0 { usize::MAX } else { v })
+            })
+            .unwrap_or(64)
+    } else {
+        usize::MAX
+    }
+}
+
+pub(crate) fn diversity_alpha_for_level(level: usize) -> f32 {
+    if let Some(alpha) = DIVERSITY_ALPHA.get_or_init(|| {
+        std::env::var("VECTORDB_DIVERSITY_ALPHA")
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+    }) {
+        return *alpha;
+    }
+    let low = DIVERSITY_ALPHA_LOW
         .get_or_init(|| {
-            std::env::var("VECTORDB_DIVERSITY_ALPHA")
+            std::env::var("VECTORDB_DIVERSITY_ALPHA_LOW")
                 .ok()
                 .and_then(|v| v.replace('_', "").parse::<f32>().ok())
                 .filter(|v| v.is_finite() && *v > 0.0)
         })
-        .unwrap_or(1.0)
+        .unwrap_or(1.0);
+    let high = DIVERSITY_ALPHA_HIGH
+        .get_or_init(|| {
+            std::env::var("VECTORDB_DIVERSITY_ALPHA_HIGH")
+                .ok()
+                .and_then(|v| v.replace('_', "").parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v > 0.0)
+        })
+        .unwrap_or(1.2);
+    if level == 0 { low } else { high }
+}
+
+pub(crate) fn diversity_prune_floor() -> usize {
+    DIVERSITY_PRUNE_FLOOR
+        .get_or_init(|| {
+            std::env::var("VECTORDB_DIVERSITY_PRUNE_FLOOR")
+                .ok()
+                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+                .filter(|v| *v > 0)
+        })
+        .unwrap_or(4)
 }

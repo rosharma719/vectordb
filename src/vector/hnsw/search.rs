@@ -10,6 +10,7 @@ use super::config::{
     disable_early_exit,
     early_exit_patience,
     log_unfiltered_enabled,
+    neighbor_scan_cap,
     next_search_trace_seq,
     search_expansion_cap_override,
     search_expansion_multiplier,
@@ -173,11 +174,17 @@ impl HNSWIndex {
                 let current = scratch.candidate_queue.pop().unwrap();
                 expanded += 1;
                 if let Some(neighbors) = self.layers.get(level).and_then(|l| l.get(current.idx)) {
+                    let scan_cap = neighbor_scan_cap(level);
+                    let mut scanned_neighbors = 0usize;
                     const BATCH: usize = 16;
                     let mut batch = [0usize; BATCH];
                     let mut batch_len = 0usize;
 
                     for &neighbor in neighbors {
+                        if scanned_neighbors >= scan_cap {
+                            break;
+                        }
+                        scanned_neighbors += 1;
                         if self.deleted.get(neighbor).copied().unwrap_or(false) || !scratch.mark_visited(neighbor) {
                             continue;
                         }

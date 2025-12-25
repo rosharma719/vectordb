@@ -13,7 +13,7 @@ Snapshot defaults (shared):
   - `VECTORDB_EF_SEARCH_LIST` (or dataset-specific overrides below)
   - `VECTORDB_EARLY_EXIT_PATIENCE`
   - `VECTORDB_DISABLE_EARLY_EXIT` (set to `1` to turn it off)
-  - `VECTORDB_SEARCH_EXPANSION_MULT` (default 4)
+  - `VECTORDB_SEARCH_EXPANSION_MULT` (default 1)
   - `VECTORDB_SEARCH_EXPANSION_CAP` (0 => uncapped for unfiltered search)
   - `VECTORDB_FILTER_EXPANSION_CAP` (0 => uncapped for filtered search; otherwise max expansions)
   - `VECTORDB_DISABLE_FILTER_SEEDS` (set to `1` to disable seeding; default seeds enabled)
