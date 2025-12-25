@@ -5,24 +5,19 @@ use std::time::Instant;
 use rand::seq::IteratorRandom;
 use serde::Serialize;
 
-use crate::payload_storage::filters::{evaluate_filter, Filter};
+use crate::payload_storage::filters::{Filter, evaluate_filter};
 use crate::payload_storage::stores::PayloadIndex;
 use crate::utils::errors::DBError;
 use crate::utils::payload::{Payload, PayloadValue};
-use crate::utils::types::{PointId, Vector, DistanceMetric};
+use crate::utils::types::{DistanceMetric, PointId, Vector};
 
+use super::HNSWIndex;
 use super::config::{
-    FILTER_EDGE_LOG_CHUNK,
-    VERBOSE,
-    diversity_alpha_for_level,
-    diversity_prune_floor,
-    insert_trace_logger,
-    next_insert_trace_seq,
-    trace_every,
+    FILTER_EDGE_LOG_CHUNK, VERBOSE, diversity_alpha_for_level, diversity_prune_floor,
+    insert_trace_logger, next_insert_trace_seq, trace_every,
 };
 use super::stats::{FILTER_EDGE_STATS, FILTER_EDGE_TOTAL_KEYS, FilterEdgeAgg};
-use super::types::{NodeCandidate};
-use super::HNSWIndex;
+use super::types::NodeCandidate;
 
 #[derive(Serialize)]
 struct InsertTraceEntry {
@@ -65,7 +60,11 @@ impl HNSWIndex {
         let trace_id = next_insert_trace_seq();
         let trace_mod = trace_every() as u64;
         let trace_enabled = insert_trace_logger().is_some() && trace_id % trace_mod == 0;
-        let trace_start = if trace_enabled { Some(Instant::now()) } else { None };
+        let trace_start = if trace_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         let level = self.assign_random_level();
         let vec = self.maybe_normalize(&vector);
@@ -102,11 +101,13 @@ impl HNSWIndex {
         };
 
         for l in ((level + 1)..=self.current_max_level).rev() {
-            current_entry = self.greedy_search_layer_unfiltered(&self.vectors[idx], current_entry, l);
+            current_entry =
+                self.greedy_search_layer_unfiltered(&self.vectors[idx], current_entry, l);
         }
 
         for l in (0..=level).rev() {
-            let use_norm = self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
+            let use_norm =
+                self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
             let candidates = self.search_layer_unfiltered(
                 &self.vectors[idx],
                 current_entry,
@@ -117,7 +118,8 @@ impl HNSWIndex {
                 None,
             )?;
             let m_for_layer = if l == 0 { self.m0 } else { self.m };
-            let neighbors: Vec<usize> = self.select_diverse_neighbors(&candidates, m_for_layer, use_norm, l);
+            let neighbors: Vec<usize> =
+                self.select_diverse_neighbors(&candidates, m_for_layer, use_norm, l);
 
             let layer = self.layers.get_mut(l).unwrap();
             let mut linked = neighbors.clone();
@@ -149,7 +151,9 @@ impl HNSWIndex {
                     candidates: candidates.len(),
                     neighbors: neighbors.len(),
                     best_neighbor: neighbors.first().map(|&n| self.point_id(n)),
-                    elapsed_ms: trace_start.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0),
+                    elapsed_ms: trace_start
+                        .map(|t| t.elapsed().as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0),
                 };
                 log_insert_trace(&entry);
             }
@@ -199,7 +203,11 @@ impl HNSWIndex {
 
         for key in filter_keys {
             if let Some(value) = payload.get(key) {
-                let key_start = if log_edges_agg { Some(std::time::Instant::now()) } else { None };
+                let key_start = if log_edges_agg {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 let mut sample_len = 0usize;
                 let mut scored_len = 0usize;
                 let prev_len = extra_neighbors.len();
@@ -226,7 +234,11 @@ impl HNSWIndex {
                             self.get_vector(&id).map(|vec| {
                                 let raw = self.fast_score(&query_vector, vec);
                                 let sort_key = self.normalize_score(raw);
-                                super::types::ScoredPoint { id, raw_score: raw, sort_key }
+                                super::types::ScoredPoint {
+                                    id,
+                                    raw_score: raw,
+                                    sort_key,
+                                }
                             })
                         })
                         .collect();
@@ -334,7 +346,11 @@ impl HNSWIndex {
         }
 
         let cap = m.max(1);
-        for neighbor_id in extra_neighbors.into_iter().filter(|id| *id != point_id).take(cap) {
+        for neighbor_id in extra_neighbors
+            .into_iter()
+            .filter(|id| *id != point_id)
+            .take(cap)
+        {
             self.add_one_way_edge(0, point_id, neighbor_id);
         }
 
@@ -342,7 +358,9 @@ impl HNSWIndex {
     }
 
     pub fn add_bidirectional_edge(&mut self, level: usize, a: PointId, b: PointId) {
-        let (Some(a_idx), Some(b_idx)) = (self.idx_of(a), self.idx_of(b)) else { return; };
+        let (Some(a_idx), Some(b_idx)) = (self.idx_of(a), self.idx_of(b)) else {
+            return;
+        };
         let nodes_len = self.vectors.len();
         self.ensure_level_capacity(level, nodes_len);
         self.extend_layers_for_new_node(nodes_len);
@@ -351,7 +369,9 @@ impl HNSWIndex {
     }
 
     pub fn add_one_way_edge(&mut self, level: usize, from: PointId, to: PointId) {
-        let (Some(from_idx), Some(to_idx)) = (self.idx_of(from), self.idx_of(to)) else { return; };
+        let (Some(from_idx), Some(to_idx)) = (self.idx_of(from), self.idx_of(to)) else {
+            return;
+        };
         let nodes_len = self.vectors.len();
         self.ensure_level_capacity(level, nodes_len);
         self.extend_layers_for_new_node(nodes_len);
@@ -365,7 +385,12 @@ impl HNSWIndex {
         }
     }
 
-    pub fn greedy_search_layer_unfiltered(&self, query: &Vector, entry: usize, level: usize) -> usize {
+    pub fn greedy_search_layer_unfiltered(
+        &self,
+        query: &Vector,
+        entry: usize,
+        level: usize,
+    ) -> usize {
         let mut current = entry;
         let mut changed = true;
         let mut steps = 0;
@@ -418,7 +443,9 @@ impl HNSWIndex {
             if result.contains(&cand.idx) {
                 continue;
             }
-            let Some(cand_vec) = self.get_vector_by_idx(cand.idx) else { continue; };
+            let Some(cand_vec) = self.get_vector_by_idx(cand.idx) else {
+                continue;
+            };
             let d_qc = cand.sort_key;
             if result.len() < prune_floor {
                 result.push(cand.idx);
@@ -426,9 +453,15 @@ impl HNSWIndex {
             }
             let mut too_close = false;
             for &r_id in &result {
-                let Some(r_vec) = self.get_vector_by_idx(r_id) else { continue; };
+                let Some(r_vec) = self.get_vector_by_idx(r_id) else {
+                    continue;
+                };
                 let d_cr_raw = self.fast_score(cand_vec, r_vec);
-                let d_cr = if normalize_scores { self.normalize_score(d_cr_raw) } else { d_cr_raw };
+                let d_cr = if normalize_scores {
+                    self.normalize_score(d_cr_raw)
+                } else {
+                    d_cr_raw
+                };
                 if d_cr < d_qc * alpha {
                     too_close = true;
                     break;
@@ -475,13 +508,16 @@ impl HNSWIndex {
 
                     if let Some(f) = filter {
                         let id = self.point_id(neighbor);
-                        let Some(payload) = payloads.get(&id) else { continue; };
+                        let Some(payload) = payloads.get(&id) else {
+                            continue;
+                        };
                         if !evaluate_filter(f, payload)? {
                             continue;
                         }
                     }
 
-                    let d_current = self.fast_score(query, self.get_vector_by_idx(current).unwrap());
+                    let d_current =
+                        self.fast_score(query, self.get_vector_by_idx(current).unwrap());
                     let d_new = self.fast_score(query, self.get_vector_by_idx(neighbor).unwrap());
 
                     let s_current = match self.metric {

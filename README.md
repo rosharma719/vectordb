@@ -134,6 +134,9 @@ Notes:
 - Fsync tuning: `VECTORDB_WAL_FSYNC` (0/1), `VECTORDB_WAL_FSYNC_EVERY` (N ops, default 100), `VECTORDB_WAL_FSYNC_MS` (time-based, default 100ms).
 - Memory cap: set `VECTORDB_MAX_RSS_MB` and `VECTORDB_OOM_SNAPSHOT_PATH` to snapshot+unload and reject inserts when RSS exceeds the cap.
 
+### RSS memory cap
+Set `VECTORDB_MAX_RSS_MB` to the maximum resident set size you allow before the segment begins backpressure (defaults to unlimited). When the cap is reached the segment atomically writes a snapshot to `VECTORDB_OOM_SNAPSHOT_PATH` (or `<persist>.oom` when empty), unloads the in-memory graph, and refuses further inserts until you reload that snapshot. The cap is enforced before every insert, so the workload either drifts below the threshold or you drain/reload the snapshot to keep serving queries while the WAL/wal replay guarantees durability across the cycle.
+
 ### Deletion purge
 By default, deletions leave tombstones in place. To enable automatic purge/rebuild after a deletion threshold:
 `VECTORDB_PURGE_DELETIONS=1`.

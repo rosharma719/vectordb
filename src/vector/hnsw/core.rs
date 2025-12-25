@@ -1,17 +1,14 @@
-use std::collections::{HashMap, HashSet};
-use std::env;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::env;
 
 use crate::utils::errors::DBError;
 use crate::utils::types::{DistanceMetric, PointId, Vector};
 
 use super::config::{
-    DEFAULT_EXACT_FALLBACK_THRESHOLD,
-    VERBOSE,
-    exact_fallback_enabled_override,
-    exact_fallback_threshold_override,
-    log_unfiltered_enabled,
+    DEFAULT_EXACT_FALLBACK_THRESHOLD, VERBOSE, exact_fallback_enabled_override,
+    exact_fallback_threshold_override, log_unfiltered_enabled,
 };
 use super::stats::UNFILTERED_SEARCH_AGG;
 
@@ -73,12 +70,18 @@ pub struct HnswConfigSummary {
 }
 
 impl HNSWIndex {
-    pub fn new(metric: DistanceMetric, m: usize, ef: usize, max_level_cap: usize, dim: usize) -> Self {
+    pub fn new(
+        metric: DistanceMetric,
+        m: usize,
+        ef: usize,
+        max_level_cap: usize,
+        dim: usize,
+    ) -> Self {
         // Touch the flag early so the enable banner shows up before long inserts.
         let _ = log_unfiltered_enabled();
         let base_level_scale = 1.0 / (m as f64).ln();
-        let level_scale = Self::level_scale_from_env(base_level_scale)
-            .unwrap_or(base_level_scale * 1.15);
+        let level_scale =
+            Self::level_scale_from_env(base_level_scale).unwrap_or(base_level_scale * 1.15);
         let max_level_cap = Self::max_level_cap_from_env(max_level_cap);
         if VERBOSE {
             log::debug!(
@@ -108,7 +111,8 @@ impl HNSWIndex {
             point_to_idx: HashMap::new(),
             idx_to_point: Vec::new(),
             exact_fallback_enabled: exact_fallback_enabled_override().unwrap_or(false),
-            exact_fallback_threshold: exact_fallback_threshold_override().unwrap_or(DEFAULT_EXACT_FALLBACK_THRESHOLD),
+            exact_fallback_threshold: exact_fallback_threshold_override()
+                .unwrap_or(DEFAULT_EXACT_FALLBACK_THRESHOLD),
         }
     }
 
@@ -160,7 +164,9 @@ impl HNSWIndex {
     }
 
     pub fn mark_deleted(&mut self, point_id: PointId) {
-        let Some(idx) = self.idx_of(point_id) else { return; };
+        let Some(idx) = self.idx_of(point_id) else {
+            return;
+        };
         if let Some(flag) = self.deleted.get_mut(idx) {
             *flag = true;
         }
@@ -199,11 +205,7 @@ impl HNSWIndex {
 
     #[inline]
     pub(crate) fn neighbor_list_capacity(&self, level: usize) -> usize {
-        if level == 0 {
-            self.m0 + 1
-        } else {
-            self.m + 1
-        }
+        if level == 0 { self.m0 + 1 } else { self.m + 1 }
     }
 
     pub(crate) fn ensure_level_capacity(&mut self, level: usize, nodes_len: usize) {
@@ -563,7 +565,12 @@ unsafe fn l2_neon(query: &[f32], vec: &[f32]) -> f32 {
 }
 
 impl HNSWIndex {
-    pub(crate) fn register_node(&mut self, point_id: PointId, vector: Vector, level: usize) -> usize {
+    pub(crate) fn register_node(
+        &mut self,
+        point_id: PointId,
+        vector: Vector,
+        level: usize,
+    ) -> usize {
         let idx = self.vectors.len();
         self.vectors.push(vector);
         self.levels.push(level);
@@ -662,14 +669,7 @@ mod tests {
         let scores_per_sec = total as f64 / elapsed.as_secs_f64();
         println!(
             "kernel metric={:?} dim={} vecs={} iters={} total={} scores/s={:.2} ns/score={:.2} acc={:.4}",
-            metric,
-            dim,
-            vecs,
-            iters,
-            total,
-            scores_per_sec,
-            ns_per,
-            acc
+            metric, dim, vecs, iters, total, scores_per_sec, ns_per, acc
         );
     }
 }

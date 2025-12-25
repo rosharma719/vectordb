@@ -27,6 +27,9 @@ static EXACT_FALLBACK_ENABLED: OnceLock<Option<bool>> = OnceLock::new();
 static EXACT_FALLBACK_THRESHOLD: OnceLock<Option<usize>> = OnceLock::new();
 static FILTER_ENTRY_CANDIDATES: OnceLock<Option<usize>> = OnceLock::new();
 static NEIGHBOR_SCAN_CAP_LEVEL0: OnceLock<Option<usize>> = OnceLock::new();
+static NEIGHBOR_SCAN_ROTATE: OnceLock<Option<bool>> = OnceLock::new();
+static NEIGHBOR_SCAN_STRIDE: OnceLock<Option<bool>> = OnceLock::new();
+static NEIGHBOR_SCAN_STATE_LOGGED: OnceLock<()> = OnceLock::new();
 static DIVERSITY_ALPHA: OnceLock<Option<f32>> = OnceLock::new();
 static DIVERSITY_ALPHA_LOW: OnceLock<Option<f32>> = OnceLock::new();
 static DIVERSITY_ALPHA_HIGH: OnceLock<Option<f32>> = OnceLock::new();
@@ -82,7 +85,7 @@ pub fn search_expansion_multiplier() -> usize {
             .ok()
             .and_then(|v| v.replace('_', "").parse::<usize>().ok())
             .filter(|&v| v > 0)
-        .unwrap_or(1)
+            .unwrap_or(1)
     })
 }
 
@@ -234,7 +237,7 @@ pub(crate) fn filter_entry_candidates() -> Option<usize> {
         .clone()
 }
 
-pub(crate) fn neighbor_scan_cap(level: usize) -> usize {
+pub fn neighbor_scan_cap(level: usize) -> usize {
     if level == 0 {
         NEIGHBOR_SCAN_CAP_LEVEL0
             .get_or_init(|| {
@@ -247,6 +250,43 @@ pub(crate) fn neighbor_scan_cap(level: usize) -> usize {
     } else {
         usize::MAX
     }
+}
+
+pub fn neighbor_scan_rotate_enabled() -> bool {
+    NEIGHBOR_SCAN_ROTATE
+        .get_or_init(|| {
+            std::env::var("VECTORDB_NEIGHBOR_SCAN_ROTATE")
+                .ok()
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true)
+}
+
+pub fn neighbor_scan_stride_enabled() -> bool {
+    NEIGHBOR_SCAN_STRIDE
+        .get_or_init(|| {
+            std::env::var("VECTORDB_NEIGHBOR_SCAN_STRIDE")
+                .ok()
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn log_neighbor_scan_state(expansion_mult: usize, expansion_cap: Option<usize>) {
+    NEIGHBOR_SCAN_STATE_LOGGED.get_or_init(|| {
+        let cap = neighbor_scan_cap(0);
+        let rotate = neighbor_scan_rotate_enabled();
+        let stride = neighbor_scan_stride_enabled();
+        log::info!(
+            target: "vector::hnsw",
+            "Neighbor scan cap L0={} rotation={} rotation_stride={} expansion_mult={} expansion_cap={}",
+            cap,
+            if rotate { "on" } else { "off" },
+            if stride { "enabled" } else { "off" },
+            expansion_mult,
+            expansion_cap.map(|v| v.to_string()).unwrap_or_else(|| "none".into())
+        );
+    });
 }
 
 pub(crate) fn diversity_alpha_for_level(level: usize) -> f32 {

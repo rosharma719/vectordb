@@ -1,3 +1,5 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::time::Instant;
 
@@ -6,21 +8,16 @@ use serde::Serialize;
 use crate::utils::errors::DBError;
 use crate::utils::types::{DistanceMetric, Vector};
 
+use super::HNSWIndex;
 use super::config::{
-    disable_early_exit,
-    early_exit_patience,
-    log_unfiltered_enabled,
-    neighbor_scan_cap,
-    next_search_trace_seq,
-    search_expansion_cap_override,
-    search_expansion_multiplier,
-    search_trace_logger,
-    trace_every,
+    disable_early_exit, early_exit_patience, log_neighbor_scan_state, log_unfiltered_enabled,
+    neighbor_scan_cap, neighbor_scan_rotate_enabled, neighbor_scan_stride_enabled,
+    next_search_trace_seq, search_expansion_cap_override, search_expansion_multiplier,
+    search_trace_logger, trace_every,
 };
 use super::scratch::SEARCH_SCRATCH;
-use super::stats::{SearchLayerStats, SearchStats, UnfilteredSample, UNFILTERED_SEARCH_AGG};
+use super::stats::{SearchLayerStats, SearchStats, UNFILTERED_SEARCH_AGG, UnfilteredSample};
 use super::types::{NodeCandidate, NodeResult, ScoredPoint};
-use super::HNSWIndex;
 
 #[derive(Serialize)]
 struct SearchTraceEntry {
@@ -65,6 +62,35 @@ fn log_search_trace(entry: &SearchTraceEntry) {
             let _ = guard.flush();
         }
     }
+}
+
+fn hash_query(query: &Vector) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    query.len().hash(&mut hasher);
+    for &value in query {
+        hasher.write_u32(value.to_bits());
+    }
+    hasher.finish()
+}
+
+fn stride_for_degree(degree: usize, seed: u64) -> usize {
+    if degree <= 1 {
+        return 1;
+    }
+    let mut stride = (((seed >> 32) as usize) % (degree - 1)) + 1;
+    while gcd(stride, degree) != 1 {
+        stride = (stride % (degree - 1)) + 1;
+    }
+    stride
+}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let temp = b;
+        b = a % b;
+        a = temp;
+    }
+    a
 }
 
 impl HNSWIndex {
@@ -113,6 +139,14 @@ impl HNSWIndex {
         self.validate_dim(query)?;
 
         let mut trace = trace;
+        let query_signature = hash_query(query);
+        let rotate_neighbor_scans = neighbor_scan_rotate_enabled();
+        let stride_enabled = neighbor_scan_stride_enabled();
+        let expansion_mult = search_expansion_multiplier();
+        let expansion_cap_override = search_expansion_cap_override();
+        let expansion_cap_value =
+            expansion_cap_override.or_else(|| Some(ef.saturating_mul(expansion_mult).max(ef)));
+        log_neighbor_scan_state(expansion_mult, expansion_cap_value);
         SEARCH_SCRATCH.with(|cell| {
             let mut scratch = cell.borrow_mut();
             scratch.next_epoch(self.vectors.len());
@@ -121,8 +155,7 @@ impl HNSWIndex {
 
             let mut visited_count = 0usize;
             let mut expanded = 0usize;
-            let expansion_cap = search_expansion_cap_override()
-                .or_else(|| Some(ef.saturating_mul(search_expansion_multiplier()).max(ef)));
+            let expansion_cap = expansion_cap_value;
 
             let start_entry = if self.deleted.get(entry).copied().unwrap_or(false) {
                 self.deleted
@@ -154,7 +187,11 @@ impl HNSWIndex {
 
             let mut worst_score = scratch.result_set.peek().unwrap().0.sort_key;
             let allow_early_exit = self.metric != DistanceMetric::Dot && !disable_early_exit();
-            let patience_limit = if allow_early_exit { early_exit_patience() } else { 0 };
+            let patience_limit = if allow_early_exit {
+                early_exit_patience()
+            } else {
+                0
+            };
             let mut no_improve_streak = 0usize;
             let mut stop_reason = "queue_empty";
 
@@ -174,58 +211,82 @@ impl HNSWIndex {
                 let current = scratch.candidate_queue.pop().unwrap();
                 expanded += 1;
                 if let Some(neighbors) = self.layers.get(level).and_then(|l| l.get(current.idx)) {
-                    let scan_cap = neighbor_scan_cap(level);
-                    let mut scanned_neighbors = 0usize;
                     const BATCH: usize = 16;
                     let mut batch = [0usize; BATCH];
                     let mut batch_len = 0usize;
+                    let degree = neighbors.len();
+                    if degree > 0 {
+                        let cap = neighbor_scan_cap(level);
+                        let window = degree.min(cap);
+                        if window > 0 {
+                            let need_seed = (rotate_neighbor_scans && window < degree)
+                                || (stride_enabled && window < degree);
+                            let seed = if need_seed {
+                                query_signature
+                                    .wrapping_add(current.idx as u64)
+                                    .wrapping_mul(0x9e3779b97f4a7c15)
+                            } else {
+                                0
+                            };
+                            let start = if rotate_neighbor_scans && window < degree {
+                                (seed % degree as u64) as usize
+                            } else {
+                                0
+                            };
+                            let stride = if stride_enabled && window < degree {
+                                stride_for_degree(degree, seed)
+                            } else {
+                                1
+                            };
+                            for i in 0..window {
+                                let neighbor = neighbors[(start + i * stride) % degree];
+                                if self.deleted.get(neighbor).copied().unwrap_or(false)
+                                    || !scratch.mark_visited(neighbor)
+                                {
+                                    continue;
+                                }
+                                visited_count += 1;
 
-                    for &neighbor in neighbors {
-                        if scanned_neighbors >= scan_cap {
-                            break;
-                        }
-                        scanned_neighbors += 1;
-                        if self.deleted.get(neighbor).copied().unwrap_or(false) || !scratch.mark_visited(neighbor) {
-                            continue;
-                        }
-                        visited_count += 1;
+                                batch[batch_len] = neighbor;
+                                batch_len += 1;
+                                if batch_len == BATCH {
+                                    for i in 0..batch_len {
+                                        let idx = batch[i];
+                                        let raw = self.fast_score(query, &self.vectors[idx]);
+                                        let score_val = if normalize {
+                                            self.normalize_score(raw)
+                                        } else {
+                                            raw
+                                        };
 
-                        batch[batch_len] = neighbor;
-                        batch_len += 1;
-                        if batch_len == BATCH {
-                            for i in 0..batch_len {
-                                let idx = batch[i];
-                                let raw = self.fast_score(query, &self.vectors[idx]);
-                                let score_val = if normalize {
-                                    self.normalize_score(raw)
-                                } else {
-                                    raw
-                                };
+                                        let push_candidate = self.metric == DistanceMetric::Dot
+                                            || scratch.result_set.len() < ef
+                                            || score_val < worst_score;
 
-                                let push_candidate = self.metric == DistanceMetric::Dot
-                                    || scratch.result_set.len() < ef
-                                    || score_val < worst_score;
+                                        if push_candidate {
+                                            let sp = NodeCandidate {
+                                                idx,
+                                                raw_score: raw,
+                                                sort_key: score_val,
+                                            };
+                                            scratch.candidate_queue.push(sp.clone());
 
-                                if push_candidate {
-                                    let sp = NodeCandidate {
-                                        idx,
-                                        raw_score: raw,
-                                        sort_key: score_val,
-                                    };
-                                    scratch.candidate_queue.push(sp.clone());
-
-                                    if scratch.result_set.len() < ef || score_val < worst_score {
-                                        scratch.result_set.push(NodeResult(sp));
-                                        if scratch.result_set.len() > ef {
-                                            scratch.result_set.pop();
-                                        }
-                                        if let Some(rp) = scratch.result_set.peek() {
-                                            worst_score = rp.0.sort_key;
+                                            if scratch.result_set.len() < ef
+                                                || score_val < worst_score
+                                            {
+                                                scratch.result_set.push(NodeResult(sp));
+                                                if scratch.result_set.len() > ef {
+                                                    scratch.result_set.pop();
+                                                }
+                                                if let Some(rp) = scratch.result_set.peek() {
+                                                    worst_score = rp.0.sort_key;
+                                                }
+                                            }
                                         }
                                     }
+                                    batch_len = 0;
                                 }
                             }
-                            batch_len = 0;
                         }
                     }
                     if batch_len > 0 {
@@ -356,7 +417,13 @@ impl HNSWIndex {
         top_k: usize,
     ) -> Result<(Vec<ScoredPoint>, SearchStats), DBError> {
         if self.entry_point.is_none() {
-            return Ok((vec![], SearchStats { ef_search: top_k, ..SearchStats::default() }));
+            return Ok((
+                vec![],
+                SearchStats {
+                    ef_search: top_k,
+                    ..SearchStats::default()
+                },
+            ));
         }
         self.validate_dim(query)?;
 
@@ -381,8 +448,8 @@ impl HNSWIndex {
 
         let deleted_count = self.deleted.iter().filter(|d| **d).count();
         let collection_size = self.vectors.len().saturating_sub(deleted_count);
-        let exact_scan_possible = self.exact_fallback_enabled
-            && collection_size <= self.exact_fallback_threshold;
+        let exact_scan_possible =
+            self.exact_fallback_enabled && collection_size <= self.exact_fallback_threshold;
         if let Some(ctx) = trace_ctx.as_mut() {
             let entry = SearchTraceEntry {
                 search_id: ctx.id,
@@ -543,8 +610,8 @@ impl HNSWIndex {
 
         let deleted_count = self.deleted.iter().filter(|d| **d).count();
         let collection_size = self.vectors.len().saturating_sub(deleted_count);
-        let exact_scan_possible = self.exact_fallback_enabled
-            && collection_size <= self.exact_fallback_threshold;
+        let exact_scan_possible =
+            self.exact_fallback_enabled && collection_size <= self.exact_fallback_threshold;
         if let Some(ctx) = trace_ctx.as_mut() {
             let entry = SearchTraceEntry {
                 search_id: ctx.id,
@@ -628,7 +695,11 @@ impl HNSWIndex {
             0,
             ef_search,
             normalize_score_flag,
-            if log_enabled { Some(&mut layer_stats) } else { None },
+            if log_enabled {
+                Some(&mut layer_stats)
+            } else {
+                None
+            },
             trace_ctx.as_mut(),
         )?;
         results.sort_by(|a, b| {

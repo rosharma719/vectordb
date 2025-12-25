@@ -11,22 +11,17 @@ use serde_json::from_slice;
 
 mod common;
 use common::{
-    QueryLogWriter,
-    QueryStatsAgg,
-    SearchConfig,
-    SnapshotConfig,
-    TestLogConfig,
-    env_usize_first,
-    log_peak_rss,
-    summarize_f64,
-    summarize_usize,
-    MissStats,
+    MissStats, QueryLogWriter, QueryStatsAgg, SearchConfig, SnapshotConfig, TestLogConfig,
+    env_usize_first, log_peak_rss, summarize_f64, summarize_usize,
 };
 
 use vectordb::segment::segment::Segment;
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::vector::hnsw::HNSWIndex;
-use vectordb::vector::hnsw::config::search_expansion_multiplier;
+use vectordb::vector::hnsw::config::{
+    neighbor_scan_cap, neighbor_scan_rotate_enabled, neighbor_scan_stride_enabled,
+    search_expansion_multiplier,
+};
 
 fn load_vectors(path: &Path) -> Vec<Vector> {
     let arr: Array2<f32> = read_npy(path).expect("failed to read .npy");
@@ -48,9 +43,9 @@ fn build_nytimes_segment(segment: &mut Segment, base: &[Vector], logs: &TestLogC
     for (i, v) in base.iter().enumerate() {
         let dataset_id = i as u64;
         segment.insert_with_id(dataset_id, v.clone(), None).unwrap();
-        if logs.level.allows_debug() && i != 0 && i % 1000 == 0 {
+        if logs.insert_progress_every > 0 && i != 0 && i % logs.insert_progress_every == 0 {
             let now = Instant::now();
-            logs.log_debug(&format!(
+            logs.log_info(&format!(
                 "Inserted {} vectors (+{:?}, chunk={:?})",
                 i,
                 now - start_insert,
@@ -109,12 +104,25 @@ fn log_search_caps(logs: &TestLogConfig) {
         .ok()
         .and_then(|v| v.replace('_', "").parse::<usize>().ok())
         .unwrap_or(0);
+    let cap = neighbor_scan_cap(0);
+    let rotation = neighbor_scan_rotate_enabled();
+    let stride = neighbor_scan_stride_enabled();
     let cap_display = expansion_cap
         .map(|v| v.to_string())
         .unwrap_or_else(|| "none".to_string());
     logs.log_info(&format!(
-        "⚙️  Query-time knobs: early_exit_disabled={} early_exit_patience={} expansion_mult={} expansion_cap={}",
-        disable_early_exit, patience, expansion_mult, cap_display
+        "⚙️  Query-time knobs: early_exit_disabled={} early_exit_patience={} expansion_mult={} expansion_cap={} neighbor_scan_cap_level0={} rotation={} rotation_stride={}",
+        disable_early_exit,
+        patience,
+        expansion_mult,
+        cap_display,
+        if cap == usize::MAX {
+            "none".to_string()
+        } else {
+            cap.to_string()
+        },
+        if rotation { "on" } else { "off" },
+        if stride { "enabled" } else { "off" },
     ));
 }
 
@@ -171,10 +179,8 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
     let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
         .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
     let search = SearchConfig::from_env("NYT", &[32, 64, 128, 256, 512], 1000);
-    let mut snapshot = SnapshotConfig::from_env(
-        "NYT",
-        "data/nytimes-256-angular/index_m16_m0_32_efc100.bin",
-    );
+    let mut snapshot =
+        SnapshotConfig::from_env("NYT", "data/nytimes-256-angular/index_m16_m0_32_efc100.bin");
     if matches!(mode, TestMode::BuildOnly) {
         snapshot.use_snapshot = false;
         snapshot.allow_build = true;
@@ -206,7 +212,11 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
     }
     let queries = load_vectors(&queries_path);
     let ground_truth = load_ground_truth(&truth_path);
-    assert_eq!(ground_truth.len(), queries.len(), "ground truth length must match queries");
+    assert_eq!(
+        ground_truth.len(),
+        queries.len(),
+        "ground truth length must match queries"
+    );
     logs.log_info(&format!("⏱️  Data loaded in {:?}", t0.elapsed()));
 
     let mut segment = if snapshot.use_snapshot {
@@ -218,11 +228,18 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
                 let metric = DistanceMetric::Cosine;
                 let m = env_usize_first(&["VECTORDB_M", "VECTORDB_NYT_M"]).unwrap_or(16);
                 let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_NYT_M0"]).unwrap_or(m);
-                let max_level = env_usize_first(&["VECTORDB_MAX_LEVEL", "VECTORDB_NYT_MAX_LEVEL"]).unwrap_or(16);
+                let max_level = env_usize_first(&["VECTORDB_MAX_LEVEL", "VECTORDB_NYT_MAX_LEVEL"])
+                    .unwrap_or(16);
                 let mut segment = Segment::new(HNSWIndex::new(
                     metric,
                     m,
-                    search.ef_values.iter().copied().max().unwrap_or(1).max(top_k),
+                    search
+                        .ef_values
+                        .iter()
+                        .copied()
+                        .max()
+                        .unwrap_or(1)
+                        .max(top_k),
                     max_level,
                     dim,
                 ));
@@ -260,11 +277,18 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
         let metric = DistanceMetric::Cosine;
         let m = env_usize_first(&["VECTORDB_M", "VECTORDB_NYT_M"]).unwrap_or(16);
         let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_NYT_M0"]).unwrap_or(m);
-        let max_level = env_usize_first(&["VECTORDB_MAX_LEVEL", "VECTORDB_NYT_MAX_LEVEL"]).unwrap_or(16);
+        let max_level =
+            env_usize_first(&["VECTORDB_MAX_LEVEL", "VECTORDB_NYT_MAX_LEVEL"]).unwrap_or(16);
         let mut segment = Segment::new(HNSWIndex::new(
             metric,
             m,
-            search.ef_values.iter().copied().max().unwrap_or(1).max(top_k),
+            search
+                .ef_values
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(1)
+                .max(top_k),
             max_level,
             dim,
         ));
@@ -311,8 +335,16 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
             let recall = query_hits as f64 / truth_set.len().max(1) as f64;
             let misses = truth_set.len().saturating_sub(query_hits);
             let elapsed_ms = q_start.elapsed().as_secs_f64() * 1000.0;
-            stats.record(elapsed_ms, Some(qstats.visited), Some(qstats.expanded), recall);
-            for miss_id in truth_set.iter().filter(|id| !approx.iter().any(|r| r.id == **id)) {
+            stats.record(
+                elapsed_ms,
+                Some(qstats.visited),
+                Some(qstats.expanded),
+                recall,
+            );
+            for miss_id in truth_set
+                .iter()
+                .filter(|id| !approx.iter().any(|r| r.id == **id))
+            {
                 if let Some(level) = segment.hnsw().point_level(*miss_id) {
                     let degree = segment.hnsw().point_degree(*miss_id, 0);
                     miss_stats.record(level, degree);
@@ -333,7 +365,9 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
                     misses,
                 },
             );
-            if logs.level.allows_debug() && ((qi + 1) % logs.progress_every == 0 || qi + 1 == num_queries) {
+            if logs.level.allows_debug()
+                && ((qi + 1) % logs.progress_every == 0 || qi + 1 == num_queries)
+            {
                 let partial_recall = hits as f64 / total_targets.max(1) as f64;
                 logs.log_debug(&format!(
                     "  progress: query {}/{} (ef_search={}) cumulative recall={:.3}",
@@ -349,13 +383,7 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
         let recall = hits as f64 / total_targets.max(1) as f64;
         logs.log_info(&format!(
             "🎯 [ef_search={}] recall@{}: {:.3} over {} queries (hits {}/{}) | avg {:.3} ms/query",
-            ef_search,
-            top_k,
-            recall,
-            num_queries,
-            hits,
-            total_targets,
-            avg_ms
+            ef_search, top_k, recall, num_queries, hits, total_targets, avg_ms
         ));
         let latency = summarize_f64(&stats.elapsed_ms);
         let visited = summarize_usize(&stats.visited);
@@ -408,10 +436,8 @@ fn run_nytimes_recall_only() {
     let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
         .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
     let search = SearchConfig::from_env("NYT", &[32, 64, 128, 256, 512], 1000);
-    let snapshot = SnapshotConfig::from_env(
-        "NYT",
-        "data/nytimes-256-angular/index_m16_m0_32_efc100.bin",
-    );
+    let snapshot =
+        SnapshotConfig::from_env("NYT", "data/nytimes-256-angular/index_m16_m0_32_efc100.bin");
     let top_k = search.top_k.unwrap_or(20);
 
     let queries_path = Path::new(&data_dir).join("queries.npy");
@@ -422,8 +448,15 @@ fn run_nytimes_recall_only() {
 
     let queries = load_vectors(&queries_path);
     let ground_truth = load_ground_truth(&truth_path);
-    assert_eq!(ground_truth.len(), queries.len(), "ground truth length must match queries");
-    logs.log_info(&format!("⏱️  Queries and truth loaded in {:?}", t0.elapsed()));
+    assert_eq!(
+        ground_truth.len(),
+        queries.len(),
+        "ground truth length must match queries"
+    );
+    logs.log_info(&format!(
+        "⏱️  Queries and truth loaded in {:?}",
+        t0.elapsed()
+    ));
     log_peak_rss("nytimes_qps_loaded_queries");
     log_peak_rss("nytimes_loaded_queries");
 
@@ -506,8 +539,16 @@ fn run_nytimes_recall_only() {
             let recall = query_hits as f64 / truth_set.len().max(1) as f64;
             let misses = truth_set.len().saturating_sub(query_hits);
             let elapsed_ms = q_start.elapsed().as_secs_f64() * 1000.0;
-            stats.record(elapsed_ms, Some(qstats.visited), Some(qstats.expanded), recall);
-            for miss_id in truth_set.iter().filter(|id| !approx.iter().any(|r| r.id == **id)) {
+            stats.record(
+                elapsed_ms,
+                Some(qstats.visited),
+                Some(qstats.expanded),
+                recall,
+            );
+            for miss_id in truth_set
+                .iter()
+                .filter(|id| !approx.iter().any(|r| r.id == **id))
+            {
                 if let Some(level) = segment.hnsw().point_level(*miss_id) {
                     let degree = segment.hnsw().point_degree(*miss_id, 0);
                     miss_stats.record(level, degree);
@@ -528,7 +569,9 @@ fn run_nytimes_recall_only() {
                     misses,
                 },
             );
-            if logs.level.allows_debug() && ((qi + 1) % logs.progress_every == 0 || qi + 1 == num_queries) {
+            if logs.level.allows_debug()
+                && ((qi + 1) % logs.progress_every == 0 || qi + 1 == num_queries)
+            {
                 let partial_recall = hits as f64 / total_targets.max(1) as f64;
                 logs.log_debug(&format!(
                     "  progress: query {}/{} (ef_search={}) cumulative recall={:.3}",
@@ -544,13 +587,7 @@ fn run_nytimes_recall_only() {
         let recall = hits as f64 / total_targets.max(1) as f64;
         logs.log_info(&format!(
             "🎯 [ef_search={}] recall@{}: {:.3} over {} queries (hits {}/{}) | avg {:.3} ms/query",
-            ef_search,
-            top_k,
-            recall,
-            num_queries,
-            hits,
-            total_targets,
-            avg_ms
+            ef_search, top_k, recall, num_queries, hits, total_targets, avg_ms
         ));
         let latency = summarize_f64(&stats.elapsed_ms);
         let visited = summarize_usize(&stats.visited);
@@ -603,10 +640,8 @@ fn run_nytimes_qps_latency_curve() {
     let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
         .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
     let search = SearchConfig::from_env("NYT", &[32, 64, 128, 256, 512], 1000);
-    let snapshot = SnapshotConfig::from_env(
-        "NYT",
-        "data/nytimes-256-angular/index_m16_m0_32_efc100.bin",
-    );
+    let snapshot =
+        SnapshotConfig::from_env("NYT", "data/nytimes-256-angular/index_m16_m0_32_efc100.bin");
     let top_k = search.top_k.unwrap_or(20);
 
     let queries_path = Path::new(&data_dir).join("queries.npy");
@@ -617,8 +652,15 @@ fn run_nytimes_qps_latency_curve() {
 
     let queries = load_vectors(&queries_path);
     let ground_truth = load_ground_truth(&truth_path);
-    assert_eq!(ground_truth.len(), queries.len(), "ground truth length must match queries");
-    logs.log_info(&format!("⏱️  Queries and truth loaded in {:?}", t0.elapsed()));
+    assert_eq!(
+        ground_truth.len(),
+        queries.len(),
+        "ground truth length must match queries"
+    );
+    logs.log_info(&format!(
+        "⏱️  Queries and truth loaded in {:?}",
+        t0.elapsed()
+    ));
 
     if !snapshot.use_snapshot {
         panic!("nytimes_qps_latency_curve requires VECTORDB_USE_SNAPSHOT=1");
@@ -682,17 +724,18 @@ fn run_nytimes_qps_latency_curve() {
             let (approx, qstats) = segment.search_with_stats(q, top_k).unwrap();
             let truth = &ground_truth[qi];
             let truth_k = truth.len().min(top_k);
-            let truth_set: HashSet<_> = truth
-                .iter()
-                .take(truth_k)
-                .map(|&id| id as u64)
-                .collect();
+            let truth_set: HashSet<_> = truth.iter().take(truth_k).map(|&id| id as u64).collect();
             total_targets += truth_set.len();
             let query_hits = approx.iter().filter(|r| truth_set.contains(&r.id)).count();
             hits += query_hits;
             let recall = query_hits as f64 / truth_set.len().max(1) as f64;
             let elapsed_ms = q_start.elapsed().as_secs_f64() * 1000.0;
-            stats.record(elapsed_ms, Some(qstats.visited), Some(qstats.expanded), recall);
+            stats.record(
+                elapsed_ms,
+                Some(qstats.visited),
+                Some(qstats.expanded),
+                recall,
+            );
             query_logger.write(
                 qi,
                 &QueryLogEntry {

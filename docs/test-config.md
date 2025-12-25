@@ -19,10 +19,14 @@ Snapshot defaults (shared):
   - `VECTORDB_DISABLE_FILTER_SEEDS` (set to `1` to disable seeding; default seeds enabled)
   - `VECTORDB_FILTER_SEARCH_LOG` path to JSONL for per-query traversal stats
   - `VECTORDB_FILTER_PASSING_BUDGET` / `VECTORDB_FILTER_FAILING_BUDGET` (override routing budgets; defaults derive from M: passing≈max(8, 2*M), failing=1)
+  - `VECTORDB_NEIGHBOR_SCAN_CAP_LEVEL0` (per-node window, default 64; 0 disables)
+  - `VECTORDB_NEIGHBOR_SCAN_ROTATE` (1 to shift the window start, default 1)
+  - `VECTORDB_NEIGHBOR_SCAN_STRIDE` (1 to stride through the neighbor list, default 0/off)
 
 - Logging/analysis:
   - `VECTORDB_TEST_LOG` -> `quiet|info|debug` (default `info`)
   - `VECTORDB_PROGRESS_EVERY` -> progress interval for debug logs (default `100`)
+  - `VECTORDB_INSERT_PROGRESS_EVERY` -> print insert progress every N vectors during builds (default `1000`; set to `0` to disable)
   - `VECTORDB_QUERY_LOG` -> JSONL path for per-query stats
   - `VECTORDB_QUERY_LOG_EVERY` -> sample interval for per-query stats (default `1`)
   - `VECTORDB_SEARCH_TRACE_LOG` -> JSONL path for unfiltered traversal trace
