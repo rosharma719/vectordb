@@ -28,7 +28,7 @@ impl SnapshotConfig {
             interval: Duration::from_secs(60),
             max_ops: 10_000,
             check_every: Duration::from_secs(1),
-            retain_last: 0,
+            retain_last: 2,
         }
     }
 }

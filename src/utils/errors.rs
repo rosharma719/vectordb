@@ -33,4 +33,7 @@ pub enum DBError {
 
     #[error("Search failed: {0}")]
     SearchError(String),
+
+    #[error("Memory cap exceeded: {0}")]
+    MemoryCapExceeded(String),
 }

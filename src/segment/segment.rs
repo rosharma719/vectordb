@@ -4,6 +4,7 @@ use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::thread_local;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,7 @@ pub struct Segment {
     op_count: u64,
     wal: Option<WalWriter>,
     rebuilding: AtomicBool,
+    memory_frozen: bool,
 }
 
 #[cfg(test)]
@@ -63,6 +65,9 @@ const SEGMENT_SNAPSHOT_VERSION: u32 = 3;
 const SEGMENT_SNAPSHOT_FOOTER: [u8; 4] = *b"VDBF";
 const SEGMENT_SNAPSHOT_META_MAGIC: [u8; 4] = *b"VDBM";
 const SEGMENT_SNAPSHOT_META_VERSION: u32 = 1;
+
+static MAX_RSS_BYTES: OnceLock<Option<u64>> = OnceLock::new();
+static OOM_SNAPSHOT_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SnapshotMetadata {
@@ -160,6 +165,7 @@ impl Segment {
             op_count: 0,
             wal: None,
             rebuilding: AtomicBool::new(false),
+            memory_frozen: false,
         };
         if let Err(err) = segment.enable_wal_from_env_default_dir(None) {
             log::warn!(target: "segment::wal", "failed to enable WAL from env: {}", err);
@@ -190,6 +196,10 @@ impl Segment {
         payload: Option<Payload>,
         write_wal: bool,
     ) -> Result<PointId, DBError> {
+        if write_wal {
+            self.reject_if_frozen()?;
+            self.enforce_memory_cap()?;
+        }
         let log_timing = Self::log_insert_timing();
         let total_start = if log_timing { Some(Instant::now()) } else { None };
         let mut last = total_start;
@@ -300,6 +310,9 @@ impl Segment {
     }
 
     fn delete_internal(&mut self, point_id: PointId, write_wal: bool) -> Result<(), DBError> {
+        if write_wal {
+            self.reject_if_frozen()?;
+        }
         // If the point is already marked as deleted OR is no longer in the index,
         // treat it as already deleted.
         if self.deleted.contains(&point_id) || !self.hnsw.contains(&point_id) {
@@ -353,6 +366,9 @@ impl Segment {
         payload: Payload,
         write_wal: bool,
     ) -> Result<(), DBError> {
+        if write_wal {
+            self.reject_if_frozen()?;
+        }
         if self.deleted.contains(&point_id) || !self.hnsw.contains(&point_id) {
             return Err(DBError::NotFound(point_id));
         }
@@ -548,6 +564,65 @@ impl Segment {
         &self.payload_index
     }
 
+    fn reject_if_frozen(&self) -> Result<(), DBError> {
+        if self.memory_frozen {
+            return Err(DBError::MemoryCapExceeded(
+                "segment unloaded after memory cap exceeded".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn enforce_memory_cap(&mut self) -> Result<(), DBError> {
+        let Some(cap_bytes) = max_rss_bytes() else { return Ok(()); };
+        let Some(rss_bytes) = current_rss_bytes() else { return Ok(()); };
+        if rss_bytes <= cap_bytes {
+            return Ok(());
+        }
+        let snapshot_path = oom_snapshot_path();
+        if let Some(path) = snapshot_path.as_ref() {
+            let snapshot_result = if self.wal.is_some() {
+                self.save_to_path_and_checkpoint(path)
+            } else {
+                self.save_to_path(path)
+            };
+            if let Err(err) = snapshot_result {
+                log::warn!(
+                    target: "segment::memory",
+                    "memory cap snapshot failed ({}): {}",
+                    path.display(),
+                    err
+                );
+            }
+        } else {
+            log::warn!(
+                target: "segment::memory",
+                "memory cap exceeded but VECTORDB_OOM_SNAPSHOT_PATH is not set"
+            );
+        }
+        self.unload_after_memory_cap();
+        Err(DBError::MemoryCapExceeded(format!(
+            "rss_bytes={} cap_bytes={}",
+            rss_bytes, cap_bytes
+        )))
+    }
+
+    fn unload_after_memory_cap(&mut self) {
+        let cfg = self.hnsw.config_summary();
+        let mut hnsw = HNSWIndex::new(cfg.metric, cfg.m, cfg.ef, cfg.max_level_cap, cfg.dim);
+        hnsw.set_m0(cfg.m0);
+        hnsw.set_ef_construct(cfg.ef_construct);
+        hnsw.set_exact_fallback_enabled(cfg.exact_fallback_enabled);
+        hnsw.set_exact_fallback_threshold(cfg.exact_fallback_threshold);
+        self.hnsw = hnsw;
+        self.payload_index = PayloadIndex::new();
+        self.payloads.clear();
+        self.deleted.clear();
+        self.op_count = 0;
+        self.wal = None;
+        self.memory_frozen = true;
+    }
+
     /// Toggle filter-aware edge building via env var. Defaults to false.
     fn filter_edges_enabled() -> bool {
         env::var("VECTORDB_FILTER_EDGES")
@@ -668,6 +743,7 @@ impl Segment {
             op_count: 0,
             wal: None,
             rebuilding: AtomicBool::new(false),
+            memory_frozen: false,
         };
 
         let wal_path = wal_path.unwrap_or_else(|| Self::default_wal_path(path.as_ref()));
@@ -926,4 +1002,50 @@ impl Segment {
         }
         keys_with_rank.into_iter().map(|(_, k)| k).collect()
     }
+}
+
+fn max_rss_bytes() -> Option<u64> {
+    *MAX_RSS_BYTES.get_or_init(|| {
+        env::var("VECTORDB_MAX_RSS_MB")
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .map(|mb| mb.saturating_mul(1024).saturating_mul(1024))
+    })
+}
+
+fn oom_snapshot_path() -> Option<PathBuf> {
+    OOM_SNAPSHOT_PATH
+        .get_or_init(|| {
+            env::var("VECTORDB_OOM_SNAPSHOT_PATH")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
+        .clone()
+}
+
+#[cfg(unix)]
+fn current_rss_bytes() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let res = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if res != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+    let raw = usage.ru_maxrss as u64;
+    #[cfg(target_os = "macos")]
+    {
+        Some(raw)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(raw.saturating_mul(1024))
+    }
+}
+
+#[cfg(not(unix))]
+fn current_rss_bytes() -> Option<u64> {
+    None
 }

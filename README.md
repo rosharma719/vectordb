@@ -136,7 +136,8 @@ Notes:
 - Auto-replay can be disabled with `VECTORDB_WAL_AUTO_REPLAY=0`.
 - Use `save_to_path_and_checkpoint` to save a snapshot and truncate the WAL after a successful write.
 - You can auto-enable WAL by setting `VECTORDB_WAL_PATH` or `VECTORDB_WAL_DIR` (uses `<dir>/segment.wal`).
-- Fsync tuning: `VECTORDB_WAL_FSYNC` (0/1), `VECTORDB_WAL_FSYNC_EVERY` (N ops), `VECTORDB_WAL_FSYNC_MS` (time-based).
+- Fsync tuning: `VECTORDB_WAL_FSYNC` (0/1), `VECTORDB_WAL_FSYNC_EVERY` (N ops, default 100), `VECTORDB_WAL_FSYNC_MS` (time-based, default 100ms).
+- Memory cap: set `VECTORDB_MAX_RSS_MB` and `VECTORDB_OOM_SNAPSHOT_PATH` to snapshot+unload and reject inserts when RSS exceeds the cap.
 
 ### Deletion purge
 By default, deletions leave tombstones in place. To enable automatic purge/rebuild after a deletion threshold:

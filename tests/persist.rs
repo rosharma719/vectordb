@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::fs;
+use std::process::Command;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use std::path::PathBuf;
 
 use rand::Rng;
 
@@ -257,6 +258,7 @@ fn background_snapshot_writes_file() -> Result<(), DBError> {
     config.interval = Duration::from_millis(50);
     config.max_ops = 1;
     config.check_every = Duration::from_millis(10);
+    config.retain_last = 0;
 
     let handle = start_background_snapshots(segment.clone(), config);
 
@@ -294,6 +296,7 @@ fn background_snapshot_handles_concurrent_writes() -> Result<(), DBError> {
     config.interval = Duration::from_millis(100);
     config.max_ops = 25;
     config.check_every = Duration::from_millis(10);
+    config.retain_last = 0;
     let handle = start_background_snapshots(segment.clone(), config);
 
     let writer = {
@@ -339,6 +342,7 @@ fn background_snapshot_updates_over_time() -> Result<(), DBError> {
     config.interval = Duration::from_millis(200);
     config.max_ops = 5;
     config.check_every = Duration::from_millis(10);
+    config.retain_last = 0;
     let handle = start_background_snapshots(segment.clone(), config);
 
     {
@@ -394,6 +398,7 @@ fn background_snapshot_stop_is_clean() -> Result<(), DBError> {
     config.interval = Duration::from_millis(50);
     config.max_ops = 1;
     config.check_every = Duration::from_millis(10);
+    config.retain_last = 0;
     let handle = start_background_snapshots(segment.clone(), config);
 
     {
@@ -428,6 +433,7 @@ fn background_snapshot_respects_deletes() -> Result<(), DBError> {
     config.interval = Duration::from_millis(100);
     config.max_ops = 1;
     config.check_every = Duration::from_millis(10);
+    config.retain_last = 0;
     let handle = start_background_snapshots(segment.clone(), config);
 
     {
@@ -572,6 +578,7 @@ fn wal_checkpoint_truncates_log() -> Result<(), DBError> {
     let mut seg2 = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2));
     seg2.enable_wal(&wal_path)?;
     seg2.insert_with_id(2, vecf(&[2.0, 0.0]), None)?;
+    drop(seg2);
 
     let restored = Segment::load_from_path(&snapshot_path)?;
     assert!(restored.get_vector(1).is_some());
@@ -632,6 +639,81 @@ fn wal_corruption_is_detected() -> Result<(), DBError> {
     let _ = fs::remove_file(snapshot_path);
     let _ = fs::remove_file(wal_path);
     Ok(())
+}
+
+#[test]
+fn wal_replay_tolerates_crash_mid_write() -> Result<(), DBError> {
+    let snapshot_path = tmp_path("segment_wal_crash");
+    let wal_path = Segment::wal_path_for_snapshot(&snapshot_path);
+    let ready_path = snapshot_path.with_extension("ready");
+
+    let mut seg = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 2));
+    seg.insert_with_id(1, vecf(&[1.0, 0.0]), None)?;
+    seg.save_to_path(&snapshot_path)?;
+    drop(seg);
+
+    let _ = fs::remove_file(&wal_path);
+    let _ = fs::remove_file(&ready_path);
+
+    let mut child = Command::new(std::env::current_exe()?)
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("wal_crash_child_writer")
+        .env("VECTORDB_WAL_FSYNC", "1")
+        .env("VECTORDB_WAL_FSYNC_EVERY", "1")
+        .env("VECTORDB_WAL_FSYNC_MS", "0")
+        .env("VECTORDB_WAL_CRASH_SNAPSHOT", snapshot_path.to_string_lossy().as_ref())
+        .env("VECTORDB_WAL_CRASH_WAL", wal_path.to_string_lossy().as_ref())
+        .env("VECTORDB_WAL_CRASH_READY", ready_path.to_string_lossy().as_ref())
+        .spawn()
+        .expect("failed to spawn wal_crash_writer");
+
+    let start = Instant::now();
+    while !ready_path.exists() && start.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready_path.exists(), "crash writer never became ready");
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let restored = Segment::load_from_path(&snapshot_path)?;
+    assert!(restored.get_vector(9_999_999).is_some());
+
+    let _ = fs::remove_file(snapshot_path);
+    let _ = fs::remove_file(wal_path);
+    let _ = fs::remove_file(ready_path);
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn wal_crash_child_writer() -> Result<(), DBError> {
+    let snapshot_path = std::env::var("VECTORDB_WAL_CRASH_SNAPSHOT")
+        .map(PathBuf::from)
+        .expect("VECTORDB_WAL_CRASH_SNAPSHOT not set");
+    let wal_path = std::env::var("VECTORDB_WAL_CRASH_WAL")
+        .map(PathBuf::from)
+        .expect("VECTORDB_WAL_CRASH_WAL not set");
+    let ready_path = std::env::var("VECTORDB_WAL_CRASH_READY")
+        .map(PathBuf::from)
+        .expect("VECTORDB_WAL_CRASH_READY not set");
+
+    let mut segment = Segment::load_from_path(&snapshot_path)?;
+    segment.enable_wal(&wal_path)?;
+
+    let sentinel_id = 9_999_999u64;
+    segment.insert_with_id(sentinel_id, vecf(&[1.0, 2.0]), None)?;
+    let _ = fs::write(&ready_path, b"ready\n");
+
+    let mut id = sentinel_id + 1;
+    loop {
+        let _ = segment.insert_with_id(id, vecf(&[id as f32, 0.0]), None);
+        id = id.wrapping_add(1);
+        if id % 10 == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 }
 
 #[test]

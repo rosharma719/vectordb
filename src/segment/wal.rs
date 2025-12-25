@@ -27,8 +27,8 @@ impl WalConfig {
         Self {
             path: path.into(),
             fsync: true,
-            fsync_every: 1,
-            fsync_interval: Duration::from_millis(0),
+            fsync_every: 100,
+            fsync_interval: Duration::from_millis(100),
         }
     }
 

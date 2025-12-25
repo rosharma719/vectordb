@@ -36,8 +36,10 @@ Snapshot defaults (shared):
   - `VECTORDB_WAL_DIR` (auto-enable WAL; uses `<dir>/segment.wal`)
   - `VECTORDB_WAL_AUTO_REPLAY` (default `1`)
   - `VECTORDB_WAL_FSYNC` (default `1`)
-  - `VECTORDB_WAL_FSYNC_EVERY` (default `1`)
-  - `VECTORDB_WAL_FSYNC_MS` (default `0`)
+  - `VECTORDB_WAL_FSYNC_EVERY` (default `100`)
+  - `VECTORDB_WAL_FSYNC_MS` (default `100`)
+  - `VECTORDB_MAX_RSS_MB` (0/empty disables memory cap)
+  - `VECTORDB_OOM_SNAPSHOT_PATH` (path to write snapshot before unloading)
 
 - NYTimes (unfiltered):
   - `VECTORDB_NYT_DATA_DIR` (default `data/nytimes-256-angular`)
