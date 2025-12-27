@@ -89,7 +89,16 @@ pub struct QueryStats {
     pub visit_to_expansion: PercentileStatsF64,
     pub best_score: PercentileStatsF32,
     pub worst_score: PercentileStatsF32,
+    pub neighbor_scan: NeighborScanStats,
     pub top_k: usize,
+}
+
+#[derive(Serialize)]
+pub struct NeighborScanStats {
+    pub adjacency_reads: PercentileStatsF64,
+    pub distance_computations: PercentileStatsF64,
+    pub cap_breaks: PercentileStatsF64,
+    pub patience_breaks: PercentileStatsF64,
 }
 
 #[derive(Serialize)]
@@ -207,6 +216,10 @@ fn run_query_stats(
     let mut worst_scores = Vec::with_capacity(config.num_queries);
     let mut distance_samples = Vec::with_capacity(config.num_queries * config.sample_size);
     let mut visit_exp_ratio = Vec::with_capacity(config.num_queries);
+    let mut adjacency_reads = Vec::with_capacity(config.num_queries);
+    let mut distance_computations = Vec::with_capacity(config.num_queries);
+    let mut cap_breaks = Vec::with_capacity(config.num_queries);
+    let mut patience_breaks = Vec::with_capacity(config.num_queries);
 
     let sampled_indexes = sample_indexes(base_vectors.len(), config.sample_size);
 
@@ -222,6 +235,10 @@ fn run_query_stats(
         expanded.push(stats.expanded as f64);
         best_scores.push(stats.best_score);
         worst_scores.push(stats.worst_score);
+        adjacency_reads.push(stats.adjacency_reads as f64);
+        distance_computations.push(stats.distance_computations as f64);
+        cap_breaks.push(stats.cap_breaks as f64);
+        patience_breaks.push(stats.patience_breaks as f64);
         let visit_to_expansion = if stats.expanded == 0 {
             stats.visited as f64
         } else {
@@ -253,6 +270,12 @@ fn run_query_stats(
             visit_to_expansion: percentiles_f64(&visit_exp_ratio),
             best_score: percentiles_f32(&best_scores),
             worst_score: percentiles_f32(&worst_scores),
+            neighbor_scan: NeighborScanStats {
+                adjacency_reads: percentiles_f64(&adjacency_reads),
+                distance_computations: percentiles_f64(&distance_computations),
+                cap_breaks: percentiles_f64(&cap_breaks),
+                patience_breaks: percentiles_f64(&patience_breaks),
+            },
             top_k: config.top_k,
         },
         DistanceStats {

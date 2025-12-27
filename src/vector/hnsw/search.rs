@@ -8,6 +8,14 @@ use serde::Serialize;
 use crate::utils::errors::DBError;
 use crate::utils::types::{DistanceMetric, Vector};
 
+#[derive(Default, Debug, Copy, Clone)]
+pub(crate) struct SearchCounters {
+    adjacency_reads: usize,
+    distance_computations: usize,
+    cap_breaks: usize,
+    patience_breaks: usize,
+}
+
 use super::HNSWIndex;
 use super::config::{
     disable_early_exit, early_exit_patience, log_neighbor_scan_state, log_unfiltered_enabled,
@@ -135,7 +143,7 @@ impl HNSWIndex {
         normalize: bool,
         stats: Option<&mut SearchLayerStats>,
         trace: Option<&mut SearchTraceCtx>,
-    ) -> Result<Vec<NodeCandidate>, DBError> {
+    ) -> Result<(Vec<NodeCandidate>, SearchCounters), DBError> {
         self.validate_dim(query)?;
 
         let mut trace = trace;
@@ -156,6 +164,10 @@ impl HNSWIndex {
             let mut visited_count = 0usize;
             let mut expanded = 0usize;
             let expansion_cap = expansion_cap_value;
+            let mut adjacency_reads = 0usize;
+            let mut distance_computations = 0usize;
+            let mut cap_breaks = 0usize;
+            let mut patience_breaks = 0usize;
             let neighbor_patience = neighbor_scan_patience();
 
             let start_entry = if self.deleted.get(entry).copied().unwrap_or(false) {
@@ -243,6 +255,7 @@ impl HNSWIndex {
                             let mut neighbor_no_improve = 0usize;
                             'neighbor_scan: for i in 0..window {
                                 let neighbor = neighbors[(start + i * stride) % degree];
+                                adjacency_reads += 1;
                                 if self.deleted.get(neighbor).copied().unwrap_or(false)
                                     || !scratch.mark_visited(neighbor)
                                 {
@@ -255,6 +268,7 @@ impl HNSWIndex {
                                 if batch_len == BATCH {
                                     for i in 0..batch_len {
                                         let idx = batch[i];
+                                        distance_computations += 1;
                                         let raw = self.fast_score(query, &self.vectors[idx]);
                                         let score_val = if normalize {
                                             self.normalize_score(raw)
@@ -294,6 +308,7 @@ impl HNSWIndex {
                                                 neighbor_no_improve += 1;
                                                 if neighbor_no_improve >= neighbor_patience {
                                                     stop_neighbor_scan = true;
+                                                    patience_breaks += 1;
                                                     break 'neighbor_scan;
                                                 }
                                             }
@@ -302,9 +317,13 @@ impl HNSWIndex {
                                     batch_len = 0;
                                 }
                             }
+                            if !stop_neighbor_scan {
+                                cap_breaks += 1;
+                            }
                             if !stop_neighbor_scan && batch_len > 0 {
                                 for i in 0..batch_len {
                                     let idx = batch[i];
+                                    distance_computations += 1;
                                     let raw = self.fast_score(query, &self.vectors[idx]);
                                     let score_val = if normalize {
                                         self.normalize_score(raw)
@@ -341,6 +360,7 @@ impl HNSWIndex {
                                         } else {
                                             neighbor_no_improve += 1;
                                             if neighbor_no_improve >= neighbor_patience {
+                                                patience_breaks += 1;
                                                 break;
                                             }
                                         }
@@ -428,12 +448,22 @@ impl HNSWIndex {
                 log_search_trace(&entry);
             }
 
+            let counters = SearchCounters {
+                adjacency_reads,
+                distance_computations,
+                cap_breaks,
+                patience_breaks,
+            };
             if let Some(stats) = stats {
                 stats.visited = visited_count;
                 stats.expanded = expanded;
+                stats.adjacency_reads = counters.adjacency_reads;
+                stats.distance_computations = counters.distance_computations;
+                stats.cap_breaks = counters.cap_breaks;
+                stats.patience_breaks = counters.patience_breaks;
             }
 
-            Ok(results)
+            Ok((results, counters))
         })
     }
 
@@ -545,6 +575,10 @@ impl HNSWIndex {
                     best_score: best,
                     worst_score: worst,
                     exact: true,
+                    adjacency_reads: 0,
+                    distance_computations: 0,
+                    cap_breaks: 0,
+                    patience_breaks: 0,
                 },
             ));
         }
@@ -563,7 +597,7 @@ impl HNSWIndex {
         };
 
         let mut layer_stats = SearchLayerStats::default();
-        let mut results = self.search_layer_unfiltered(
+        let (mut results, _counters) = self.search_layer_unfiltered(
             final_query,
             current,
             0,
@@ -604,6 +638,10 @@ impl HNSWIndex {
             best_score: best,
             worst_score: worst,
             exact: false,
+            adjacency_reads: layer_stats.adjacency_reads,
+            distance_computations: layer_stats.distance_computations,
+            cap_breaks: layer_stats.cap_breaks,
+            patience_breaks: layer_stats.patience_breaks,
         };
 
         Ok((scored, stats))
@@ -715,7 +753,7 @@ impl HNSWIndex {
 
         let log_enabled = log_unfiltered_enabled();
         let mut layer_stats = SearchLayerStats::default();
-        let mut results = self.search_layer_unfiltered(
+        let (mut results, _counters) = self.search_layer_unfiltered(
             final_query,
             current,
             0,

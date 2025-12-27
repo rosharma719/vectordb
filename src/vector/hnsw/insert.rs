@@ -110,7 +110,7 @@ impl HNSWIndex {
         for l in (0..=level).rev() {
             let use_norm =
                 self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
-            let mut candidates = self.search_layer_unfiltered(
+            let (mut candidates, _) = self.search_layer_unfiltered(
                 &self.vectors[idx],
                 current_entry,
                 l,

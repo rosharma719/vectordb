@@ -24,6 +24,10 @@ pub struct SearchStats {
     pub expanded: usize,
     pub best_score: f32,
     pub worst_score: f32,
+    pub adjacency_reads: usize,
+    pub distance_computations: usize,
+    pub cap_breaks: usize,
+    pub patience_breaks: usize,
     pub exact: bool,
 }
 
@@ -45,6 +49,10 @@ pub(crate) struct UnfilteredSample {
 pub(crate) struct SearchLayerStats {
     pub(crate) visited: usize,
     pub(crate) expanded: usize,
+    pub(crate) adjacency_reads: usize,
+    pub(crate) distance_computations: usize,
+    pub(crate) cap_breaks: usize,
+    pub(crate) patience_breaks: usize,
 }
 
 #[derive(Serialize)]
