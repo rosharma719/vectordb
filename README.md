@@ -58,6 +58,33 @@ VECTORDB_NYT_PERSIST_PATH=data/nytimes-256-angular/index_m16_m0_32_efc100.bin \
 cargo test --release nytimes_qps_latency_curve -- --ignored --nocapture
 ```
 
+### NYT index analyzer
+After you build a snapshot, run the new analyzer to see degree distributions, query visit counts, and sampled dataset distances:
+```
+cargo run --bin index_analyzer -- \
+  --snapshot data/nytimes-256-angular/index_m16_m0_32_efc100.bin \
+  --base data/nytimes-256-angular/base.npy \
+  --queries data/nytimes-256-angular/queries.npy \
+  --top-k 10 \
+  --num-queries 100 \
+  --sample-size 500
+```
+Use the `--help` flag for the full option list or override defaults via `VECTORDB_ANALYSIS_*` env vars.
+
+### NYT snapshot sweeper
+Run the sweeper to automatically analyze multiple snapshots and emit JSONL stats that you can ingest into a spreadsheet or notebook:
+```
+cargo run --bin snapshot_sweeper -- \
+  --snapshots data/nytimes-256-angular/index_m16_m0_16_efc100.bin,\
+data/nytimes-256-angular/index_m16_m0_32_efc100.bin \
+  --output logs/nyt_snapshot_sweep.jsonl \
+  --top-k 10 \
+  --num-queries 100 \
+  --sample-size 500 \
+  --neighbor-scan-cap 128
+```
+Each line of `logs/nyt_snapshot_sweep.jsonl` is a JSON object with the snapshot name, config, per-level degree percentiles (including the fraction over the scan cap), query statistics (visited/expanded percentiles, visit-to-expansion ratio, best/worst score percentiles), and sampled dataset distances. Use that output to compare recall vs. latency before hitting the full `nytimes_qps_latency_curve` harness.
+
 ---
 
 ## H&M (2048-D Cosine) Filtered Recall

@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod payload_storage;
 pub mod segment;
 pub mod utils;
