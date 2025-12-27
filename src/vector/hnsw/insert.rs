@@ -11,6 +11,8 @@ use crate::utils::errors::DBError;
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::{DistanceMetric, PointId, Vector};
 
+use std::cmp::Ordering;
+
 use super::HNSWIndex;
 use super::config::{
     FILTER_EDGE_LOG_CHUNK, VERBOSE, diversity_alpha_for_level, diversity_prune_floor,
@@ -108,7 +110,7 @@ impl HNSWIndex {
         for l in (0..=level).rev() {
             let use_norm =
                 self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
-            let candidates = self.search_layer_unfiltered(
+            let mut candidates = self.search_layer_unfiltered(
                 &self.vectors[idx],
                 current_entry,
                 l,
@@ -117,22 +119,30 @@ impl HNSWIndex {
                 None,
                 None,
             )?;
+            Self::pre_sort_candidates(&mut candidates);
             let m_for_layer = if l == 0 { self.m0 } else { self.m };
             let neighbors: Vec<usize> =
                 self.select_diverse_neighbors(&candidates, m_for_layer, use_norm, l);
 
-            let layer = self.layers.get_mut(l).unwrap();
-            let mut linked = neighbors.clone();
-            if !linked.contains(&idx) {
-                linked.push(idx);
+            {
+                let layer = self.layers.get_mut(l).unwrap();
+                let mut linked = neighbors.clone();
+                if !linked.contains(&idx) {
+                    linked.push(idx);
+                }
+                layer[idx] = linked;
             }
-            layer[idx] = linked;
+            self.sort_layer_neighbors(l, idx);
 
             for &n in &neighbors {
-                let e = &mut layer[n];
-                if !e.contains(&idx) {
-                    e.push(idx);
+                {
+                    let layer = self.layers.get_mut(l).unwrap();
+                    let e = &mut layer[n];
+                    if !e.contains(&idx) {
+                        e.push(idx);
+                    }
                 }
+                self.sort_layer_neighbors(l, n);
             }
 
             if let Some(&best) = neighbors.first() {
@@ -482,6 +492,52 @@ impl HNSWIndex {
             }
         }
         result
+    }
+
+    fn pre_sort_candidates(candidates: &mut [NodeCandidate]) {
+        candidates.sort_by(|a, b| {
+            a.sort_key
+                .partial_cmp(&b.sort_key)
+                .unwrap_or(Ordering::Equal)
+        });
+    }
+
+    fn sorted_neighbors_by_node(&self, node_idx: usize, neighbors: &[usize]) -> Vec<usize> {
+        if neighbors.len() <= 1 {
+            return neighbors.to_vec();
+        }
+        let node_vec = match self.get_vector_by_idx(node_idx) {
+            Some(vec) => vec.clone(),
+            None => return neighbors.to_vec(),
+        };
+        let mut scored: Vec<(usize, f32)> = neighbors
+            .iter()
+            .filter_map(|&neighbor_idx| {
+                self.get_vector_by_idx(neighbor_idx).map(|neighbor_vec| {
+                    let raw = self.fast_score(&node_vec, neighbor_vec);
+                    (neighbor_idx, self.normalize_score(raw))
+                })
+            })
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+        scored.into_iter().map(|(idx, _)| idx).collect()
+    }
+
+    fn sort_layer_neighbors(&mut self, level: usize, node_idx: usize) {
+        if level >= self.layers.len() {
+            return;
+        }
+        let neighbors = {
+            let layer = &self.layers[level];
+            layer[node_idx].clone()
+        };
+        if neighbors.len() <= 1 {
+            return;
+        }
+        let sorted = self.sorted_neighbors_by_node(node_idx, &neighbors);
+        if let Some(layer) = self.layers.get_mut(level) {
+            layer[node_idx] = sorted;
+        }
     }
 }
 

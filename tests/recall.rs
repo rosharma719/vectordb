@@ -116,7 +116,10 @@ fn recall_unfiltered_euclidean() {
     for &ef_requested in &ef_values {
         let ef_search = ef_requested.max(top_k);
         segment.hnsw_mut().set_ef_search(ef_search);
-        println!("ℹ️  Running sweep entry with ef_search={} (ef_construct={})", ef_search, ef_construct);
+        println!(
+            "ℹ️  Running sweep entry with ef_search={} (ef_construct={})",
+            ef_search, ef_construct
+        );
 
         let mut avg_recall = 0.0;
         let mut total_search = 0.0f64;
@@ -138,11 +141,7 @@ fn recall_unfiltered_euclidean() {
             avg_recall += recall;
             println!(
                 "[ef_search={}] Query {} recall: {:.3} (hits {}/{})",
-                ef_search,
-                qi,
-                recall,
-                hits as usize,
-                top_k
+                ef_search, qi, recall, hits as usize, top_k
             );
         }
         avg_recall /= num_queries as f64;
@@ -261,7 +260,10 @@ fn recall_in_place_filtered() {
     for &ef_requested in &ef_values {
         let ef_search = ef_requested.max(top_k);
         segment.hnsw_mut().set_ef_search(ef_search);
-        println!("ℹ️  Running filtered sweep entry with ef_search={} (ef_construct={})", ef_search, ef_construct);
+        println!(
+            "ℹ️  Running filtered sweep entry with ef_search={} (ef_construct={})",
+            ef_search, ef_construct
+        );
 
         let mut avg_recall = 0.0;
         let mut total_search = 0.0f64;
@@ -269,7 +271,9 @@ fn recall_in_place_filtered() {
             // ground truth via brute force with filter
             let mut brute: Vec<(u64, f32)> = dataset
                 .iter()
-                .filter(|(_, _, g, s)| g == &PayloadValue::Str("even".into()) && *s >= score_threshold)
+                .filter(|(_, _, g, s)| {
+                    g == &PayloadValue::Str("even".into()) && *s >= score_threshold
+                })
                 .map(|(id, v, _, _)| (*id, score(q, v, metric)))
                 .collect();
             brute.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -284,11 +288,7 @@ fn recall_in_place_filtered() {
             avg_recall += recall;
             println!(
                 "[ef_search={}] Query {} recall: {:.3} (hits {}/{})",
-                ef_search,
-                qi,
-                recall,
-                hits as usize,
-                top_k
+                ef_search, qi, recall, hits as usize, top_k
             );
         }
         avg_recall /= num_queries as f64;

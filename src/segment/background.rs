@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, RwLock,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -56,7 +56,10 @@ impl Drop for SnapshotterHandle {
     }
 }
 
-pub fn start_background_snapshots(segment: SharedSegment, config: SnapshotConfig) -> SnapshotterHandle {
+pub fn start_background_snapshots(
+    segment: SharedSegment,
+    config: SnapshotConfig,
+) -> SnapshotterHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let join = thread::spawn(move || {
@@ -84,8 +87,10 @@ pub fn start_background_snapshots(segment: SharedSegment, config: SnapshotConfig
                     }
                 };
                 ops_now = guard.op_count();
-                let time_due = !config.interval.is_zero() && last_snapshot.elapsed() >= config.interval;
-                let ops_due = config.max_ops > 0 && ops_now.saturating_sub(last_ops) >= config.max_ops;
+                let time_due =
+                    !config.interval.is_zero() && last_snapshot.elapsed() >= config.interval;
+                let ops_due =
+                    config.max_ops > 0 && ops_now.saturating_sub(last_ops) >= config.max_ops;
                 if time_due || ops_due {
                     snapshot = Some((guard.build_snapshot(), guard.snapshot_metadata()));
                 }
@@ -165,7 +170,9 @@ fn prune_snapshots(path: &PathBuf, retain_last: usize) -> Result<(), DBError> {
     if retain_last == 0 {
         return Ok(());
     }
-    let Some(dir) = path.parent() else { return Ok(()); };
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
     let base = match path.file_name().and_then(|f| f.to_str()) {
         Some(name) => name.to_string(),
         None => return Ok(()),
@@ -175,7 +182,9 @@ fn prune_snapshots(path: &PathBuf, retain_last: usize) -> Result<(), DBError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|f| f.to_str()) else { continue };
+        let Some(name) = path.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
         if !name.starts_with(&prefix) {
             continue;
         }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use rand::Rng;
 
 use vectordb::payload_storage::filters::Filter;
-use vectordb::segment::{start_background_snapshots, Segment, SnapshotConfig};
+use vectordb::segment::{Segment, SnapshotConfig, start_background_snapshots};
 use vectordb::utils::errors::DBError;
 use vectordb::utils::payload::{Payload, PayloadValue};
 use vectordb::utils::types::{DistanceMetric, Vector};
@@ -31,13 +31,21 @@ fn hnsw_round_trip_preserves_results() -> Result<(), DBError> {
     }
 
     let query = vecf(&[5.0, 10.0, 1.0]);
-    let before: Vec<_> = hnsw.search(&query, 5)?.into_iter().map(|sp| sp.id).collect();
+    let before: Vec<_> = hnsw
+        .search(&query, 5)?
+        .into_iter()
+        .map(|sp| sp.id)
+        .collect();
 
     let path = tmp_path("hnsw_snapshot");
     println!("[hnsw] saving to {:?}", path);
     hnsw.save_to_path(&path)?;
     let restored = HNSWIndex::load_from_path(&path)?;
-    let after: Vec<_> = restored.search(&query, 5)?.into_iter().map(|sp| sp.id).collect();
+    let after: Vec<_> = restored
+        .search(&query, 5)?
+        .into_iter()
+        .map(|sp| sp.id)
+        .collect();
     println!("[hnsw] before={:?} after={:?}", before, after);
     let _ = fs::remove_file(path);
 
@@ -98,12 +106,7 @@ fn segment_round_trip_large_dataset() -> Result<(), DBError> {
         payload.0.clear();
         let group = if i % 2 == 0 { "even" } else { "odd" };
         payload.set("group", PayloadValue::Str(group.to_string()));
-        let vec = vec![
-            i as f32,
-            (i % 10) as f32,
-            (i % 100) as f32,
-            (i % 7) as f32,
-        ];
+        let vec = vec![i as f32, (i % 10) as f32, (i % 100) as f32, (i % 7) as f32];
         seg.insert_with_id(i, vec, Some(payload.clone()))?;
     }
 
@@ -186,8 +189,18 @@ fn segment_persist_append_and_reload() -> Result<(), DBError> {
 
     let sample_old = 1234u64;
     let sample_new = initial + 42;
-    let query_old = vec![sample_old as f32, (sample_old % 10) as f32, (sample_old % 7) as f32, 1.0];
-    let query_new = vec![sample_new as f32, (sample_new % 10) as f32, (sample_new % 7) as f32, 1.0];
+    let query_old = vec![
+        sample_old as f32,
+        (sample_old % 10) as f32,
+        (sample_old % 7) as f32,
+        1.0,
+    ];
+    let query_new = vec![
+        sample_new as f32,
+        (sample_new % 10) as f32,
+        (sample_new % 7) as f32,
+        1.0,
+    ];
 
     let res_old = seg.search(&query_old, 1)?.first().map(|sp| sp.id);
     let res_new = seg.search(&query_new, 1)?.first().map(|sp| sp.id);
@@ -521,10 +534,7 @@ fn background_snapshot_retains_last_n() -> Result<(), DBError> {
         "expected at most 2 retained snapshots, found {}",
         rotated_after.len()
     );
-    assert!(
-        path.exists(),
-        "base snapshot was not written"
-    );
+    assert!(path.exists(), "base snapshot was not written");
 
     let _ = fs::remove_file(&path);
     for name in rotated_after {
@@ -662,9 +672,18 @@ fn wal_replay_tolerates_crash_mid_write() -> Result<(), DBError> {
         .env("VECTORDB_WAL_FSYNC", "1")
         .env("VECTORDB_WAL_FSYNC_EVERY", "1")
         .env("VECTORDB_WAL_FSYNC_MS", "0")
-        .env("VECTORDB_WAL_CRASH_SNAPSHOT", snapshot_path.to_string_lossy().as_ref())
-        .env("VECTORDB_WAL_CRASH_WAL", wal_path.to_string_lossy().as_ref())
-        .env("VECTORDB_WAL_CRASH_READY", ready_path.to_string_lossy().as_ref())
+        .env(
+            "VECTORDB_WAL_CRASH_SNAPSHOT",
+            snapshot_path.to_string_lossy().as_ref(),
+        )
+        .env(
+            "VECTORDB_WAL_CRASH_WAL",
+            wal_path.to_string_lossy().as_ref(),
+        )
+        .env(
+            "VECTORDB_WAL_CRASH_READY",
+            ready_path.to_string_lossy().as_ref(),
+        )
         .spawn()
         .expect("failed to spawn wal_crash_writer");
 

@@ -10,7 +10,7 @@ use ndarray_npy::read_npy;
 use ordered_float::OrderedFloat;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::{from_slice, Value};
+use serde_json::{Value, from_slice};
 
 use vectordb::payload_storage::filters::Filter;
 use vectordb::segment::segment::Segment;
@@ -20,16 +20,8 @@ use vectordb::vector::hnsw::HNSWIndex;
 
 mod common;
 use common::{
-    env_usize_first,
-    log_peak_rss,
-    QueryLogWriter,
-    QueryStatsAgg,
-    SearchConfig,
-    SnapshotConfig,
-    TestLogConfig,
-    summarize_f64,
-    summarize_usize,
-    MissStats,
+    MissStats, QueryLogWriter, QueryStatsAgg, SearchConfig, SnapshotConfig, TestLogConfig,
+    env_usize_first, log_peak_rss, summarize_f64, summarize_usize,
 };
 
 fn load_vectors(path: &Path) -> Vec<Vector> {
@@ -54,20 +46,28 @@ fn json_to_payload_value(v: &Value) -> Option<PayloadValue> {
                 return Some(PayloadValue::ListStr(Vec::new()));
             }
             if arr.iter().all(|x| x.as_i64().is_some()) {
-                return Some(PayloadValue::ListInt(arr.iter().map(|x| x.as_i64().unwrap()).collect()));
+                return Some(PayloadValue::ListInt(
+                    arr.iter().map(|x| x.as_i64().unwrap()).collect(),
+                ));
             }
             if arr.iter().all(|x| x.as_f64().is_some()) {
                 return Some(PayloadValue::ListFloat(
-                    arr.iter().map(|x| OrderedFloat(x.as_f64().unwrap())).collect(),
+                    arr.iter()
+                        .map(|x| OrderedFloat(x.as_f64().unwrap()))
+                        .collect(),
                 ));
             }
             if arr.iter().all(|x| x.as_str().is_some()) {
                 return Some(PayloadValue::ListStr(
-                    arr.iter().map(|x| x.as_str().unwrap().to_string()).collect(),
+                    arr.iter()
+                        .map(|x| x.as_str().unwrap().to_string())
+                        .collect(),
                 ));
             }
             if arr.iter().all(|x| x.as_bool().is_some()) {
-                return Some(PayloadValue::ListBool(arr.iter().map(|x| x.as_bool().unwrap()).collect()));
+                return Some(PayloadValue::ListBool(
+                    arr.iter().map(|x| x.as_bool().unwrap()).collect(),
+                ));
             }
             None
         }
@@ -115,7 +115,8 @@ struct RawTestCase {
 fn parse_range_filter(key: &str, range: &serde_json::Map<String, Value>) -> Result<Filter, String> {
     let mut parts = Vec::new();
     for (k, v) in range {
-        let pv = json_to_payload_value(v).ok_or_else(|| format!("unsupported range value for {key}:{k}"))?;
+        let pv = json_to_payload_value(v)
+            .ok_or_else(|| format!("unsupported range value for {key}:{k}"))?;
         let op = match k.as_str() {
             "gt" => ScalarComparisonOp::Gt,
             "gte" => ScalarComparisonOp::Gte,
@@ -238,7 +239,11 @@ fn build_hnm_segment(
             .insert_with_id(dataset_id, v.clone(), Some(p.clone()))
             .unwrap();
         if logs.level.allows_debug() && i != 0 && i % 5000 == 0 {
-            logs.log_debug(&format!("Inserted {} vectors (+{:?})", i, start_insert.elapsed()));
+            logs.log_debug(&format!(
+                "Inserted {} vectors (+{:?})",
+                i,
+                start_insert.elapsed()
+            ));
         }
     }
     let insert_dur = start_insert.elapsed();
@@ -312,7 +317,11 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
     let payloads_path = Path::new(&data_dir).join("payloads.jsonl");
     let tests_path = Path::new(&data_dir).join("tests.jsonl");
     assert!(vectors_path.exists(), "missing {}", vectors_path.display());
-    assert!(payloads_path.exists(), "missing {}", payloads_path.display());
+    assert!(
+        payloads_path.exists(),
+        "missing {}",
+        payloads_path.display()
+    );
     assert!(tests_path.exists(), "missing {}", tests_path.display());
 
     logs.log_info(&format!(
@@ -342,10 +351,7 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
     let raw_tests = load_test_cases(&tests_path);
     logs.log_info(&format!("⏱️  Data loaded in {:?}", t0.elapsed()));
 
-    let default_topk = raw_tests
-        .first()
-        .map(|c| c.closest_ids.len())
-        .unwrap_or(10);
+    let default_topk = raw_tests.first().map(|c| c.closest_ids.len()).unwrap_or(10);
     let top_k = search.top_k.unwrap_or(default_topk);
 
     let prepared_cases: Vec<PreparedCase> = raw_tests
@@ -380,7 +386,13 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
                 let metric = DistanceMetric::Cosine;
                 let m = env_usize_first(&["VECTORDB_M", "VECTORDB_HNM_M"]).unwrap_or(16);
                 let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_HNM_M0"]).unwrap_or(m);
-                let max_ef = search.ef_values.iter().copied().max().unwrap_or(1).max(top_k);
+                let max_ef = search
+                    .ef_values
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(1)
+                    .max(top_k);
                 let mut segment = Segment::new(HNSWIndex::new(metric, m, max_ef, 16, dim));
                 segment.hnsw_mut().set_m0(m0);
                 segment.hnsw_mut().set_ef_construct(search.ef_construct);
@@ -400,7 +412,8 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
                 "💾 Loading persisted H&M segment from {} ...",
                 snapshot.persist_path
             ));
-            Segment::load_from_path(&snapshot.persist_path).expect("failed to load persisted H&M segment")
+            Segment::load_from_path(&snapshot.persist_path)
+                .expect("failed to load persisted H&M segment")
         }
     } else {
         let dim = base.first().map(|v| v.len()).unwrap_or(0);
@@ -408,7 +421,13 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
         let metric = DistanceMetric::Cosine;
         let m = env_usize_first(&["VECTORDB_M", "VECTORDB_HNM_M"]).unwrap_or(16);
         let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_HNM_M0"]).unwrap_or(m);
-        let max_ef = search.ef_values.iter().copied().max().unwrap_or(1).max(top_k);
+        let max_ef = search
+            .ef_values
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(1)
+            .max(top_k);
         let mut segment = Segment::new(HNSWIndex::new(metric, m, max_ef, 16, dim));
         segment.hnsw_mut().set_m0(m0);
         segment.hnsw_mut().set_ef_construct(search.ef_construct);
@@ -475,7 +494,9 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
                     misses,
                 },
             );
-            if logs.level.allows_debug() && ((qi + 1) % logs.progress_every == 0 || qi + 1 == num_queries) {
+            if logs.level.allows_debug()
+                && ((qi + 1) % logs.progress_every == 0 || qi + 1 == num_queries)
+            {
                 let partial = hits as f64 / total_targets.max(1) as f64;
                 logs.log_debug(&format!(
                     "  progress: query {}/{} (ef_search={}) cumulative recall={:.3}",
@@ -491,13 +512,7 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
         let recall = hits as f64 / total_targets.max(1) as f64;
         logs.log_info(&format!(
             "🎯 [ef_search={}] recall@{}: {:.3} over {} queries (hits {}/{}) | avg {:.3} ms/query",
-            ef_search,
-            top_k,
-            recall,
-            num_queries,
-            hits,
-            total_targets,
-            avg_ms
+            ef_search, top_k, recall, num_queries, hits, total_targets, avg_ms
         ));
 
         // Per-query recall stats to understand distribution.
@@ -510,13 +525,17 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
                 per_query_recalls[idx]
             }
         };
-        let mean = per_query_recalls.iter().copied().sum::<f64>() / per_query_recalls.len().max(1) as f64;
+        let mean =
+            per_query_recalls.iter().copied().sum::<f64>() / per_query_recalls.len().max(1) as f64;
         let p50 = recall_pct(50.0);
         let p90 = recall_pct(90.0);
         let p99 = recall_pct(99.0);
         let min = *per_query_recalls.first().unwrap_or(&0.0);
         let max = *per_query_recalls.last().unwrap_or(&0.0);
-        let full = per_query_recalls.iter().filter(|&&r| (r - 1.0).abs() < 1e-6).count();
+        let full = per_query_recalls
+            .iter()
+            .filter(|&&r| (r - 1.0).abs() < 1e-6)
+            .count();
         let ge_08 = per_query_recalls.iter().filter(|&&r| r >= 0.8).count();
         let ge_05 = per_query_recalls.iter().filter(|&&r| r >= 0.5).count();
         logs.log_info(&format!(
@@ -536,10 +555,7 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
         let latency = summarize_f64(&query_stats.elapsed_ms);
         logs.log_info(&format!(
             "[query_stats] ef_search={} ms(p50/p90/p99)={:.3}/{:.3}/{:.3}",
-            ef_search,
-            latency.p50,
-            latency.p90,
-            latency.p99
+            ef_search, latency.p50, latency.p90, latency.p99
         ));
         if miss_stats.total > 0 {
             let degree = summarize_usize(&miss_stats.degree_samples);
@@ -584,10 +600,7 @@ fn run_hnm_recall_only() {
     logs.log_info(&format!("⏱️  Tests loaded in {:?}", t0.elapsed()));
     log_peak_rss("hnm_loaded_tests");
 
-    let default_topk = raw_tests
-        .first()
-        .map(|c| c.closest_ids.len())
-        .unwrap_or(10);
+    let default_topk = raw_tests.first().map(|c| c.closest_ids.len()).unwrap_or(10);
     let top_k = search.top_k.unwrap_or(default_topk);
 
     let prepared_cases: Vec<PreparedCase> = raw_tests
@@ -708,7 +721,9 @@ fn run_hnm_recall_only() {
                     misses,
                 },
             );
-            if logs.level.allows_debug() && ((qi + 1) % logs.progress_every == 0 || qi + 1 == num_queries) {
+            if logs.level.allows_debug()
+                && ((qi + 1) % logs.progress_every == 0 || qi + 1 == num_queries)
+            {
                 let partial = hits as f64 / total_targets.max(1) as f64;
                 logs.log_debug(&format!(
                     "  progress: query {}/{} (ef_search={}) cumulative recall={:.3}",
@@ -734,7 +749,10 @@ fn run_hnm_recall_only() {
         let p99 = sorted.get(idx(99.0)).copied().unwrap_or(0.0);
         let min = sorted.first().copied().unwrap_or(0.0);
         let max = sorted.last().copied().unwrap_or(0.0);
-        let full = per_query_recalls.iter().filter(|&&r| (r - 1.0).abs() < 1e-6).count();
+        let full = per_query_recalls
+            .iter()
+            .filter(|&&r| (r - 1.0).abs() < 1e-6)
+            .count();
         let ge_08 = per_query_recalls.iter().filter(|&&r| r >= 0.8).count();
         let ge_05 = per_query_recalls.iter().filter(|&&r| r >= 0.5).count();
         logs.log_info(&format!(
@@ -753,21 +771,12 @@ fn run_hnm_recall_only() {
         ));
         logs.log_info(&format!(
             "🎯 [ef_search={}] recall@{}: {:.3} over {} queries (hits {}/{}) | avg {:.3} ms/query",
-            ef_search,
-            top_k,
-            recall,
-            num_queries,
-            hits,
-            total_targets,
-            avg_ms
+            ef_search, top_k, recall, num_queries, hits, total_targets, avg_ms
         ));
         let latency = summarize_f64(&query_stats.elapsed_ms);
         logs.log_info(&format!(
             "[query_stats] ef_search={} ms(p50/p90/p99)={:.3}/{:.3}/{:.3}",
-            ef_search,
-            latency.p50,
-            latency.p90,
-            latency.p99
+            ef_search, latency.p50, latency.p90, latency.p99
         ));
         if miss_stats.total > 0 {
             let degree = summarize_usize(&miss_stats.degree_samples);

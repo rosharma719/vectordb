@@ -1,6 +1,5 @@
 use crate::utils::errors::DBError;
-use crate::utils::payload::{Payload, PayloadValue, ScalarComparisonOp}; 
-
+use crate::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Filter {
@@ -17,7 +16,6 @@ pub enum Filter {
     Or(Vec<Filter>),
     Not(Box<Filter>),
 }
-
 
 /// Evaluates whether a given payload satisfies the filter condition.
 pub fn evaluate_filter(filter: &Filter, payload: &Payload) -> Result<bool, DBError> {

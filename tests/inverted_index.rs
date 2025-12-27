@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
+use ordered_float::OrderedFloat;
 use vectordb::payload_storage::stores::PayloadIndex;
 use vectordb::utils::payload::{Payload, PayloadValue};
-use ordered_float::OrderedFloat;
 
 #[test]
 fn test_index_insert_and_query() {
@@ -18,7 +18,9 @@ fn test_index_insert_and_query() {
     index.insert(43, &payload);
 
     assert_eq!(
-        index.query_exact("category", &PayloadValue::Str("fruit".into())).unwrap(),
+        index
+            .query_exact("category", &PayloadValue::Str("fruit".into()))
+            .unwrap(),
         &HashSet::from([42, 43])
     );
     assert_eq!(
@@ -26,11 +28,15 @@ fn test_index_insert_and_query() {
         &HashSet::from([42, 43])
     );
     assert_eq!(
-        index.query_exact("confidence", &PayloadValue::Float(OrderedFloat(0.95))).unwrap(),
+        index
+            .query_exact("confidence", &PayloadValue::Float(OrderedFloat(0.95)))
+            .unwrap(),
         &HashSet::from([42, 43])
     );
     assert_eq!(
-        index.query_exact("active", &PayloadValue::Bool(true)).unwrap(),
+        index
+            .query_exact("active", &PayloadValue::Bool(true))
+            .unwrap(),
         &HashSet::from([42, 43])
     );
 }
@@ -45,7 +51,13 @@ fn test_index_removal() {
     index.insert(1, &payload);
     index.insert(2, &payload);
 
-    assert_eq!(index.query_exact("rank", &PayloadValue::Int(99)).unwrap().len(), 2);
+    assert_eq!(
+        index
+            .query_exact("rank", &PayloadValue::Int(99))
+            .unwrap()
+            .len(),
+        2
+    );
 
     index.remove(1, &payload);
     assert_eq!(
@@ -67,8 +79,16 @@ fn test_non_indexed_types() {
 
     index.insert(99, &payload);
 
-    assert!(index.query_exact("list", &PayloadValue::Str("a".into())).is_none());
-    assert!(index.query_exact("numbers", &PayloadValue::Int(1)).is_none());
+    assert!(
+        index
+            .query_exact("list", &PayloadValue::Str("a".into()))
+            .is_none()
+    );
+    assert!(
+        index
+            .query_exact("numbers", &PayloadValue::Int(1))
+            .is_none()
+    );
 
     assert!(index.all_for_key("list").is_none());
     assert!(index.all_for_key("numbers").is_none());
@@ -123,11 +143,15 @@ fn test_insert_same_key_different_values() {
     index.insert(2, &p2);
 
     assert_eq!(
-        index.query_exact("group", &PayloadValue::Str("A".into())).unwrap(),
+        index
+            .query_exact("group", &PayloadValue::Str("A".into()))
+            .unwrap(),
         &HashSet::from([1])
     );
     assert_eq!(
-        index.query_exact("group", &PayloadValue::Str("B".into())).unwrap(),
+        index
+            .query_exact("group", &PayloadValue::Str("B".into()))
+            .unwrap(),
         &HashSet::from([2])
     );
 }
@@ -140,6 +164,14 @@ fn test_query_nonexistent_key_or_value() {
     payload.set("status", PayloadValue::Str("ok".into()));
     index.insert(1, &payload);
 
-    assert!(index.query_exact("nonexistent", &PayloadValue::Str("nope".into())).is_none());
-    assert!(index.query_exact("status", &PayloadValue::Str("error".into())).is_none());
+    assert!(
+        index
+            .query_exact("nonexistent", &PayloadValue::Str("nope".into()))
+            .is_none()
+    );
+    assert!(
+        index
+            .query_exact("status", &PayloadValue::Str("error".into()))
+            .is_none()
+    );
 }

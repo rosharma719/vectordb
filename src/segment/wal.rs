@@ -98,7 +98,8 @@ impl WalWriter {
     }
 
     pub fn append(&mut self, record: &WalRecord) -> Result<(), DBError> {
-        let payload = bincode::serialize(record).map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+        let payload =
+            bincode::serialize(record).map_err(|e| DBError::SerializationError(anyhow!(e)))?;
         let len = payload.len() as u32;
         let checksum = adler32(&payload);
         self.file.write_all(&len.to_le_bytes())?;
@@ -152,8 +153,8 @@ impl WalWriter {
             return true;
         }
         let op_ready = self.fsync_every > 0 && self.ops_since_sync >= self.fsync_every;
-        let time_ready = !self.fsync_interval.is_zero()
-            && self.last_sync.elapsed() >= self.fsync_interval;
+        let time_ready =
+            !self.fsync_interval.is_zero() && self.last_sync.elapsed() >= self.fsync_interval;
         op_ready || time_ready
     }
 }
@@ -222,8 +223,8 @@ impl WalReader {
             if actual != expected {
                 return Err(DBError::WALCorrupt("checksum mismatch".into()));
             }
-            let record: WalRecord =
-                bincode::deserialize(&payload).map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+            let record: WalRecord = bincode::deserialize(&payload)
+                .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
             apply(record)?;
         }
 

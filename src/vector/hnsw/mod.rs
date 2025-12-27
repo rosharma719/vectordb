@@ -1,12 +1,12 @@
 pub mod config;
-mod stats;
-mod scratch;
-mod types;
 mod core;
-mod insert;
-mod search;
 mod filter;
+mod insert;
+mod scratch;
+mod search;
 mod snapshot;
+mod stats;
+mod types;
 
 pub use core::{HNSWIndex, HnswConfigSummary, HnswSnapshot};
 pub use stats::SearchStats;

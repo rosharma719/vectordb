@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread_local;
 use std::time::{Duration, Instant};
 
@@ -201,14 +201,21 @@ impl Segment {
             self.enforce_memory_cap()?;
         }
         let log_timing = Self::log_insert_timing();
-        let total_start = if log_timing { Some(Instant::now()) } else { None };
+        let total_start = if log_timing {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let mut last = total_start;
         let mut chunk_start = total_start;
         let mut hnsw_dur = Duration::from_millis(0);
         let mut payload_idx_dur = Duration::from_millis(0);
         let mut filter_edges_dur = Duration::from_millis(0);
 
-        if self.hnsw.contains(&point_id) || self.payloads.contains_key(&point_id) || self.deleted.contains(&point_id) {
+        if self.hnsw.contains(&point_id)
+            || self.payloads.contains_key(&point_id)
+            || self.deleted.contains(&point_id)
+        {
             return Err(DBError::DuplicatePointId(point_id));
         }
 
@@ -326,11 +333,11 @@ impl Segment {
         if let Some(p) = self.payloads.get(&point_id) {
             self.payload_index.remove(point_id, p);
         }
-    
+
         self.deleted.insert(point_id);
         self.hnsw.mark_deleted(point_id);
         self.op_count = self.op_count.saturating_add(1);
-    
+
         let deleted_count = self.deleted.len();
         let total_count = self.hnsw.len();
 
@@ -351,7 +358,6 @@ impl Segment {
             self.purge()?;
         }
 
-    
         Ok(())
     }
 
@@ -388,14 +394,14 @@ impl Segment {
         self.op_count = self.op_count.saturating_add(1);
         Ok(())
     }
-    
-
 
     pub fn search(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
         self.ensure_not_rebuilding()?;
         let total_non_deleted = self.hnsw.len() - self.deleted.len();
         if total_non_deleted == 0 {
-            return Err(DBError::SearchError("No active points available to search.".into()));
+            return Err(DBError::SearchError(
+                "No active points available to search.".into(),
+            ));
         }
 
         // HNSWIndex now internally skips deleted points.
@@ -418,7 +424,9 @@ impl Segment {
         self.ensure_not_rebuilding()?;
         let total_non_deleted = self.hnsw.len() - self.deleted.len();
         if total_non_deleted == 0 {
-            return Err(DBError::SearchError("No active points available to search.".into()));
+            return Err(DBError::SearchError(
+                "No active points available to search.".into(),
+            ));
         }
 
         let (candidates, stats) = self.hnsw.search_with_stats(query, top_k)?;
@@ -440,9 +448,11 @@ impl Segment {
         self.ensure_not_rebuilding()?;
         let total_non_deleted = self.hnsw.len() - self.deleted.len();
         if total_non_deleted == 0 {
-            return Err(DBError::SearchError("No active points available to search.".into()));
+            return Err(DBError::SearchError(
+                "No active points available to search.".into(),
+            ));
         }
-    
+
         let results = self.hnsw.in_place_filtered_search(
             query,
             top_k * 4,
@@ -450,20 +460,22 @@ impl Segment {
             &self.payload_index,
             filter,
         )?;
-    
+
         let filtered: Vec<_> = results
             .into_iter()
             .filter(|sp| !self.deleted.contains(&sp.id))
             .take(top_k)
             .collect();
-    
+
         Ok(filtered)
     }
-    
-    
 
     /// Internal unfiltered search (used for diagnostics or filtered versions).
-    pub fn search_unfiltered(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
+    pub fn search_unfiltered(
+        &self,
+        query: &Vector,
+        top_k: usize,
+    ) -> Result<Vec<ScoredPoint>, DBError> {
         self.ensure_not_rebuilding()?;
         self.hnsw.search(query, top_k)
     }
@@ -480,7 +492,9 @@ impl Segment {
 
     pub fn purge(&mut self) -> Result<(), DBError> {
         if self.rebuilding.swap(true, Ordering::SeqCst) {
-            return Err(DBError::SearchError("Segment rebuild already in progress.".into()));
+            return Err(DBError::SearchError(
+                "Segment rebuild already in progress.".into(),
+            ));
         }
         struct RebuildGuard<'a> {
             flag: &'a AtomicBool,
@@ -500,23 +514,23 @@ impl Segment {
             self.hnsw.max_level_cap(),
             self.hnsw.dim(),
         );
-    
+
         let mut new_payload_index = PayloadIndex::new();
         let mut new_payloads = HashMap::new();
-    
+
         for (&id, vector) in self.hnsw.iter_vectors() {
             if self.deleted.contains(&id) {
                 continue;
             }
-    
+
             // Reinsert into HNSW
             new_hnsw.insert(id, vector.clone())?;
-    
+
             if let Some(p) = self.payloads.get(&id) {
                 // Reinsert into payload structures
                 new_payload_index.insert(id, p);
                 new_payloads.insert(id, p.clone());
-    
+
                 // Rebuild filter-aware edges
                 let filter_keys = Self::filter_keys_for_payload(p);
 
@@ -532,18 +546,16 @@ impl Segment {
                 }
             }
         }
-    
+
         // Swap in the rebuilt structures
         self.hnsw = new_hnsw;
         self.payload_index = new_payload_index;
         self.payloads = new_payloads;
-    
+
         self.deleted.clear();
-    
+
         Ok(())
     }
-     
-
 
     /// Immutable reference to underlying HNSW index
     pub fn hnsw(&self) -> &HNSWIndex {
@@ -574,8 +586,12 @@ impl Segment {
     }
 
     fn enforce_memory_cap(&mut self) -> Result<(), DBError> {
-        let Some(cap_bytes) = max_rss_bytes() else { return Ok(()); };
-        let Some(rss_bytes) = current_rss_bytes() else { return Ok(()); };
+        let Some(cap_bytes) = max_rss_bytes() else {
+            return Ok(());
+        };
+        let Some(rss_bytes) = current_rss_bytes() else {
+            return Ok(());
+        };
         if rss_bytes <= cap_bytes {
             return Ok(());
         }
@@ -724,7 +740,7 @@ impl Segment {
                         return Err(DBError::SerializationError(anyhow!(
                             "unsupported segment snapshot version {}",
                             version
-                        )))
+                        )));
                     }
                 }
             } else if let Ok(snapshot) = bincode::deserialize::<SegmentSnapshot>(payload) {
@@ -855,8 +871,8 @@ impl Segment {
             bincode::serialize_into(&mut *writer, snapshot)
                 .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
             if let Some(meta) = metadata {
-                let meta_bytes =
-                    bincode::serialize(meta).map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+                let meta_bytes = bincode::serialize(meta)
+                    .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
                 let meta_len = meta_bytes.len() as u32;
                 writer.write_all(&meta_bytes)?;
                 writer.write_all(&meta_len.to_le_bytes())?;
@@ -944,21 +960,19 @@ impl Segment {
             WalRecord::Delete { point_id } => self.delete_internal(point_id, false),
             WalRecord::UpdatePayload { point_id, payload } => {
                 self.update_payload_internal(point_id, payload, false)
+            }
         }
     }
-}
 
     /// Build the list of payload keys to use for filter-aware edges, honoring an optional allowlist,
     /// a max count, and a type preference (Bool -> Str -> Int -> Float).
     fn filter_keys_for_payload(payload: &Payload) -> Vec<String> {
-        let allow: Option<HashSet<String>> = env::var("VECTORDB_FILTER_KEYS")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            });
+        let allow: Option<HashSet<String>> = env::var("VECTORDB_FILTER_KEYS").ok().map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        });
         let max_keys: Option<usize> = env::var("VECTORDB_FILTER_MAX_KEYS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -980,7 +994,10 @@ impl Segment {
             .filter_map(|(k, v)| {
                 if matches!(
                     v,
-                    PayloadValue::Int(_) | PayloadValue::Float(_) | PayloadValue::Str(_) | PayloadValue::Bool(_)
+                    PayloadValue::Int(_)
+                        | PayloadValue::Float(_)
+                        | PayloadValue::Str(_)
+                        | PayloadValue::Bool(_)
                 ) && allow.as_ref().map_or(true, |set| set.contains(k))
                 {
                     Some((type_rank(v), k.clone()))

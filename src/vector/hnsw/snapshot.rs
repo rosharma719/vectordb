@@ -80,7 +80,10 @@ impl HNSWIndex {
                     continue;
                 }
                 let id = self.point_id(idx);
-                let mapped = neighbors.iter().map(|&n| self.point_id(n)).collect::<Vec<_>>();
+                let mapped = neighbors
+                    .iter()
+                    .map(|&n| self.point_id(n))
+                    .collect::<Vec<_>>();
                 level_map.insert(id, mapped);
             }
             if !level_map.is_empty() {
@@ -109,7 +112,11 @@ impl HNSWIndex {
     }
 
     pub fn from_snapshot(snapshot: HnswSnapshot) -> Self {
-        let m0 = if snapshot.m0 == 0 { snapshot.m } else { snapshot.m0 };
+        let m0 = if snapshot.m0 == 0 {
+            snapshot.m
+        } else {
+            snapshot.m0
+        };
         let mut ids: Vec<PointId> = snapshot.vectors.keys().copied().collect();
         ids.sort_unstable();
         let mut point_to_idx = HashMap::with_capacity(ids.len());
@@ -152,7 +159,9 @@ impl HNSWIndex {
                 continue;
             }
             for (id, neighbors) in layer_map {
-                let Some(&idx) = point_to_idx.get(id) else { continue; };
+                let Some(&idx) = point_to_idx.get(id) else {
+                    continue;
+                };
                 let mapped = neighbors
                     .iter()
                     .filter_map(|n| point_to_idx.get(n).copied())
@@ -165,7 +174,9 @@ impl HNSWIndex {
             layers,
             vectors,
             levels,
-            entry_point: snapshot.entry_point.and_then(|id| point_to_idx.get(&id).copied()),
+            entry_point: snapshot
+                .entry_point
+                .and_then(|id| point_to_idx.get(&id).copied()),
             metric: snapshot.metric,
             m: snapshot.m,
             m0,
@@ -179,7 +190,8 @@ impl HNSWIndex {
             point_to_idx,
             idx_to_point: ids,
             exact_fallback_enabled: exact_fallback_enabled_override().unwrap_or(false),
-            exact_fallback_threshold: exact_fallback_threshold_override().unwrap_or(snapshot.exact_fallback_threshold),
+            exact_fallback_threshold: exact_fallback_threshold_override()
+                .unwrap_or(snapshot.exact_fallback_threshold),
         }
     }
 
@@ -195,7 +207,8 @@ impl HNSWIndex {
 
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
         let bytes = std::fs::read(path)?;
-        let (payload, checksum) = if bytes.len() >= 8 && bytes[bytes.len() - 8..bytes.len() - 4] == HNSW_SNAPSHOT_FOOTER
+        let (payload, checksum) = if bytes.len() >= 8
+            && bytes[bytes.len() - 8..bytes.len() - 4] == HNSW_SNAPSHOT_FOOTER
         {
             let checksum = u32::from_le_bytes([
                 bytes[bytes.len() - 4],
@@ -236,8 +249,8 @@ impl HNSWIndex {
             return Ok(Self::from_snapshot(snapshot));
         }
 
-        let snapshot_v1: HnswSnapshotV1 = bincode::deserialize(payload)
-            .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
+        let snapshot_v1: HnswSnapshotV1 =
+            bincode::deserialize(payload).map_err(|e| DBError::SerializationError(anyhow!(e)))?;
         Ok(Self::from_snapshot(snapshot_v1.into()))
     }
 }

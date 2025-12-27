@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
 use crate::payload_storage::filters::Filter;
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::PointId;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// Inverted index: field_name -> field_value -> set of PointIds
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -223,11 +223,10 @@ impl PayloadIndex {
     /// Optional: Returns all point IDs that have any value for the given key.
     pub fn all_for_key(&self, key: &str) -> Option<HashSet<PointId>> {
         self.index.get(key).map(|map| {
-            map.values()
-                .fold(HashSet::new(), |mut acc, set| {
-                    acc.extend(set.iter().copied());
-                    acc
-                })
+            map.values().fold(HashSet::new(), |mut acc, set| {
+                acc.extend(set.iter().copied());
+                acc
+            })
         })
     }
 }

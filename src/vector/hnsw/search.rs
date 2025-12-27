@@ -11,9 +11,9 @@ use crate::utils::types::{DistanceMetric, Vector};
 use super::HNSWIndex;
 use super::config::{
     disable_early_exit, early_exit_patience, log_neighbor_scan_state, log_unfiltered_enabled,
-    neighbor_scan_cap, neighbor_scan_rotate_enabled, neighbor_scan_stride_enabled,
-    next_search_trace_seq, search_expansion_cap_override, search_expansion_multiplier,
-    search_trace_logger, trace_every,
+    neighbor_scan_cap, neighbor_scan_patience, neighbor_scan_rotate_enabled,
+    neighbor_scan_stride_enabled, next_search_trace_seq, search_expansion_cap_override,
+    search_expansion_multiplier, search_trace_logger, trace_every,
 };
 use super::scratch::SEARCH_SCRATCH;
 use super::stats::{SearchLayerStats, SearchStats, UNFILTERED_SEARCH_AGG, UnfilteredSample};
@@ -156,6 +156,7 @@ impl HNSWIndex {
             let mut visited_count = 0usize;
             let mut expanded = 0usize;
             let expansion_cap = expansion_cap_value;
+            let neighbor_patience = neighbor_scan_patience();
 
             let start_entry = if self.deleted.get(entry).copied().unwrap_or(false) {
                 self.deleted
@@ -238,7 +239,9 @@ impl HNSWIndex {
                             } else {
                                 1
                             };
-                            for i in 0..window {
+                            let mut stop_neighbor_scan = false;
+                            let mut neighbor_no_improve = 0usize;
+                            'neighbor_scan: for i in 0..window {
                                 let neighbor = neighbors[(start + i * stride) % degree];
                                 if self.deleted.get(neighbor).copied().unwrap_or(false)
                                     || !scratch.mark_visited(neighbor)
@@ -259,9 +262,10 @@ impl HNSWIndex {
                                             raw
                                         };
 
-                                        let push_candidate = self.metric == DistanceMetric::Dot
-                                            || scratch.result_set.len() < ef
+                                        let improves_result_set = scratch.result_set.len() < ef
                                             || score_val < worst_score;
+                                        let push_candidate = self.metric == DistanceMetric::Dot
+                                            || improves_result_set;
 
                                         if push_candidate {
                                             let sp = NodeCandidate {
@@ -271,9 +275,7 @@ impl HNSWIndex {
                                             };
                                             scratch.candidate_queue.push(sp.clone());
 
-                                            if scratch.result_set.len() < ef
-                                                || score_val < worst_score
-                                            {
+                                            if improves_result_set {
                                                 scratch.result_set.push(NodeResult(sp));
                                                 if scratch.result_set.len() > ef {
                                                     scratch.result_set.pop();
@@ -283,41 +285,65 @@ impl HNSWIndex {
                                                 }
                                             }
                                         }
+                                        if neighbor_patience > 0
+                                            && self.metric != DistanceMetric::Dot
+                                        {
+                                            if improves_result_set {
+                                                neighbor_no_improve = 0;
+                                            } else {
+                                                neighbor_no_improve += 1;
+                                                if neighbor_no_improve >= neighbor_patience {
+                                                    stop_neighbor_scan = true;
+                                                    break 'neighbor_scan;
+                                                }
+                                            }
+                                        }
                                     }
                                     batch_len = 0;
                                 }
                             }
-                        }
-                    }
-                    if batch_len > 0 {
-                        for i in 0..batch_len {
-                            let idx = batch[i];
-                            let raw = self.fast_score(query, &self.vectors[idx]);
-                            let score_val = if normalize {
-                                self.normalize_score(raw)
-                            } else {
-                                raw
-                            };
+                            if !stop_neighbor_scan && batch_len > 0 {
+                                for i in 0..batch_len {
+                                    let idx = batch[i];
+                                    let raw = self.fast_score(query, &self.vectors[idx]);
+                                    let score_val = if normalize {
+                                        self.normalize_score(raw)
+                                    } else {
+                                        raw
+                                    };
 
-                            let push_candidate = self.metric == DistanceMetric::Dot
-                                || scratch.result_set.len() < ef
-                                || score_val < worst_score;
+                                    let improves_result_set =
+                                        scratch.result_set.len() < ef || score_val < worst_score;
+                                    let push_candidate =
+                                        self.metric == DistanceMetric::Dot || improves_result_set;
 
-                            if push_candidate {
-                                let sp = NodeCandidate {
-                                    idx,
-                                    raw_score: raw,
-                                    sort_key: score_val,
-                                };
-                                scratch.candidate_queue.push(sp.clone());
+                                    if push_candidate {
+                                        let sp = NodeCandidate {
+                                            idx,
+                                            raw_score: raw,
+                                            sort_key: score_val,
+                                        };
+                                        scratch.candidate_queue.push(sp.clone());
 
-                                if scratch.result_set.len() < ef || score_val < worst_score {
-                                    scratch.result_set.push(NodeResult(sp));
-                                    if scratch.result_set.len() > ef {
-                                        scratch.result_set.pop();
+                                        if improves_result_set {
+                                            scratch.result_set.push(NodeResult(sp));
+                                            if scratch.result_set.len() > ef {
+                                                scratch.result_set.pop();
+                                            }
+                                            if let Some(rp) = scratch.result_set.peek() {
+                                                worst_score = rp.0.sort_key;
+                                            }
+                                        }
                                     }
-                                    if let Some(rp) = scratch.result_set.peek() {
-                                        worst_score = rp.0.sort_key;
+                                    if neighbor_patience > 0 && self.metric != DistanceMetric::Dot {
+                                        if improves_result_set {
+                                            neighbor_no_improve = 0;
+                                        } else {
+                                            neighbor_no_improve += 1;
+                                            if neighbor_no_improve >= neighbor_patience {
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
                             }

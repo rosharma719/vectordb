@@ -1,2 +1,2 @@
-pub mod filters; 
-pub mod stores; 
+pub mod filters;
+pub mod stores;

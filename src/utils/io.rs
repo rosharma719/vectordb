@@ -75,11 +75,7 @@ pub struct ChecksumWriter<W: Write> {
 
 impl<W: Write> ChecksumWriter<W> {
     pub fn new(inner: W) -> Self {
-        Self {
-            inner,
-            a: 1,
-            b: 0,
-        }
+        Self { inner, a: 1, b: 0 }
     }
 
     pub fn finish(self) -> u32 {

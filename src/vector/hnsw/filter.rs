@@ -1,29 +1,23 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::io::Write;
+use std::sync::Arc;
 
-use crate::payload_storage::filters::{evaluate_filter, Filter};
+use crate::payload_storage::filters::{Filter, evaluate_filter};
 use crate::payload_storage::stores::PayloadIndex;
 use crate::utils::errors::DBError;
 use crate::utils::payload::Payload;
 use crate::utils::types::{DistanceMetric, PointId, Vector};
 
+use super::HNSWIndex;
 use super::config::{
-    disable_early_exit,
-    early_exit_patience,
-    filter_expansion_cap,
-    filter_entry_candidates,
-    filter_failing_budget,
-    filter_passing_budget,
-    filter_search_logger,
-    filter_seed_log_chunk,
+    disable_early_exit, early_exit_patience, filter_entry_candidates, filter_expansion_cap,
+    filter_failing_budget, filter_passing_budget, filter_search_logger, filter_seed_log_chunk,
     next_filter_search_seq,
 };
 use super::scratch::SEARCH_SCRATCH;
-use super::stats::{FilterSearchLogEntry, FILTER_SEED_COUNT};
+use super::stats::{FILTER_SEED_COUNT, FilterSearchLogEntry};
 use super::types::{NodeCandidate, NodeResult, NodeRoutingEntry, ScoredPoint};
-use super::HNSWIndex;
 
 impl HNSWIndex {
     fn best_entry_in_mask(mask: &[bool], levels: &[usize], deleted: &[bool]) -> Option<usize> {
@@ -40,7 +34,12 @@ impl HNSWIndex {
         best.map(|(idx, _)| idx)
     }
 
-    fn top_entries_in_mask(mask: &[bool], levels: &[usize], deleted: &[bool], cap: usize) -> Vec<usize> {
+    fn top_entries_in_mask(
+        mask: &[bool],
+        levels: &[usize],
+        deleted: &[bool],
+        cap: usize,
+    ) -> Vec<usize> {
         if cap == 0 {
             return Vec::new();
         }
@@ -87,14 +86,16 @@ impl HNSWIndex {
         }
 
         match filter {
-            Filter::Match { key, value } => payload_index
-                .query_exact(key, value)
-                .and_then(|ids| max_level_point(ids.iter(), &self.levels, &self.deleted, &self.point_to_idx)),
+            Filter::Match { key, value } => payload_index.query_exact(key, value).and_then(|ids| {
+                max_level_point(ids.iter(), &self.levels, &self.deleted, &self.point_to_idx)
+            }),
             Filter::And(conds) | Filter::Or(conds) => {
                 let mut best: Option<(usize, usize)> = None;
 
                 for cond in conds {
-                    if let Some(id) = self.find_entry_point_matching_filter(cond, payload_index, payloads) {
+                    if let Some(id) =
+                        self.find_entry_point_matching_filter(cond, payload_index, payloads)
+                    {
                         let level = self.levels.get(id).copied().unwrap_or(0);
                         if best.map_or(true, |(_, l)| level > l) {
                             best = Some((id, level));
@@ -104,7 +105,9 @@ impl HNSWIndex {
 
                 best.map(|(id, _)| id)
             }
-            Filter::Not(inner) => self.find_entry_point_matching_filter(inner, payload_index, payloads),
+            Filter::Not(inner) => {
+                self.find_entry_point_matching_filter(inner, payload_index, payloads)
+            }
             Filter::Compare { .. } => None,
         }
     }
@@ -183,17 +186,27 @@ impl HNSWIndex {
                     if candidate_ids.len() <= self.exact_fallback_threshold {
                         let mut out = Vec::with_capacity(candidate_ids.len().min(top_k));
                         for id in candidate_ids {
-                            let Some(idx) = self.idx_of(id) else { continue; };
+                            let Some(idx) = self.idx_of(id) else {
+                                continue;
+                            };
                             if self.deleted.get(idx).copied().unwrap_or(false) {
                                 continue;
                             }
-                            let Some(payload) = payloads.get(&id) else { continue; };
+                            let Some(payload) = payloads.get(&id) else {
+                                continue;
+                            };
                             if !evaluate_filter(f, payload)? {
                                 continue;
                             }
-                            let Some(vec) = self.get_vector_by_idx(idx) else { continue; };
+                            let Some(vec) = self.get_vector_by_idx(idx) else {
+                                continue;
+                            };
                             let raw = self.fast_score(query_for_search, vec);
-                            let sk = if use_normalize_score { self.normalize_score(raw) } else { raw };
+                            let sk = if use_normalize_score {
+                                self.normalize_score(raw)
+                            } else {
+                                raw
+                            };
                             out.push(ScoredPoint {
                                 id,
                                 raw_score: raw,
@@ -207,7 +220,9 @@ impl HNSWIndex {
                 }
             }
             if allowed_mask.is_none() {
-                if let Some(mask) = payload_index.build_filter_mask(f, &self.point_to_idx, self.point_to_idx.len()) {
+                if let Some(mask) =
+                    payload_index.build_filter_mask(f, &self.point_to_idx, self.point_to_idx.len())
+                {
                     if !mask.iter().any(|v| *v) {
                         return Ok(vec![]);
                     }
@@ -224,7 +239,9 @@ impl HNSWIndex {
         let mut entry = match self.entry_point {
             Some(idx) => {
                 if let Some(mask) = allowed_mask.as_ref() {
-                    if mask.get(idx).copied().unwrap_or(false) && !self.deleted.get(idx).copied().unwrap_or(false) {
+                    if mask.get(idx).copied().unwrap_or(false)
+                        && !self.deleted.get(idx).copied().unwrap_or(false)
+                    {
                         idx
                     } else {
                         match Self::best_entry_in_mask(mask, &self.levels, &self.deleted) {
@@ -272,7 +289,11 @@ impl HNSWIndex {
                 entry,
                 level,
                 payloads,
-                if allowed_mask.is_some() { full_filter } else { match_filter.as_ref() },
+                if allowed_mask.is_some() {
+                    full_filter
+                } else {
+                    match_filter.as_ref()
+                },
             )?;
         }
 

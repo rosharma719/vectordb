@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-
-
 use serde::{Deserialize, Serialize};
 
 /// The unique identifier for a point in the vector database.
@@ -23,11 +21,9 @@ pub type ShardId = u32;
 pub type CollectionName = String;
 
 /// Describes the type of distance metric used for similarity search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DistanceMetric {
     Cosine,
     Dot,
     Euclidean,
 }
-

@@ -20,8 +20,9 @@ Snapshot defaults (shared):
   - `VECTORDB_FILTER_SEARCH_LOG` path to JSONL for per-query traversal stats
   - `VECTORDB_FILTER_PASSING_BUDGET` / `VECTORDB_FILTER_FAILING_BUDGET` (override routing budgets; defaults derive from M: passing≈max(8, 2*M), failing=1)
   - `VECTORDB_NEIGHBOR_SCAN_CAP_LEVEL0` (per-node window, default 64; 0 disables)
-  - `VECTORDB_NEIGHBOR_SCAN_ROTATE` (1 to shift the window start, default 1)
+  - `VECTORDB_NEIGHBOR_SCAN_ROTATE` (1 to shift the window start, default 0/off)
   - `VECTORDB_NEIGHBOR_SCAN_STRIDE` (1 to stride through the neighbor list, default 0/off)
+  - `VECTORDB_NEIGHBOR_SCAN_PATIENCE` (consecutive non-improving neighbors before stopping the scan; 0 disables, defaults to 0)
 
 - Logging/analysis:
   - `VECTORDB_TEST_LOG` -> `quiet|info|debug` (default `info`)

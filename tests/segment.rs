@@ -1,13 +1,13 @@
-use vectordb::segment::segment::Segment;
-use vectordb::vector::hnsw::HNSWIndex;
-use vectordb::utils::types::{DistanceMetric, Vector};
-use vectordb::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
-use vectordb::payload_storage::filters::Filter;
-use vectordb::utils::errors::DBError;
+use serde::Serialize;
+use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::env;
-use serde::Serialize;
+use vectordb::payload_storage::filters::Filter;
+use vectordb::segment::segment::Segment;
+use vectordb::utils::errors::DBError;
+use vectordb::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
+use vectordb::utils::types::{DistanceMetric, Vector};
+use vectordb::vector::hnsw::HNSWIndex;
 
 fn vecf_dim(seed: usize, dim: usize) -> Vector {
     // Deterministic high-dim vector generator for tests
@@ -25,12 +25,15 @@ struct DotDiagEntry {
     top_dot: f32,
 }
 
-
 #[test]
 fn test_large_scale_insert_and_search_all_metrics() {
     use std::time::Instant;
 
-    for metric in [DistanceMetric::Euclidean, DistanceMetric::Cosine, DistanceMetric::Dot] {
+    for metric in [
+        DistanceMetric::Euclidean,
+        DistanceMetric::Cosine,
+        DistanceMetric::Dot,
+    ] {
         println!("\n\n===========================");
         println!("STARTING TEST FOR {:?}", metric);
         println!("===========================\n");
@@ -75,7 +78,11 @@ fn test_large_scale_insert_and_search_all_metrics() {
         let search_start = Instant::now();
         let dot_diag_path = env::var("VECTORDB_DOT_DIAG_LOG").ok();
         for (query_idx, (expected_id, query)) in vectors.iter().take(10).enumerate() {
-            let noisy_query: Vec<f32> = query.iter().enumerate().map(|(idx, x)| x + 0.001 * ((idx % 5) as f32)).collect();
+            let noisy_query: Vec<f32> = query
+                .iter()
+                .enumerate()
+                .map(|(idx, x)| x + 0.001 * ((idx % 5) as f32))
+                .collect();
 
             let now = Instant::now();
             let results = segment.search(&noisy_query, 5).unwrap();
@@ -83,9 +90,7 @@ fn test_large_scale_insert_and_search_all_metrics() {
 
             println!(
                 "[{:?}] Search complete in {:?}. Top result: ID {:?}",
-                metric,
-                duration,
-                results[0].id
+                metric, duration, results[0].id
             );
 
             if metric == DistanceMetric::Dot {
@@ -133,9 +138,7 @@ fn test_large_scale_insert_and_search_all_metrics() {
                 assert!(
                     found,
                     "[{:?}] Expected ID {:?} not in top 5 results for query {:?}",
-                    metric,
-                    expected_id,
-                    noisy_query
+                    metric, expected_id, noisy_query
                 );
             }
         }
@@ -153,7 +156,11 @@ fn test_large_scale_insert_and_search_all_metrics() {
 
 #[test]
 fn test_large_scale_filtered_queries_all_metrics() {
-    for metric in [DistanceMetric::Euclidean, DistanceMetric::Cosine, DistanceMetric::Dot] {
+    for metric in [
+        DistanceMetric::Euclidean,
+        DistanceMetric::Cosine,
+        DistanceMetric::Dot,
+    ] {
         let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
 
@@ -167,7 +174,10 @@ fn test_large_scale_filtered_queries_all_metrics() {
             };
             payload.set("animal", PayloadValue::Str(animal.to_string()));
             payload.set("age", PayloadValue::Int((i % 8 + 1) as i64));
-            payload.set("score", PayloadValue::Float((60.0 + (i % 40) as f64).into()));
+            payload.set(
+                "score",
+                PayloadValue::Float((60.0 + (i % 40) as f64).into()),
+            );
 
             let vec = vecf_dim(i, DIM);
             segment.insert(vec, Some(payload)).unwrap();
@@ -207,7 +217,11 @@ fn test_large_scale_filtered_queries_all_metrics() {
 
 #[test]
 fn test_list_filters_with_larger_pool_all_metrics() {
-    for metric in [DistanceMetric::Euclidean, DistanceMetric::Cosine, DistanceMetric::Dot] {
+    for metric in [
+        DistanceMetric::Euclidean,
+        DistanceMetric::Cosine,
+        DistanceMetric::Dot,
+    ] {
         let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
 
@@ -250,7 +264,11 @@ fn test_list_filters_with_larger_pool_all_metrics() {
 
 #[test]
 fn test_deletion_and_purge_with_large_set_all_metrics() {
-    for metric in [DistanceMetric::Euclidean, DistanceMetric::Cosine, DistanceMetric::Dot] {
+    for metric in [
+        DistanceMetric::Euclidean,
+        DistanceMetric::Cosine,
+        DistanceMetric::Dot,
+    ] {
         let hnsw = HNSWIndex::new(metric, 16, 50, 16, DIM);
         let mut segment = Segment::new(hnsw);
 
@@ -280,7 +298,11 @@ fn test_deletion_and_purge_with_large_set_all_metrics() {
         }
 
         for id in &ids {
-            assert!(segment.get_vector(*id).is_none(), "❌ NOT purged: id = {}", id);
+            assert!(
+                segment.get_vector(*id).is_none(),
+                "❌ NOT purged: id = {}",
+                id
+            );
         }
     }
 }
@@ -292,12 +314,17 @@ fn test_insert_with_custom_ids_and_auto_ids() {
 
     let custom_id = 42;
     let vec_custom = vecf_dim(1, DIM);
-    let returned_id = segment.insert_with_id(custom_id, vec_custom.clone(), None).unwrap();
+    let returned_id = segment
+        .insert_with_id(custom_id, vec_custom.clone(), None)
+        .unwrap();
     assert_eq!(returned_id, custom_id);
 
     // Auto IDs should advance past the highest custom ID.
     let auto_id = segment.insert(vecf_dim(2, DIM), None).unwrap();
-    assert!(auto_id > custom_id, "auto-generated ID should advance past custom IDs");
+    assert!(
+        auto_id > custom_id,
+        "auto-generated ID should advance past custom IDs"
+    );
 
     // Duplicate custom ID should error.
     let dup = segment.insert_with_id(custom_id, vecf_dim(3, DIM), None);

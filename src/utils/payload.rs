@@ -1,10 +1,8 @@
 //! Payload implementation with setter and comparison support
-use std::collections::HashMap;
 use crate::utils::errors::DBError;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
-
-
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PayloadValue {
@@ -20,7 +18,6 @@ pub enum PayloadValue {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Payload(pub HashMap<String, PayloadValue>);
-
 
 //Wrapper around a HashMap<String, PayloadValue>
 impl Payload {
@@ -41,11 +38,11 @@ impl Payload {
         other: &PayloadValue,
     ) -> Result<bool, DBError> {
         //println!("Evaluating comparison for field: '{}', operation: {:?}, against value: {:?}", field, op, other);
-        
+
         match self.get(field) {
             Some(value) => {
                 //println!("Payload contains key '{}'. Value: {:?}", field, value);
-        
+
                 match (value, other) {
                     // Handle ListStr comparison
                     (PayloadValue::ListStr(l), PayloadValue::ListStr(o)) => {
@@ -113,17 +110,12 @@ impl Payload {
             }
         }
     }
-         
 
-    pub fn evaluate_list_field(
-        &self,
-        field: &str,
-        op: ListQueryOp,
-    ) -> Result<bool, DBError> {
+    pub fn evaluate_list_field(&self, field: &str, op: ListQueryOp) -> Result<bool, DBError> {
         match self.get(field) {
-            Some(value) => value
-                .evaluate_list_query(op)
-                .ok_or_else(|| DBError::InvalidPayload(format!("Invalid list operation on field: {field}"))),
+            Some(value) => value.evaluate_list_query(op).ok_or_else(|| {
+                DBError::InvalidPayload(format!("Invalid list operation on field: {field}"))
+            }),
             None => Err(DBError::InvalidPayload(format!("Missing field: {field}"))),
         }
     }
@@ -187,8 +179,8 @@ impl PayloadValue {
     }
 
     pub fn evaluate_list_query(&self, op: ListQueryOp) -> Option<bool> {
-        use PayloadValue::*;
         use ListQueryOp::*;
+        use PayloadValue::*;
 
         match op {
             Contains(val) => match (self, val) {
@@ -205,7 +197,6 @@ impl PayloadValue {
                     None
                 }
             }
-            ,
             Length(cmp_op, len) => match self {
                 ListInt(vec) => Some(Self::compare_len(vec.len(), cmp_op, len)),
                 ListFloat(vec) => Some(Self::compare_len(vec.len(), cmp_op, len)),
@@ -214,12 +205,19 @@ impl PayloadValue {
                 _ => None,
             },
             ElementCompare(index, cmp_op, val) => match (self, val) {
-                (ListInt(vec), Int(x)) => vec.get(index).map(|v| Self::compare_scalar_static(v, cmp_op, x)),
-                (ListFloat(vec), Float(x)) => vec.get(index).map(|v| Self::compare_scalar_static(v, cmp_op, x)),
-                (ListStr(vec), Str(x)) => vec.get(index).map(|v| Self::compare_scalar_static(v, cmp_op, x)),
+                (ListInt(vec), Int(x)) => vec
+                    .get(index)
+                    .map(|v| Self::compare_scalar_static(v, cmp_op, x)),
+                (ListFloat(vec), Float(x)) => vec
+                    .get(index)
+                    .map(|v| Self::compare_scalar_static(v, cmp_op, x)),
+                (ListStr(vec), Str(x)) => vec
+                    .get(index)
+                    .map(|v| Self::compare_scalar_static(v, cmp_op, x)),
                 (ListBool(vec), Bool(x)) => {
                     if matches!(cmp_op, ScalarComparisonOp::Eq | ScalarComparisonOp::Neq) {
-                        vec.get(index).map(|v| Self::compare_scalar_static(v, cmp_op, x))
+                        vec.get(index)
+                            .map(|v| Self::compare_scalar_static(v, cmp_op, x))
                     } else {
                         None
                     }
@@ -239,7 +237,11 @@ impl PayloadValue {
             ScalarComparisonOp::Gte => actual >= expected,
         }
     }
-    fn compare_scalar_static<T: PartialOrd + PartialEq>(a: &T, op: ScalarComparisonOp, b: &T) -> bool {
+    fn compare_scalar_static<T: PartialOrd + PartialEq>(
+        a: &T,
+        op: ScalarComparisonOp,
+        b: &T,
+    ) -> bool {
         match op {
             ScalarComparisonOp::Eq => a == b,
             ScalarComparisonOp::Neq => a != b,
@@ -249,8 +251,6 @@ impl PayloadValue {
             ScalarComparisonOp::Gte => a >= b,
         }
     }
-    
-    
 }
 
 impl Default for Payload {

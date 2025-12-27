@@ -2,8 +2,6 @@ use vectordb::utils::errors::DBError;
 use vectordb::utils::types::*;
 use vectordb::vector::metric::*;
 
-
-
 #[test]
 #[should_panic(expected = "Vectors must be the same length")]
 fn test_distance_vector_length_mismatch_panics() {
@@ -11,7 +9,6 @@ fn test_distance_vector_length_mismatch_panics() {
     let v2 = vec![1.0]; // mismatched length
     let _ = score(&v1, &v2, DistanceMetric::Dot);
 }
-
 
 #[test]
 fn test_distance_metrics() {
@@ -21,26 +18,34 @@ fn test_distance_metrics() {
     let cosine = score(&v1, &v2, DistanceMetric::Cosine);
     assert!(
         cosine >= 0.0 && cosine <= 2.0,
-        "Cosine distance out of range: {}", cosine
+        "Cosine distance out of range: {}",
+        cosine
     );
 
     let dot = score(&v1, &v2, DistanceMetric::Dot);
     assert!(
         dot > 0.0,
-        "Dot product similarity should be positive for aligned vectors: {}", dot
+        "Dot product similarity should be positive for aligned vectors: {}",
+        dot
     );
 
     let euclidean = score(&v1, &v2, DistanceMetric::Euclidean);
-    assert!(euclidean > 0.0, "Euclidean distance should be positive: {}", euclidean);
+    assert!(
+        euclidean > 0.0,
+        "Euclidean distance should be positive: {}",
+        euclidean
+    );
 }
-
 
 #[test]
 fn test_error_display() {
     let not_found = DBError::NotFound(42);
     assert_eq!(format!("{}", not_found), "Point with ID 42 not found");
 
-    let mismatch = DBError::VectorLengthMismatch { expected: 3, actual: 5 };
+    let mismatch = DBError::VectorLengthMismatch {
+        expected: 3,
+        actual: 5,
+    };
     assert!(
         format!("{}", mismatch).contains("expected 3"),
         "Mismatch message incorrect"

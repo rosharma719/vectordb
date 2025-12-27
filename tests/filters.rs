@@ -1,5 +1,5 @@
-use vectordb::utils::payload::{Payload, PayloadValue};
 use vectordb::payload_storage::filters::{Filter, evaluate_filter};
+use vectordb::utils::payload::{Payload, PayloadValue};
 
 #[test]
 fn test_match_filter_true() {

@@ -1,2 +1,2 @@
-pub mod metric;
 pub mod hnsw;
+pub mod metric;

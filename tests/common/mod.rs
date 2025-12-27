@@ -27,11 +27,14 @@ pub fn env_usize_first(keys: &[&str]) -> Option<usize> {
 /// Return the first present env var (by key) parsed as a comma list of usize.
 pub fn env_usize_list_first(keys: &[&str]) -> Option<Vec<usize>> {
     keys.iter().find_map(|k| {
-        env::var(k).ok().map(|v| {
-            v.split(',')
-                .filter_map(|s| s.trim().replace('_', "").parse::<usize>().ok())
-                .collect::<Vec<_>>()
-        }).filter(|v| !v.is_empty())
+        env::var(k)
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .filter_map(|s| s.trim().replace('_', "").parse::<usize>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
     })
 }
 
@@ -108,6 +111,7 @@ impl TestLogLevel {
 pub struct TestLogConfig {
     pub level: TestLogLevel,
     pub progress_every: usize,
+    pub insert_progress_every: usize,
     pub query_log_path: Option<String>,
     pub query_log_every: usize,
 }
@@ -120,6 +124,10 @@ impl TestLogConfig {
             .and_then(|v| v.replace('_', "").parse::<usize>().ok())
             .filter(|&v| v > 0)
             .unwrap_or(100);
+        let insert_progress_every = env::var("VECTORDB_INSERT_PROGRESS_EVERY")
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+            .unwrap_or(1000);
         let query_log_path = env::var("VECTORDB_QUERY_LOG").ok();
         let query_log_every = env::var("VECTORDB_QUERY_LOG_EVERY")
             .ok()
@@ -129,6 +137,7 @@ impl TestLogConfig {
         Self {
             level,
             progress_every,
+            insert_progress_every,
             query_log_path,
             query_log_every,
         }
@@ -203,16 +212,25 @@ impl SearchConfig {
             &format!("VECTORDB_{prefix}_EF_SEARCH_LIST"),
         ])
         .or_else(|| {
-            env_usize_first(&["VECTORDB_EF_SEARCH", &format!("VECTORDB_{prefix}_EF_SEARCH")])
-                .map(|v| vec![v])
+            env_usize_first(&[
+                "VECTORDB_EF_SEARCH",
+                &format!("VECTORDB_{prefix}_EF_SEARCH"),
+            ])
+            .map(|v| vec![v])
         })
         .unwrap_or_else(|| default_ef_values.to_vec());
-        let queries_cap = env_usize_first(&["VECTORDB_QUERIES", &format!("VECTORDB_{prefix}_QUERIES")])
-            .unwrap_or(default_queries);
-        let base_cap = env_usize_first(&["VECTORDB_BASE_LIMIT", &format!("VECTORDB_{prefix}_BASE_LIMIT")]);
-        let ef_construct =
-            env_usize_first(&["VECTORDB_EF_CONSTRUCT", &format!("VECTORDB_{prefix}_EF_CONSTRUCT")])
-                .unwrap_or(100);
+        let queries_cap =
+            env_usize_first(&["VECTORDB_QUERIES", &format!("VECTORDB_{prefix}_QUERIES")])
+                .unwrap_or(default_queries);
+        let base_cap = env_usize_first(&[
+            "VECTORDB_BASE_LIMIT",
+            &format!("VECTORDB_{prefix}_BASE_LIMIT"),
+        ]);
+        let ef_construct = env_usize_first(&[
+            "VECTORDB_EF_CONSTRUCT",
+            &format!("VECTORDB_{prefix}_EF_CONSTRUCT"),
+        ])
+        .unwrap_or(100);
         Self {
             top_k,
             ef_values,
@@ -283,7 +301,13 @@ impl QueryStatsAgg {
         }
     }
 
-    pub fn record(&mut self, elapsed_ms: f64, visited: Option<usize>, expanded: Option<usize>, recall: f64) {
+    pub fn record(
+        &mut self,
+        elapsed_ms: f64,
+        visited: Option<usize>,
+        expanded: Option<usize>,
+        recall: f64,
+    ) {
         self.elapsed_ms.push(elapsed_ms);
         if let Some(v) = visited {
             self.visited.push(v);
@@ -323,7 +347,10 @@ pub struct QueryLogWriter {
 impl QueryLogWriter {
     pub fn new(path: Option<String>, every: usize) -> Self {
         let writer = path.and_then(|p| File::create(p).ok()).map(BufWriter::new);
-        Self { writer, every: every.max(1) }
+        Self {
+            writer,
+            every: every.max(1),
+        }
     }
 
     pub fn write<T: Serialize>(&mut self, idx: usize, entry: &T) {
@@ -372,7 +399,10 @@ pub fn generate_payload(i: usize) -> Payload {
         ),
     );
     payload.set("age", PayloadValue::Int((i % 8 + 1).try_into().unwrap()));
-    payload.set("score", PayloadValue::Float((60.0 + (i % 40) as f64).into()));
+    payload.set(
+        "score",
+        PayloadValue::Float((60.0 + (i % 40) as f64).into()),
+    );
     payload.set(
         "tags",
         PayloadValue::ListStr(if i % 2 == 0 {
@@ -444,7 +474,9 @@ pub fn bench_search(segment: &Segment, query: &Vector) {
 
     println!("🧃 Filtered search...");
     let start = Instant::now();
-    let _ = segment.search_with_filter(query, 10, Some(&filter)).unwrap();
+    let _ = segment
+        .search_with_filter(query, 10, Some(&filter))
+        .unwrap();
     println!("Filtered search took {:?}", start.elapsed());
 
     let tag_filter = Filter::Compare {
@@ -455,6 +487,8 @@ pub fn bench_search(segment: &Segment, query: &Vector) {
 
     println!("📦 List match search...");
     let start = Instant::now();
-    let _ = segment.search_with_filter(query, 10, Some(&tag_filter)).unwrap();
+    let _ = segment
+        .search_with_filter(query, 10, Some(&tag_filter))
+        .unwrap();
     println!("List filter took {:?}", start.elapsed());
 }

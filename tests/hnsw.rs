@@ -1,8 +1,8 @@
+use rand::Rng;
+use vectordb::utils::errors::DBError;
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::vector::hnsw::HNSWIndex;
 use vectordb::vector::metric::score;
-use vectordb::utils::errors::DBError;
-use rand::Rng;
 
 fn vecf(v: &[f32]) -> Vector {
     println!("Creating vector: {:?}", v);
@@ -10,7 +10,10 @@ fn vecf(v: &[f32]) -> Vector {
 }
 
 fn generate_points(n: usize, dim: usize, spread: f32) -> Vec<Vector> {
-    println!("Generating {} points with dimension {} and spread {}", n, dim, spread);
+    println!(
+        "Generating {} points with dimension {} and spread {}",
+        n, dim, spread
+    );
     let mut rng = rand::rng();
     let points = (0..n)
         .map(|i| {
@@ -25,12 +28,15 @@ fn generate_points(n: usize, dim: usize, spread: f32) -> Vec<Vector> {
     points
 }
 
-
 #[test]
 fn test_all_metrics_consistency() {
     println!("Starting test_all_metrics_consistency");
 
-    for &metric in &[DistanceMetric::Euclidean, DistanceMetric::Cosine, DistanceMetric::Dot] {
+    for &metric in &[
+        DistanceMetric::Euclidean,
+        DistanceMetric::Cosine,
+        DistanceMetric::Dot,
+    ] {
         println!("Testing with metric: {:?}", metric);
         let mut hnsw = HNSWIndex::new(metric, 16, 64, 16, 4);
         println!("Created HNSW index with dimension 4");
@@ -59,19 +65,13 @@ fn test_all_metrics_consistency() {
                     .map(|v| score(&query, v, DistanceMetric::Dot)) // dot similarity
                     .collect();
 
-                let max_dot = all_dots
-                    .iter()
-                    .cloned()
-                    .fold(f32::NEG_INFINITY, f32::max);
+                let max_dot = all_dots.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 assert!(
                     (best.raw_score - max_dot).abs() < 1e-5,
                     "Dot: Top result had raw_score {}, but max dot was {}",
                     best.raw_score,
                     max_dot
                 );
-                
-
-
             }
             _ => {
                 let actual_dist = score(&query, &points[best.id as usize], metric);
@@ -88,13 +88,10 @@ fn test_all_metrics_consistency() {
     println!("Completed test_all_metrics_consistency");
 }
 
-
 #[test]
 fn test_hnsw_robust_score_metrics() {
     // Create 5 vectors in a line with easily predictable order.
-    let vectors: Vec<_> = (1..=1000)
-        .map(|i| vecf(&[i as f32, 0.0, 0.0]))
-        .collect();
+    let vectors: Vec<_> = (1..=1000).map(|i| vecf(&[i as f32, 0.0, 0.0])).collect();
 
     // Euclidean HNSW
     let mut hnsw_euclidean = HNSWIndex::new(DistanceMetric::Euclidean, 16, 50, 16, 3);
@@ -117,7 +114,6 @@ fn test_hnsw_robust_score_metrics() {
     );
 }
 
-
 #[test]
 fn test_large_insertion_and_ranking_accuracy() {
     println!("Starting test_large_insertion_and_ranking_accuracy");
@@ -138,11 +134,11 @@ fn test_large_insertion_and_ranking_accuracy() {
     println!("Searching for query vector: {:?}", query);
     let results = hnsw.search(&query, 5).unwrap();
     println!("Search returned {} results", results.len());
-    
+
     for (i, result) in results.iter().enumerate() {
         println!("Result {}: ID={}, score={}", i, result.id, result.raw_score);
     }
-    
+
     let ids: Vec<_> = results.iter().map(|r| r.id).collect();
     println!("Result IDs in order: {:?}", ids);
 
@@ -152,9 +148,16 @@ fn test_large_insertion_and_ranking_accuracy() {
 
     // Check sorted by distance
     for pair in results.windows(2) {
-        println!("Comparing scores: {} <= {}", pair[0].raw_score, pair[1].raw_score);
-        assert!(pair[0].raw_score <= pair[1].raw_score, 
-                "Results not sorted by distance: {} > {}", pair[0].raw_score, pair[1].raw_score);
+        println!(
+            "Comparing scores: {} <= {}",
+            pair[0].raw_score, pair[1].raw_score
+        );
+        assert!(
+            pair[0].raw_score <= pair[1].raw_score,
+            "Results not sorted by distance: {} > {}",
+            pair[0].raw_score,
+            pair[1].raw_score
+        );
     }
     println!("Completed test_large_insertion_and_ranking_accuracy");
 }
@@ -167,10 +170,10 @@ fn test_dot_product_prefers_larger_magnitudes() {
 
     println!("Inserting vector with ID 1: [1.0, 1.0]");
     hnsw.insert(1, vecf(&[1.0, 1.0])).unwrap();
-    
+
     println!("Inserting vector with ID 2: [10.0, 10.0]");
     hnsw.insert(2, vecf(&[10.0, 10.0])).unwrap();
-    
+
     println!("Inserting vector with ID 3: [-1.0, -1.0]");
     hnsw.insert(3, vecf(&[-1.0, -1.0])).unwrap();
 
@@ -178,12 +181,15 @@ fn test_dot_product_prefers_larger_magnitudes() {
     println!("Searching for query vector: {:?}", query);
     let results = hnsw.search(&query, 3).unwrap();
     println!("Search returned {} results", results.len());
-    
+
     for (i, result) in results.iter().enumerate() {
         println!("Result {}: ID={}, score={}", i, result.id, result.raw_score);
     }
-    
-    assert_eq!(results[0].id, 2, "First result should be ID 2 (with larger magnitude)");
+
+    assert_eq!(
+        results[0].id, 2,
+        "First result should be ID 2 (with larger magnitude)"
+    );
     println!("Completed test_dot_product_prefers_larger_magnitudes");
 }
 
@@ -195,7 +201,7 @@ fn test_cosine_distance_with_opposite_vectors() {
 
     println!("Inserting vector with ID 1: [1.0, 0.0, 0.0]");
     hnsw.insert(1, vecf(&[1.0, 0.0, 0.0])).unwrap();
-    
+
     println!("Inserting vector with ID 2: [-1.0, 0.0, 0.0]");
     hnsw.insert(2, vecf(&[-1.0, 0.0, 0.0])).unwrap();
 
@@ -203,13 +209,19 @@ fn test_cosine_distance_with_opposite_vectors() {
     println!("Searching for query vector: {:?}", query);
     let results = hnsw.search(&query, 2).unwrap();
     println!("Search returned {} results", results.len());
-    
+
     for (i, result) in results.iter().enumerate() {
         println!("Result {}: ID={}, score={}", i, result.id, result.raw_score);
     }
-    
-    assert_eq!(results[0].id, 1, "First result should be ID 1 (same direction)");
-    assert_eq!(results[1].id, 2, "Second result should be ID 2 (opposite direction)");
+
+    assert_eq!(
+        results[0].id, 1,
+        "First result should be ID 1 (same direction)"
+    );
+    assert_eq!(
+        results[1].id, 2,
+        "Second result should be ID 2 (opposite direction)"
+    );
     println!("Completed test_cosine_distance_with_opposite_vectors");
 }
 
@@ -221,7 +233,7 @@ fn test_idempotent_insert_and_query() {
 
     println!("Inserting vector with ID 1: [3.0, 4.0]");
     hnsw.insert(1, vecf(&[3.0, 4.0])).unwrap();
-    
+
     println!("Inserting same vector with same ID again (should be idempotent)");
     hnsw.insert(1, vecf(&[3.0, 4.0])).unwrap(); // Should be ignored
 
@@ -229,11 +241,11 @@ fn test_idempotent_insert_and_query() {
     println!("Searching for query vector: {:?}", query);
     let results = hnsw.search(&query, 1).unwrap();
     println!("Search returned {} results", results.len());
-    
+
     for (i, result) in results.iter().enumerate() {
         println!("Result {}: ID={}, score={}", i, result.id, result.raw_score);
     }
-    
+
     assert_eq!(results.len(), 1, "Should return exactly 1 result");
     assert_eq!(results[0].id, 1, "Result should have ID 1");
     println!("Completed test_idempotent_insert_and_query");
@@ -249,8 +261,11 @@ fn test_empty_index_search_returns_empty() {
     println!("Searching in empty index for query vector: {:?}", query);
     let results = hnsw.search(&query, 10).unwrap();
     println!("Search returned {} results", results.len());
-    
-    assert!(results.is_empty(), "Results should be empty for empty index");
+
+    assert!(
+        results.is_empty(),
+        "Results should be empty for empty index"
+    );
     println!("Completed test_empty_index_search_returns_empty");
 }
 
@@ -264,12 +279,18 @@ fn test_dimension_mismatch_is_handled() {
     hnsw.insert(1, vecf(&[1.0, 1.0, 1.0, 1.0, 1.0])).unwrap();
 
     let bad_vec = vecf(&[1.0, 2.0]);
-    println!("Created mismatched vector with dimension 2 (index expects 5): {:?}", bad_vec);
+    println!(
+        "Created mismatched vector with dimension 2 (index expects 5): {:?}",
+        bad_vec
+    );
 
     println!("Testing insertion with mismatched dimension vector");
     match hnsw.insert(2, bad_vec.clone()) {
         Err(DBError::VectorLengthMismatch { expected, actual }) => {
-            println!("Correctly got VectorLengthMismatch error: expected={}, actual={}", expected, actual);
+            println!(
+                "Correctly got VectorLengthMismatch error: expected={}, actual={}",
+                expected, actual
+            );
             assert_eq!(expected, 5, "Expected dimension should be 5");
             assert_eq!(actual, 2, "Actual dimension should be 2");
         }
@@ -282,7 +303,10 @@ fn test_dimension_mismatch_is_handled() {
     println!("Testing search with mismatched dimension vector");
     match hnsw.search(&bad_vec, 1) {
         Err(DBError::VectorLengthMismatch { expected, actual }) => {
-            println!("Correctly got VectorLengthMismatch error: expected={}, actual={}", expected, actual);
+            println!(
+                "Correctly got VectorLengthMismatch error: expected={}, actual={}",
+                expected, actual
+            );
             assert_eq!(expected, 5, "Expected dimension should be 5");
             assert_eq!(actual, 2, "Actual dimension should be 2");
         }
@@ -293,7 +317,6 @@ fn test_dimension_mismatch_is_handled() {
     }
     println!("Completed test_dimension_mismatch_is_handled");
 }
-
 
 #[test]
 fn test_search_k_greater_than_total_points() {
@@ -330,7 +353,6 @@ fn test_insertion_order_independence() {
     let results = hnsw.search(&vecf(&[2.9, 2.9]), 1).unwrap();
     assert_eq!(results[0].id, 300);
 }
-
 
 #[test]
 fn test_dense_cloud_retrieval_accuracy() {

@@ -29,6 +29,7 @@ static FILTER_ENTRY_CANDIDATES: OnceLock<Option<usize>> = OnceLock::new();
 static NEIGHBOR_SCAN_CAP_LEVEL0: OnceLock<Option<usize>> = OnceLock::new();
 static NEIGHBOR_SCAN_ROTATE: OnceLock<Option<bool>> = OnceLock::new();
 static NEIGHBOR_SCAN_STRIDE: OnceLock<Option<bool>> = OnceLock::new();
+static NEIGHBOR_SCAN_PATIENCE: OnceLock<Option<usize>> = OnceLock::new();
 static NEIGHBOR_SCAN_STATE_LOGGED: OnceLock<()> = OnceLock::new();
 static DIVERSITY_ALPHA: OnceLock<Option<f32>> = OnceLock::new();
 static DIVERSITY_ALPHA_LOW: OnceLock<Option<f32>> = OnceLock::new();
@@ -252,6 +253,18 @@ pub fn neighbor_scan_cap(level: usize) -> usize {
     }
 }
 
+pub fn neighbor_scan_patience() -> usize {
+    NEIGHBOR_SCAN_PATIENCE
+        .get_or_init(|| {
+            std::env::var("VECTORDB_NEIGHBOR_SCAN_PATIENCE")
+                .ok()
+                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+                .filter(|&v| v > 0)
+        })
+        .clone()
+        .unwrap_or(0)
+}
+
 pub fn neighbor_scan_rotate_enabled() -> bool {
     NEIGHBOR_SCAN_ROTATE
         .get_or_init(|| {
@@ -259,7 +272,7 @@ pub fn neighbor_scan_rotate_enabled() -> bool {
                 .ok()
                 .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 pub fn neighbor_scan_stride_enabled() -> bool {

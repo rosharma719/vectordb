@@ -121,7 +121,13 @@ impl UnfilteredSearchAgg {
                 let idx = ((pct / 100.0) * (vals.len() as f64 - 1.0)).round() as usize;
                 vals[idx]
             };
-            (p(50.0), p(90.0), p(99.0), *vals.first().unwrap_or(&0.0), *vals.last().unwrap_or(&0.0))
+            (
+                p(50.0),
+                p(90.0),
+                p(99.0),
+                *vals.first().unwrap_or(&0.0),
+                *vals.last().unwrap_or(&0.0),
+            )
         };
 
         let (vis_p50, vis_p90, vis_p99, vis_min, vis_max) = stats(&mut visited);

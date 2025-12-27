@@ -1,6 +1,6 @@
-use vectordb::utils::payload::*;
-use vectordb::utils::errors::DBError;
 use ordered_float::OrderedFloat;
+use vectordb::utils::errors::DBError;
+use vectordb::utils::payload::*;
 
 #[test]
 fn test_scalar_comparisons() {
@@ -38,7 +38,9 @@ fn test_list_contains() {
         Some(true)
     );
     assert_eq!(
-        floats.evaluate_list_query(ListQueryOp::Contains(&PayloadValue::Float(OrderedFloat(0.3)))),
+        floats.evaluate_list_query(ListQueryOp::Contains(&PayloadValue::Float(OrderedFloat(
+            0.3
+        )))),
         Some(false)
     );
     assert_eq!(
@@ -59,19 +61,35 @@ fn test_list_element_compare() {
     let bools = PayloadValue::ListBool(vec![true, false]);
 
     assert_eq!(
-        ints.evaluate_list_query(ListQueryOp::ElementCompare(2, ScalarComparisonOp::Gt, &PayloadValue::Int(10))),
+        ints.evaluate_list_query(ListQueryOp::ElementCompare(
+            2,
+            ScalarComparisonOp::Gt,
+            &PayloadValue::Int(10)
+        )),
         Some(true)
     );
     assert_eq!(
-        floats.evaluate_list_query(ListQueryOp::ElementCompare(1, ScalarComparisonOp::Lte, &PayloadValue::Float(OrderedFloat(0.5)))),
+        floats.evaluate_list_query(ListQueryOp::ElementCompare(
+            1,
+            ScalarComparisonOp::Lte,
+            &PayloadValue::Float(OrderedFloat(0.5))
+        )),
         Some(true)
     );
     assert_eq!(
-        strs.evaluate_list_query(ListQueryOp::ElementCompare(0, ScalarComparisonOp::Eq, &PayloadValue::Str("a".into()))),
+        strs.evaluate_list_query(ListQueryOp::ElementCompare(
+            0,
+            ScalarComparisonOp::Eq,
+            &PayloadValue::Str("a".into())
+        )),
         Some(true)
     );
     assert_eq!(
-        bools.evaluate_list_query(ListQueryOp::ElementCompare(1, ScalarComparisonOp::Eq, &PayloadValue::Bool(false))),
+        bools.evaluate_list_query(ListQueryOp::ElementCompare(
+            1,
+            ScalarComparisonOp::Eq,
+            &PayloadValue::Bool(false)
+        )),
         Some(true)
     );
 }
@@ -104,7 +122,10 @@ fn test_list_equality() {
         OrderedFloat(2.0),
         OrderedFloat(3.0),
     ]);
-    assert_eq!(a.evaluate_list_query(ListQueryOp::Equals(&wrong_type)), None);
+    assert_eq!(
+        a.evaluate_list_query(ListQueryOp::Equals(&wrong_type)),
+        None
+    );
 }
 
 #[test]
@@ -125,7 +146,11 @@ fn test_payload_compare_field() {
     let missing = payload.compare_field("y", ScalarComparisonOp::Eq, &PayloadValue::Int(1));
     assert!(matches!(missing, Err(DBError::InvalidPayload(_))));
 
-    let wrong_type = payload.compare_field("x", ScalarComparisonOp::Eq, &PayloadValue::Str("forty-two".into()));
+    let wrong_type = payload.compare_field(
+        "x",
+        ScalarComparisonOp::Eq,
+        &PayloadValue::Str("forty-two".into()),
+    );
     assert!(matches!(wrong_type, Err(DBError::InvalidPayload(_))));
 }
 
@@ -172,7 +197,11 @@ fn test_payload_default_behavior() {
 fn test_list_element_compare_out_of_bounds() {
     let list = PayloadValue::ListInt(vec![1, 2]);
 
-    let result = list.evaluate_list_query(ListQueryOp::ElementCompare(5, ScalarComparisonOp::Eq, &PayloadValue::Int(1)));
+    let result = list.evaluate_list_query(ListQueryOp::ElementCompare(
+        5,
+        ScalarComparisonOp::Eq,
+        &PayloadValue::Int(1),
+    ));
     assert_eq!(result, None);
 }
 
@@ -180,6 +209,10 @@ fn test_list_element_compare_out_of_bounds() {
 fn test_list_element_compare_wrong_type() {
     let list = PayloadValue::ListStr(vec!["a".into()]);
 
-    let result = list.evaluate_list_query(ListQueryOp::ElementCompare(0, ScalarComparisonOp::Eq, &PayloadValue::Bool(true)));
+    let result = list.evaluate_list_query(ListQueryOp::ElementCompare(
+        0,
+        ScalarComparisonOp::Eq,
+        &PayloadValue::Bool(true),
+    ));
     assert_eq!(result, None);
 }

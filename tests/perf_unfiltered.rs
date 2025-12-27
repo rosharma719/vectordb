@@ -18,7 +18,10 @@ fn bench_unfiltered_large_scale() {
     let mut segment = Segment::new(hnsw);
     segment.hnsw_mut().set_ef_construct(100);
 
-    println!("\n🚀 Inserting {} vectors for large-scale unfiltered benchmark", size);
+    println!(
+        "\n🚀 Inserting {} vectors for large-scale unfiltered benchmark",
+        size
+    );
     let start_insert = Instant::now();
     let mut last_log = start_insert;
     for i in 0..size {
@@ -42,7 +45,9 @@ fn bench_unfiltered_large_scale() {
     );
     log_peak_rss("unfiltered_large_inserted");
 
-    let queries: Vec<_> = (0..500).map(|i| generate_vector_dim(i + size, dim)).collect();
+    let queries: Vec<_> = (0..500)
+        .map(|i| generate_vector_dim(i + size, dim))
+        .collect();
     let start_search = Instant::now();
     for q in &queries {
         let res = segment.search(q, 20).unwrap();
@@ -104,7 +109,9 @@ fn bench_unfiltered_param_scale() {
     );
     log_peak_rss("unfiltered_param_inserted");
 
-    let queries: Vec<_> = (0..500).map(|i| generate_vector_dim(i + size, dim)).collect();
+    let queries: Vec<_> = (0..500)
+        .map(|i| generate_vector_dim(i + size, dim))
+        .collect();
     let start_search = Instant::now();
     for q in &queries {
         let res = segment.search(q, 20).unwrap();
@@ -133,7 +140,10 @@ fn bench_unfiltered_million_scale() {
     let mut segment = Segment::new(hnsw);
     segment.hnsw_mut().set_ef_construct(100);
 
-    println!("\n🚀 Inserting {} vectors for million-scale unfiltered benchmark", size);
+    println!(
+        "\n🚀 Inserting {} vectors for million-scale unfiltered benchmark",
+        size
+    );
     let start_insert = Instant::now();
     let mut last_log = start_insert;
     for i in 0..size {
@@ -157,7 +167,9 @@ fn bench_unfiltered_million_scale() {
     );
     log_peak_rss("unfiltered_million_inserted");
 
-    let queries: Vec<_> = (0..500).map(|i| generate_vector_dim(i + size, dim)).collect();
+    let queries: Vec<_> = (0..500)
+        .map(|i| generate_vector_dim(i + size, dim))
+        .collect();
     let start_search = Instant::now();
     for q in &queries {
         let res = segment.search(q, 20).unwrap();

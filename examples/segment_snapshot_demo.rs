@@ -17,9 +17,7 @@ fn main() {
 
     for i in 0..25u64 {
         let v = vecf(&[i as f32, (i % 5) as f32]);
-        segment
-            .insert_with_id(i, v, None)
-            .expect("insert failed");
+        segment.insert_with_id(i, v, None).expect("insert failed");
     }
 
     segment

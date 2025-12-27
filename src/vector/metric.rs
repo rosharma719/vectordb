@@ -54,7 +54,6 @@ fn dot_product_similarity(a: &Vector, b: &Vector) -> f32 {
         .sum::<f64>() as f32
 }
 
-
 /// Euclidean distance
 fn euclidean_distance(a: &Vector, b: &Vector) -> f32 {
     let sum = a

@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use vectordb::segment::segment::Segment;
-use vectordb::utils::types::{DistanceMetric, Vector};
-use vectordb::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
-use vectordb::payload_storage::filters::evaluate_filter;
-use vectordb::vector::hnsw::{HNSWIndex, ScoredPoint};
 use vectordb::payload_storage::filters::Filter;
+use vectordb::payload_storage::filters::evaluate_filter;
+use vectordb::segment::segment::Segment;
+use vectordb::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
+use vectordb::utils::types::{DistanceMetric, Vector};
+use vectordb::vector::hnsw::{HNSWIndex, ScoredPoint};
 use vectordb::vector::metric::score;
 
 fn make_payload(group: &str, score: i64) -> Payload {
@@ -40,7 +40,12 @@ fn generate_segment(
         segment.insert(vec.clone(), Some(payload)).unwrap();
         inserted_vecs.push(vec);
         if i != 0 && i % 1000 == 0 {
-            println!("[{:?}] Inserted {} vectors... (+{:?})", metric, i, start.elapsed());
+            println!(
+                "[{:?}] Inserted {} vectors... (+{:?})",
+                metric,
+                i,
+                start.elapsed()
+            );
         }
     }
     let took = start.elapsed();
@@ -57,11 +62,11 @@ fn generate_segment(
 #[test]
 #[ignore]
 fn benchmark_segment_ops_large() {
-const NUM_POINTS: usize = 20_000;
-const DIM: usize        = 1536;
-const TOP_K: usize      = 10;
-const EF_CONSTRUCT: usize = 100;
-const EF_SWEEP: &[usize] = &[32, 64, 128];
+    const NUM_POINTS: usize = 20_000;
+    const DIM: usize = 1536;
+    const TOP_K: usize = 10;
+    const EF_CONSTRUCT: usize = 100;
+    const EF_SWEEP: &[usize] = &[32, 64, 128];
 
     // collect *all* failures here
     let mut failures: Vec<String> = Vec::new();
@@ -94,15 +99,23 @@ const EF_SWEEP: &[usize] = &[32, 64, 128];
             .hnsw()
             .iter_vectors()
             .filter_map(|(&id, vec)| {
-                if segment.is_deleted(id) { return None; }
+                if segment.is_deleted(id) {
+                    return None;
+                }
                 let p = segment.get_payload(id).unwrap();
-                if !evaluate_filter(&filter, p).unwrap() { return None; }
+                if !evaluate_filter(&filter, p).unwrap() {
+                    return None;
+                }
                 let raw = score(query, vec, metric);
                 let sort_key = match metric {
                     DistanceMetric::Dot => -raw,
                     _ => raw,
                 };
-                Some(ScoredPoint { id, raw_score: raw, sort_key })
+                Some(ScoredPoint {
+                    id,
+                    raw_score: raw,
+                    sort_key,
+                })
             })
             .collect();
         ground.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
@@ -119,14 +132,13 @@ const EF_SWEEP: &[usize] = &[32, 64, 128];
 
             // 2) in-place
             let t2 = Instant::now();
-            let res_inp = segment.search_with_filter(query, TOP_K, Some(&filter)).unwrap();
+            let res_inp = segment
+                .search_with_filter(query, TOP_K, Some(&filter))
+                .unwrap();
             let dt_inp = t2.elapsed();
 
             // sanity: every returned item matches
-            for (name, set) in &[
-                ("ground",   &ground),
-                ("in-place", &res_inp),
-            ] {
+            for (name, set) in &[("ground", &ground), ("in-place", &res_inp)] {
                 for r in *set {
                     let p = segment.get_payload(r.id).unwrap();
                     if !matches!(p.get("group"), Some(PayloadValue::Str(s)) if s == "even")
@@ -141,7 +153,7 @@ const EF_SWEEP: &[usize] = &[32, 64, 128];
             }
 
             // compare to truth
-            let in_ids:  HashSet<_> = res_inp.iter().map(|r| r.id).collect();
+            let in_ids: HashSet<_> = res_inp.iter().map(|r| r.id).collect();
             let missed_in: Vec<_> = truth_ids.difference(&in_ids).cloned().collect();
             if !missed_in.is_empty() {
                 failures.push(format!(
@@ -166,9 +178,6 @@ const EF_SWEEP: &[usize] = &[32, 64, 128];
 
     // at the end, fail if any
     if !failures.is_empty() {
-        panic!(
-            "Some filter tests failed:\n{}",
-            failures.join("\n")
-        );
+        panic!("Some filter tests failed:\n{}", failures.join("\n"));
     }
 }
