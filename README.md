@@ -85,6 +85,8 @@ data/nytimes-256-angular/index_m16_m0_32_efc100.bin \
 ```
 Each line of `logs/nyt_snapshot_sweep.jsonl` is a JSON object with the snapshot name, config, per-level degree percentiles (including the fraction over the scan cap), query statistics (visited/expanded percentiles, visit-to-expansion ratio, best/worst score percentiles), and sampled dataset distances. Use that output to compare recall vs. latency before hitting the full `nytimes_qps_latency_curve` harness.
 
+For the canonical naming scheme, build manifest, and the ML tuning workflow mentioned above, see `docs/index-construction.md`; it walks through using `scripts/standardize_snapshot_name.py` + `docs/nyt_snapshot_builds.json` before you run a sweep.
+
 ---
 
 ## H&M (2048-D Cosine) Filtered Recall

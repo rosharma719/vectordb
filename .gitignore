@@ -6,3 +6,4 @@ data/
 # Local logs
 logs/
 *.log
+*.pyc

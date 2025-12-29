@@ -251,10 +251,15 @@ impl HNSWIndex {
                             } else {
                                 1
                             };
-                            let mut stop_neighbor_scan = false;
+                            let mut patience_triggered = false;
                             let mut neighbor_no_improve = 0usize;
-                            'neighbor_scan: for i in 0..window {
-                                let neighbor = neighbors[(start + i * stride) % degree];
+                            let mut neighbors_examined = 0usize;
+                            let mut offset = start;
+                            let cap_hit = window >= cap;
+                            'neighbor_scan: while neighbors_examined < window {
+                                let neighbor = neighbors[offset];
+                                neighbors_examined += 1;
+                                offset = (offset + stride) % degree;
                                 adjacency_reads += 1;
                                 if self.deleted.get(neighbor).copied().unwrap_or(false)
                                     || !scratch.mark_visited(neighbor)
@@ -307,7 +312,7 @@ impl HNSWIndex {
                                             } else {
                                                 neighbor_no_improve += 1;
                                                 if neighbor_no_improve >= neighbor_patience {
-                                                    stop_neighbor_scan = true;
+                                                    patience_triggered = true;
                                                     patience_breaks += 1;
                                                     break 'neighbor_scan;
                                                 }
@@ -317,10 +322,10 @@ impl HNSWIndex {
                                     batch_len = 0;
                                 }
                             }
-                            if !stop_neighbor_scan {
+                            if cap_hit && !patience_triggered && neighbors_examined >= window {
                                 cap_breaks += 1;
                             }
-                            if !stop_neighbor_scan && batch_len > 0 {
+                            if !patience_triggered && batch_len > 0 {
                                 for i in 0..batch_len {
                                     let idx = batch[i];
                                     distance_computations += 1;
