@@ -144,7 +144,8 @@ impl UnfilteredSearchAgg {
         let (best_p50, best_p90, best_p99, best_min, best_max) = stats(&mut best);
         let (worst_p50, worst_p90, worst_p99, worst_min, worst_max) = stats(&mut worst);
 
-        println!(
+        log::info!(
+            target: "vector::hnsw",
             "[unfiltered_search_stats] n={} ef_search={}..{} visited(min/p50/p90/p99/max)={:.0}/{:.0}/{:.0}/{:.0}/{:.0} expanded={:.0}/{:.0}/{:.0}/{:.0}/{:.0} util%={:.1}/{:.1}/{:.1}/{:.1}/{:.1} best_score={:.4}/{:.4}/{:.4}/{:.4}/{:.4} worst_score={:.4}/{:.4}/{:.4}/{:.4}/{:.4}",
             self.samples.len(),
             ef_min,

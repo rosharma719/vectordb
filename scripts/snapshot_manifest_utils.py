@@ -62,6 +62,8 @@ def expand_grid_entry(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
         for axis, value in zip(axis_order, combination):
             combo_entry[axis] = value
         combo_entry["label"] = build_grid_label(prefix, axis_order, combination)
+        if should_skip_combo(combo_entry):
+            continue
         expanded.append(combo_entry)
     return expanded
 
@@ -74,6 +76,15 @@ def build_grid_label(prefix: str, axis_order: List[str], values: Iterable[Any]) 
     if tokens:
         return f"{prefix}_{'_'.join(tokens)}"
     return prefix
+
+
+def should_skip_combo(entry: Dict[str, Any]) -> bool:
+    m = entry.get("m")
+    m0 = entry.get("m0")
+    if isinstance(m, (int, float)) and isinstance(m0, (int, float)):
+        if m > m0:
+            return True
+    return False
 
 
 def manifest_entries(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:

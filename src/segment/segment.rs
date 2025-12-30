@@ -291,7 +291,6 @@ impl Segment {
                             chunk_elapsed
                         );
                         log::info!(target: "segment", "{}", msg);
-                        println!("{}", msg);
                         // Reset for next chunk
                         *s = InsertTiming::default();
                         chunk_start = Some(Instant::now());
@@ -967,16 +966,9 @@ impl Segment {
     /// Build the list of payload keys to use for filter-aware edges, honoring an optional allowlist,
     /// a max count, and a type preference (Bool -> Str -> Int -> Float).
     fn filter_keys_for_payload(payload: &Payload) -> Vec<String> {
-        let allow: Option<HashSet<String>> = env::var("VECTORDB_FILTER_KEYS").ok().map(|v| {
-            v.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        });
-        let max_keys: Option<usize> = env::var("VECTORDB_FILTER_MAX_KEYS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v| *v > 0);
+        let config = Self::filter_key_config();
+        let allow = config.allow.as_ref();
+        let max_keys = config.max_keys;
 
         fn type_rank(v: &PayloadValue) -> usize {
             match v {
@@ -998,7 +990,7 @@ impl Segment {
                         | PayloadValue::Float(_)
                         | PayloadValue::Str(_)
                         | PayloadValue::Bool(_)
-                ) && allow.as_ref().map_or(true, |set| set.contains(k))
+                ) && allow.map_or(true, |set| set.contains(k))
                 {
                     Some((type_rank(v), k.clone()))
                 } else {
@@ -1014,6 +1006,27 @@ impl Segment {
         }
         keys_with_rank.into_iter().map(|(_, k)| k).collect()
     }
+
+    fn filter_key_config() -> &'static FilterKeyConfig {
+        static FILTER_KEY_CONFIG: OnceLock<FilterKeyConfig> = OnceLock::new();
+        FILTER_KEY_CONFIG.get_or_init(|| FilterKeyConfig {
+            allow: env::var("VECTORDB_FILTER_KEYS").ok().map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            }),
+            max_keys: env::var("VECTORDB_FILTER_MAX_KEYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|v| *v > 0),
+        })
+    }
+}
+
+struct FilterKeyConfig {
+    allow: Option<HashSet<String>>,
+    max_keys: Option<usize>,
 }
 
 fn max_rss_bytes() -> Option<u64> {

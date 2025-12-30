@@ -43,7 +43,8 @@ pub(crate) fn log_unfiltered_enabled() -> bool {
             .unwrap_or(false);
         if enabled {
             let chunk = unfiltered_log_chunk();
-            println!(
+            log::info!(
+                target: "vector::hnsw",
                 "[unfiltered_search_stats] enabled (chunk={}, set VECTORDB_LOG_UNFILTERED_EVERY to change)",
                 chunk
             );

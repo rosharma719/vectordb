@@ -679,7 +679,6 @@ impl HNSWIndex {
                         out.len()
                     );
                     log::info!(target: "hnsw", "{}", msg);
-                    println!("{}", msg);
                 }
             }
 

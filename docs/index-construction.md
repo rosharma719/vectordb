@@ -57,7 +57,8 @@ section (see the new entry at the bottom of `docs/nyt_snapshot_builds.json`). Ea
 grid entry specifies a `label_prefix`, an ordered `axis_order`, and a map of `axes` to
 value lists. The standardization script now expands those Cartesian products for you,
 tacking a descriptive label such as `nyt_grid_m16_m0_16_diversity_alpha_low1p0_`
-onto every combo before emitting canonical paths.
+onto every combo before emitting canonical paths. The builder automatically skips
+combos where `m > m0` since those graphs violate the usual HNSW construction rules.
 
 The current grid iterates over `{m=8,16,32}`, `{m0=8,16,32}`, `{diversity_alpha_low=1,1.2}`,
 `{diversity_alpha_high=1,1.2}`, `{diversity_prune_floor=0,2}`, and `{ef_construct=100,200,300}`

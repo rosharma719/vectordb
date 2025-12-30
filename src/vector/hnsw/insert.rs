@@ -290,19 +290,20 @@ impl HNSWIndex {
                                         let cum = FILTER_EDGE_TOTAL_KEYS.with(|tk| *tk.borrow());
                                         let total_ns: u128 = agg.ns_by_type.iter().sum();
                                         let to_ms = |ns: u128| (ns as f64) / 1_000_000.0;
-                                        println!(
-                                            "[filter_edges_agg] n={} cum_n={} samples={} scored={} added={} total_ms={:.3} bool_ms={:.3} str_ms={:.3} int_ms={:.3} float_ms={:.3}",
-                                            agg.count,
-                                            cum,
-                                            agg.samples,
-                                            agg.scored,
-                                            agg.added,
-                                            to_ms(total_ns),
-                                            to_ms(agg.ns_by_type[0]),
-                                            to_ms(agg.ns_by_type[1]),
-                                            to_ms(agg.ns_by_type[2]),
-                                            to_ms(agg.ns_by_type[3]),
-                                        );
+                                log::info!(
+                                    target: "hnsw",
+                                    "[filter_edges_agg] n={} cum_n={} samples={} scored={} added={} total_ms={:.3} bool_ms={:.3} str_ms={:.3} int_ms={:.3} float_ms={:.3}",
+                                    agg.count,
+                                    cum,
+                                    agg.samples,
+                                    agg.scored,
+                                    agg.added,
+                                    to_ms(total_ns),
+                                    to_ms(agg.ns_by_type[0]),
+                                    to_ms(agg.ns_by_type[1]),
+                                    to_ms(agg.ns_by_type[2]),
+                                    to_ms(agg.ns_by_type[3]),
+                                );
                                         *agg = FilterEdgeAgg::default();
                                     }
                                 });
@@ -334,7 +335,8 @@ impl HNSWIndex {
                                 let cum = FILTER_EDGE_TOTAL_KEYS.with(|tk| *tk.borrow());
                                 let total_ns: u128 = agg.ns_by_type.iter().sum();
                                 let to_ms = |ns: u128| (ns as f64) / 1_000_000.0;
-                                println!(
+                                log::info!(
+                                    target: "hnsw",
                                     "[filter_edges_agg] n={} cum_n={} samples={} scored={} added={} total_ms={:.3} bool_ms={:.3} str_ms={:.3} int_ms={:.3} float_ms={:.3}",
                                     agg.count,
                                     cum,

@@ -1,11 +1,11 @@
+use std::collections::HashSet;
 use std::env;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde_json::to_writer;
-
+use serde_json::{Value, to_writer};
 use vectordb::analysis::{AnalyzerConfig, analyze_snapshot};
 
 const DEFAULT_OUTPUT: &str = "nyt_analysis_runner.jsonl";
@@ -29,11 +29,23 @@ const DEFAULT_SNAPSHOT_NAMES: &[&str] = &[
 
 fn main() -> Result<()> {
     let cfg = SweeperConfig::from_args()?;
-    let writer = File::create(&cfg.output)
-        .with_context(|| format!("failed to create {}", cfg.output.display()))?;
-    let mut writer = BufWriter::new(writer);
+    let existing_snapshots = if cfg.skip_existing {
+        load_existing_snapshots(&cfg.output)?
+    } else {
+        HashSet::new()
+    };
+    let mut writer = create_writer(&cfg)?;
 
     for snapshot in &cfg.snapshots {
+        if cfg.skip_existing && existing_snapshots.contains(&snapshot.to_string_lossy().to_string())
+        {
+            println!("⏭️  skipping {} (already recorded)", snapshot.display());
+            continue;
+        }
+        if !snapshot.exists() {
+            println!("⚠️  skipping {} (file not found)", snapshot.display());
+            continue;
+        }
         let analysis = AnalyzerConfig::from_paths(
             snapshot.clone(),
             Some(cfg.base.clone()),
@@ -42,6 +54,19 @@ fn main() -> Result<()> {
             cfg.num_queries,
             cfg.sample_size,
             cfg.neighbor_scan_cap,
+        );
+        println!(
+            "🔍 analyzing {} (top_k={}, num_queries={}, sample_size={}, neighbor_scan_cap={})",
+            snapshot.display(),
+            cfg.top_k,
+            cfg.num_queries,
+            cfg.sample_size,
+            cfg.neighbor_scan_cap,
+        );
+        println!(
+            "   base={} queries={}",
+            cfg.base.display(),
+            cfg.queries.display()
         );
         let stats = analyze_snapshot(analysis)?;
         to_writer(&mut writer, &stats)?;
@@ -59,6 +84,7 @@ struct SweeperConfig {
     num_queries: usize,
     sample_size: usize,
     neighbor_scan_cap: usize,
+    skip_existing: bool,
 }
 
 impl SweeperConfig {
@@ -72,6 +98,7 @@ impl SweeperConfig {
         let mut num_queries = 100;
         let mut sample_size = 500;
         let mut neighbor_scan_cap = 128;
+        let mut skip_existing = false;
 
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -131,6 +158,9 @@ impl SweeperConfig {
                         .parse()
                         .context("failed to parse neighbor scan cap")?;
                 }
+                "--skip-existing" => {
+                    skip_existing = true;
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -171,6 +201,7 @@ impl SweeperConfig {
             num_queries,
             sample_size,
             neighbor_scan_cap,
+            skip_existing,
         })
     }
 }
@@ -191,8 +222,42 @@ Options:
   --num-queries <usize>   Number of queries to run (default 100)
   --sample-size <usize>   Dataset sample size for distance stats (default 500)
   --neighbor-scan-cap <usize> Cap used when computing level 0 tail ratios (default 128)
+  --skip-existing         Skip parsing snapshots already listed in the output file
   --output <path>         JSONL output file (default nyt_analysis_runner.jsonl)
   --help, -h              Print this help message
 "
     );
+}
+
+fn load_existing_snapshots(path: &Path) -> Result<HashSet<String>> {
+    if !path.exists() {
+        return Ok(HashSet::new());
+    }
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut existing = HashSet::new();
+    for line in reader.lines() {
+        if let Ok(text) = line {
+            if let Ok(json) = serde_json::from_str::<Value>(&text) {
+                if let Some(snapshot) = json.get("snapshot").and_then(|v| v.as_str()) {
+                    existing.insert(snapshot.to_string());
+                }
+            }
+        }
+    }
+    Ok(existing)
+}
+
+fn create_writer(cfg: &SweeperConfig) -> Result<BufWriter<File>> {
+    let mut options = OpenOptions::new();
+    options.create(true).write(true);
+    if cfg.skip_existing {
+        options.append(true);
+    } else {
+        options.truncate(true);
+    }
+    let file = options
+        .open(&cfg.output)
+        .with_context(|| format!("failed to open {}", cfg.output.display()))?;
+    Ok(BufWriter::new(file))
 }

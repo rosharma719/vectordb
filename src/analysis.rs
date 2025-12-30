@@ -144,10 +144,29 @@ pub fn analyze_snapshot(config: AnalyzerConfig) -> Result<AnalysisResult> {
     let base_vectors = load_vectors(&config.base_path)?;
     let queries = load_vectors(&config.queries_path)?;
 
+    let normalized_base_vectors = if metric == DistanceMetric::Cosine {
+        Some(
+            base_vectors
+                .iter()
+                .map(|v| hnsw.maybe_normalize(v))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+    let normalized_base_slice = normalized_base_vectors.as_ref().map(|vec| vec.as_slice());
+
     let degrees = compute_degree_stats(hnsw, config.neighbor_scan_cap);
 
-    let (query_stats, distance_stats) =
-        run_query_stats(&segment, hnsw, metric, &queries, &base_vectors, &config)?;
+    let (query_stats, distance_stats) = run_query_stats(
+        &segment,
+        hnsw,
+        metric,
+        &queries,
+        &base_vectors,
+        normalized_base_slice,
+        &config,
+    )?;
 
     Ok(AnalysisResult {
         snapshot: snapshot_name,
@@ -208,6 +227,7 @@ fn run_query_stats(
     metric: DistanceMetric,
     queries: &[Vector],
     base_vectors: &[Vector],
+    normalized_base_vectors: Option<&[Vector]>,
     config: &AnalyzerConfig,
 ) -> Result<(QueryStats, DistanceStats)> {
     let mut visited = Vec::with_capacity(config.num_queries);
@@ -247,13 +267,12 @@ fn run_query_stats(
         visit_exp_ratio.push(visit_to_expansion);
 
         for &idx in &sampled_indexes {
-            let base = &base_vectors[idx];
-            let prepared_base = if metric == DistanceMetric::Cosine {
-                hnsw.maybe_normalize(base)
+            let sample = if let Some(norm_bases) = normalized_base_vectors {
+                &norm_bases[idx]
             } else {
-                base.clone()
+                &base_vectors[idx]
             };
-            let raw = score(&prepared_query, &prepared_base, metric);
+            let raw = score(&prepared_query, sample, metric);
             distance_samples.push(raw);
         }
 
