@@ -17,7 +17,7 @@ use super::config::{
 };
 use super::scratch::SEARCH_SCRATCH;
 use super::stats::{FILTER_SEED_COUNT, FilterSearchLogEntry};
-use super::types::{NodeCandidate, NodeResult, NodeRoutingEntry, ScoredPoint};
+use super::types::{NodeCandidate, NodeResult, NodeRoutingEntry, ScoredPoint, SearchRuntimeOptions};
 
 impl HNSWIndex {
     fn best_entry_in_mask(mask: &[bool], levels: &[usize], deleted: &[bool]) -> Option<usize> {
@@ -140,6 +140,7 @@ impl HNSWIndex {
         &self,
         query: &Vector,
         top_k: usize,
+        opts: &SearchRuntimeOptions,
         payloads: &HashMap<PointId, Payload>,
         payload_index: &PayloadIndex,
         full_filter: Option<&Filter>,
@@ -308,7 +309,12 @@ impl HNSWIndex {
                 .map(|v| v != "0" && v.to_lowercase() != "false")
                 .unwrap_or(false);
             let allow_early_exit = self.metric != DistanceMetric::Dot && !disable_early_exit();
-            let patience_limit = if allow_early_exit { early_exit_patience() } else { 0 };
+            let patience_limit = if allow_early_exit {
+                opts.early_exit_patience
+                    .unwrap_or_else(early_exit_patience)
+            } else {
+                0
+            };
             let mut no_improve_streak = 0usize;
             let mut early_exit = false;
 
@@ -327,8 +333,9 @@ impl HNSWIndex {
             let mut filter_checked = 0usize;
             let mut filter_passed = 0usize;
             let mut seeds_popped = 0usize;
-            let max_expansions = filter_expansion_cap().unwrap_or(self.ef);
-            let result_cap = self.ef.max(top_k);
+            let ef_search = opts.ef_search.unwrap_or(self.ef).max(top_k);
+            let max_expansions = filter_expansion_cap().unwrap_or(ef_search);
+            let result_cap = ef_search.max(top_k);
             let mut routing_popped_total = 0usize;
             let mut routing_popped_passing = 0usize;
             let mut results_inserted = 0usize;
@@ -361,7 +368,7 @@ impl HNSWIndex {
             let mut worst = scratch.results_pq.peek().map(|rp| rp.0.sort_key).unwrap_or(f32::MAX);
 
             if let Some(mask) = allowed_mask.as_ref() {
-                let cap = filter_entry_candidates().unwrap_or(self.ef).max(1);
+                let cap = filter_entry_candidates().unwrap_or(ef_search).max(1);
                 let entry_candidates = Self::top_entries_in_mask(mask, &self.levels, &self.deleted, cap);
                 for idx in entry_candidates {
                     if idx == entry {
@@ -411,7 +418,7 @@ impl HNSWIndex {
                 }
             }
 
-            let seed_limit = self.ef;
+            let seed_limit = ef_search;
             let seed_len = self.vectors.len();
             fn collect_match_ids(
                 filter: &Filter,
@@ -562,7 +569,7 @@ impl HNSWIndex {
                 if curr.passes_filter {
                     routing_popped_passing += 1;
                 }
-                if allow_early_exit && patience_limit > 0 && scratch.results_pq.len() >= self.ef {
+                if allow_early_exit && patience_limit > 0 && scratch.results_pq.len() >= ef_search {
                     if let Some(next) = scratch.routing_pq.peek() {
                         if next.node.sort_key > worst {
                             no_improve_streak += 1;
@@ -691,7 +698,7 @@ impl HNSWIndex {
                 let results_pq_peek_dist = worst;
                 let entry = FilterSearchLogEntry {
                     seq: next_filter_search_seq(),
-                    ef_search: self.ef,
+                    ef_search,
                     top_k,
                     filter_present: full_filter.is_some(),
                     seeds_pool: seed_pool_size,

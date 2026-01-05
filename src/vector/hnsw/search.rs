@@ -25,7 +25,7 @@ use super::config::{
 };
 use super::scratch::SEARCH_SCRATCH;
 use super::stats::{SearchLayerStats, SearchStats, UNFILTERED_SEARCH_AGG, UnfilteredSample};
-use super::types::{NodeCandidate, NodeResult, ScoredPoint};
+use super::types::{NodeCandidate, NodeResult, ScoredPoint, SearchRuntimeOptions};
 
 #[derive(Serialize)]
 struct SearchTraceEntry {
@@ -140,6 +140,7 @@ impl HNSWIndex {
         entry: usize,
         level: usize,
         ef: usize,
+        opts: &SearchRuntimeOptions,
         normalize: bool,
         stats: Option<&mut SearchLayerStats>,
         trace: Option<&mut SearchTraceCtx>,
@@ -168,7 +169,9 @@ impl HNSWIndex {
             let mut distance_computations = 0usize;
             let mut cap_breaks = 0usize;
             let mut patience_breaks = 0usize;
-            let neighbor_patience = neighbor_scan_patience();
+            let neighbor_patience = opts
+                .neighbor_scan_patience
+                .unwrap_or_else(neighbor_scan_patience);
 
             let start_entry = if self.deleted.get(entry).copied().unwrap_or(false) {
                 self.deleted
@@ -201,7 +204,8 @@ impl HNSWIndex {
             let mut worst_score = scratch.result_set.peek().unwrap().0.sort_key;
             let allow_early_exit = self.metric != DistanceMetric::Dot && !disable_early_exit();
             let patience_limit = if allow_early_exit {
-                early_exit_patience()
+                opts.early_exit_patience
+                    .unwrap_or_else(early_exit_patience)
             } else {
                 0
             };
@@ -229,7 +233,13 @@ impl HNSWIndex {
                     let mut batch_len = 0usize;
                     let degree = neighbors.len();
                     if degree > 0 {
-                        let cap = neighbor_scan_cap(level);
+                        let cap = if level == 0 {
+                            opts.neighbor_scan_cap_level0
+                                .map(|v| if v == 0 { usize::MAX } else { v })
+                                .unwrap_or_else(|| neighbor_scan_cap(level))
+                        } else {
+                            neighbor_scan_cap(level)
+                        };
                         let window = degree.min(cap);
                         if window > 0 {
                             let need_seed = (rotate_neighbor_scans && window < degree)
@@ -477,11 +487,20 @@ impl HNSWIndex {
         query: &Vector,
         top_k: usize,
     ) -> Result<(Vec<ScoredPoint>, SearchStats), DBError> {
+        self.search_with_stats_with_options(query, top_k, &SearchRuntimeOptions::default())
+    }
+
+    pub fn search_with_stats_with_options(
+        &self,
+        query: &Vector,
+        top_k: usize,
+        opts: &SearchRuntimeOptions,
+    ) -> Result<(Vec<ScoredPoint>, SearchStats), DBError> {
         if self.entry_point.is_none() {
             return Ok((
                 vec![],
                 SearchStats {
-                    ef_search: top_k,
+                    ef_search: opts.ef_search.unwrap_or(top_k).max(top_k),
                     ..SearchStats::default()
                 },
             ));
@@ -595,11 +614,13 @@ impl HNSWIndex {
         }
 
         let final_query = &prepared_query;
-        let ef_search = if self.metric == DistanceMetric::Dot {
-            self.vectors.len().max(top_k)
-        } else {
-            self.ef.max(top_k)
-        };
+        let ef_search = opts.ef_search.map(|v| v.max(top_k)).unwrap_or_else(|| {
+            if self.metric == DistanceMetric::Dot {
+                self.vectors.len().max(top_k)
+            } else {
+                self.ef.max(top_k)
+            }
+        });
 
         let mut layer_stats = SearchLayerStats::default();
         let (mut results, _counters) = self.search_layer_unfiltered(
@@ -607,6 +628,7 @@ impl HNSWIndex {
             current,
             0,
             ef_search,
+            opts,
             normalize_score_flag,
             Some(&mut layer_stats),
             trace_ctx.as_mut(),
@@ -653,6 +675,15 @@ impl HNSWIndex {
     }
 
     pub fn search(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
+        self.search_with_options(query, top_k, &SearchRuntimeOptions::default())
+    }
+
+    pub fn search_with_options(
+        &self,
+        query: &Vector,
+        top_k: usize,
+        opts: &SearchRuntimeOptions,
+    ) -> Result<Vec<ScoredPoint>, DBError> {
         if self.entry_point.is_none() {
             return Ok(vec![]);
         }
@@ -750,11 +781,13 @@ impl HNSWIndex {
         }
 
         let final_query = &prepared_query;
-        let ef_search = if self.metric == DistanceMetric::Dot {
-            self.vectors.len().max(top_k)
-        } else {
-            self.ef.max(top_k)
-        };
+        let ef_search = opts.ef_search.map(|v| v.max(top_k)).unwrap_or_else(|| {
+            if self.metric == DistanceMetric::Dot {
+                self.vectors.len().max(top_k)
+            } else {
+                self.ef.max(top_k)
+            }
+        });
 
         let log_enabled = log_unfiltered_enabled();
         let mut layer_stats = SearchLayerStats::default();
@@ -763,6 +796,7 @@ impl HNSWIndex {
             current,
             0,
             ef_search,
+            opts,
             normalize_score_flag,
             if log_enabled {
                 Some(&mut layer_stats)

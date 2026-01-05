@@ -267,6 +267,44 @@ impl HNSWIndex {
             .map(|(idx, vec)| (&self.idx_to_point[idx], vec))
     }
 
+    pub fn iter_active_vectors(&self) -> impl Iterator<Item = (&PointId, &Vector)> {
+        self.vectors
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !self.deleted.get(*idx).copied().unwrap_or(false))
+            .map(|(idx, vec)| (&self.idx_to_point[idx], vec))
+    }
+
+    pub fn deleted_count(&self) -> usize {
+        self.deleted.iter().filter(|d| **d).count()
+    }
+
+    pub fn deleted_fraction(&self) -> f64 {
+        let n = self.vectors.len();
+        if n == 0 {
+            return 0.0;
+        }
+        self.deleted_count() as f64 / n as f64
+    }
+
+    pub fn iter_active_levels(&self) -> impl Iterator<Item = usize> + '_ {
+        self.levels
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !self.deleted.get(*idx).copied().unwrap_or(false))
+            .map(|(_, lvl)| *lvl)
+    }
+
+    pub fn level_histogram(&self) -> Vec<usize> {
+        let max_level = self.current_max_level;
+        let mut counts = vec![0usize; max_level + 1];
+        for lvl in self.iter_active_levels() {
+            let idx = lvl.min(max_level);
+            counts[idx] += 1;
+        }
+        counts
+    }
+
     pub fn metric(&self) -> DistanceMetric {
         self.metric
     }

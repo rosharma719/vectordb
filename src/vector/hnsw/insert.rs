@@ -19,7 +19,7 @@ use super::config::{
     insert_trace_logger, next_insert_trace_seq, trace_every,
 };
 use super::stats::{FILTER_EDGE_STATS, FILTER_EDGE_TOTAL_KEYS, FilterEdgeAgg};
-use super::types::NodeCandidate;
+use super::types::{NodeCandidate, SearchRuntimeOptions};
 
 #[derive(Serialize)]
 struct InsertTraceEntry {
@@ -110,11 +110,13 @@ impl HNSWIndex {
         for l in (0..=level).rev() {
             let use_norm =
                 self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
+            let opts = SearchRuntimeOptions::default();
             let (mut candidates, _) = self.search_layer_unfiltered(
                 &self.vectors[idx],
                 current_entry,
                 l,
                 self.ef_construct,
+                &opts,
                 use_norm,
                 None,
                 None,

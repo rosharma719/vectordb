@@ -7,6 +7,19 @@ pub struct ScoredPoint {
     pub sort_key: Score,
 }
 
+#[derive(Default, Clone, Copy, Debug)]
+pub struct SearchRuntimeOptions {
+    /// Overrides the HNSW `ef_search` for this call. If set, it will be clamped to at least `top_k`.
+    pub ef_search: Option<usize>,
+    /// Overrides `VECTORDB_NEIGHBOR_SCAN_CAP_LEVEL0` for this call.
+    /// - `Some(0)` means "no cap" (treated as `usize::MAX`), matching env semantics.
+    pub neighbor_scan_cap_level0: Option<usize>,
+    /// Overrides `VECTORDB_NEIGHBOR_SCAN_PATIENCE` for this call.
+    pub neighbor_scan_patience: Option<usize>,
+    /// Overrides `VECTORDB_EARLY_EXIT_PATIENCE` for this call.
+    pub early_exit_patience: Option<usize>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct NodeCandidate {
     pub(crate) idx: usize,

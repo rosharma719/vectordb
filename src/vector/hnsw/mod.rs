@@ -10,4 +10,4 @@ mod types;
 
 pub use core::{HNSWIndex, HnswConfigSummary, HnswSnapshot};
 pub use stats::SearchStats;
-pub use types::ScoredPoint;
+pub use types::{ScoredPoint, SearchRuntimeOptions};

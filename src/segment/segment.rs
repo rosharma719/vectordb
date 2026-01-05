@@ -18,7 +18,9 @@ use crate::utils::errors::DBError;
 use crate::utils::io::{adler32, write_atomic_with_checksum};
 use crate::utils::payload::{Payload, PayloadValue};
 use crate::utils::types::{PointId, Vector};
-use crate::vector::hnsw::{HNSWIndex, HnswConfigSummary, HnswSnapshot, ScoredPoint, SearchStats};
+use crate::vector::hnsw::{
+    HNSWIndex, HnswConfigSummary, HnswSnapshot, ScoredPoint, SearchRuntimeOptions, SearchStats,
+};
 
 /// A segment is the core unit that wraps vector storage, indexing, payloads, and deletion.
 pub struct Segment {
@@ -395,6 +397,15 @@ impl Segment {
     }
 
     pub fn search(&self, query: &Vector, top_k: usize) -> Result<Vec<ScoredPoint>, DBError> {
+        self.search_with_options(query, top_k, &SearchRuntimeOptions::default())
+    }
+
+    pub fn search_with_options(
+        &self,
+        query: &Vector,
+        top_k: usize,
+        opts: &SearchRuntimeOptions,
+    ) -> Result<Vec<ScoredPoint>, DBError> {
         self.ensure_not_rebuilding()?;
         let total_non_deleted = self.hnsw.len() - self.deleted.len();
         if total_non_deleted == 0 {
@@ -404,7 +415,7 @@ impl Segment {
         }
 
         // HNSWIndex now internally skips deleted points.
-        let candidates = self.hnsw.search(query, top_k)?;
+        let candidates = self.hnsw.search_with_options(query, top_k, opts)?;
         // (The following filter is kept as extra safety.)
         let filtered = candidates
             .into_iter()
@@ -420,6 +431,15 @@ impl Segment {
         query: &Vector,
         top_k: usize,
     ) -> Result<(Vec<ScoredPoint>, SearchStats), DBError> {
+        self.search_with_stats_with_options(query, top_k, &SearchRuntimeOptions::default())
+    }
+
+    pub fn search_with_stats_with_options(
+        &self,
+        query: &Vector,
+        top_k: usize,
+        opts: &SearchRuntimeOptions,
+    ) -> Result<(Vec<ScoredPoint>, SearchStats), DBError> {
         self.ensure_not_rebuilding()?;
         let total_non_deleted = self.hnsw.len() - self.deleted.len();
         if total_non_deleted == 0 {
@@ -428,7 +448,7 @@ impl Segment {
             ));
         }
 
-        let (candidates, stats) = self.hnsw.search_with_stats(query, top_k)?;
+        let (candidates, stats) = self.hnsw.search_with_stats_with_options(query, top_k, opts)?;
         let filtered = candidates
             .into_iter()
             .filter(|sp| !self.deleted.contains(&sp.id))
@@ -444,6 +464,16 @@ impl Segment {
         top_k: usize,
         filter: Option<&Filter>,
     ) -> Result<Vec<ScoredPoint>, DBError> {
+        self.search_with_filter_with_options(query, top_k, filter, &SearchRuntimeOptions::default())
+    }
+
+    pub fn search_with_filter_with_options(
+        &self,
+        query: &Vector,
+        top_k: usize,
+        filter: Option<&Filter>,
+        opts: &SearchRuntimeOptions,
+    ) -> Result<Vec<ScoredPoint>, DBError> {
         self.ensure_not_rebuilding()?;
         let total_non_deleted = self.hnsw.len() - self.deleted.len();
         if total_non_deleted == 0 {
@@ -455,6 +485,7 @@ impl Segment {
         let results = self.hnsw.in_place_filtered_search(
             query,
             top_k * 4,
+            opts,
             &self.payloads,
             &self.payload_index,
             filter,
@@ -652,6 +683,12 @@ impl Segment {
             .unwrap_or(false)
     }
 
+    fn log_snapshot_load_timing() -> bool {
+        env::var("VECTORDB_LOG_SNAPSHOT_LOAD_TIMING")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false)
+    }
+
     /// Toggle purge-on-delete behavior. Defaults to false (keep tombstones).
     fn purge_on_delete_enabled() -> bool {
         env::var("VECTORDB_PURGE_DELETIONS")
@@ -693,7 +730,12 @@ impl Segment {
         path: P,
         wal_path: Option<PathBuf>,
     ) -> Result<(Self, Option<SnapshotMetadata>), DBError> {
+        let timing_enabled = Self::log_snapshot_load_timing();
+        let total_start = Instant::now();
+
+        let t_read = Instant::now();
         let bytes = std::fs::read(&path)?;
+        let read_ms = t_read.elapsed().as_millis();
         let (payload, checksum) = if bytes.len() >= 8
             && bytes[bytes.len() - 8..bytes.len() - 4] == SEGMENT_SNAPSHOT_FOOTER
         {
@@ -708,6 +750,7 @@ impl Segment {
             (bytes.as_slice(), None)
         };
 
+        let t_checksum = Instant::now();
         if let Some(expected) = checksum {
             let actual = adler32(payload);
             if actual != expected {
@@ -716,7 +759,9 @@ impl Segment {
                 )));
             }
         }
+        let checksum_ms = t_checksum.elapsed().as_millis();
 
+        let t_deser = Instant::now();
         let (snapshot, metadata): (SegmentSnapshot, Option<SnapshotMetadata>) =
             if payload.len() >= 8 && payload[..4] == SEGMENT_SNAPSHOT_MAGIC {
                 let version = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
@@ -749,6 +794,9 @@ impl Segment {
                     .map_err(|e| DBError::SerializationError(anyhow!(e)))?;
                 (legacy.into(), None)
             };
+        let deser_ms = t_deser.elapsed().as_millis();
+
+        let t_build = Instant::now();
         let mut segment = Self {
             hnsw: HNSWIndex::from_snapshot(snapshot.hnsw),
             payload_index: snapshot.payload_index,
@@ -760,15 +808,35 @@ impl Segment {
             rebuilding: AtomicBool::new(false),
             memory_frozen: false,
         };
+        let build_ms = t_build.elapsed().as_millis();
 
         let wal_path = wal_path.unwrap_or_else(|| Self::default_wal_path(path.as_ref()));
         let auto_replay = std::env::var("VECTORDB_WAL_AUTO_REPLAY")
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(true);
+        let mut wal_replay_ms = 0u128;
         if auto_replay && wal_path.exists() {
+            let t_wal = Instant::now();
             let reader = WalReader::new(&wal_path);
             reader.replay(|record| segment.apply_wal_record(record))?;
             segment.wal = Some(WalWriter::open(WalConfig::from_env(wal_path))?);
+            wal_replay_ms = t_wal.elapsed().as_millis();
+        }
+
+        if timing_enabled {
+            let msg = format!(
+                "snapshot_load path={:?} bytes={} read_ms={} checksum_ms={} deserialize_ms={} build_ms={} wal_replay_ms={} total_ms={}",
+                path.as_ref(),
+                bytes.len(),
+                read_ms,
+                checksum_ms,
+                deser_ms,
+                build_ms,
+                wal_replay_ms,
+                total_start.elapsed().as_millis(),
+            );
+            eprintln!("{msg}");
+            log::info!(target: "snapshot", "{msg}");
         }
 
         Ok((segment, metadata))
