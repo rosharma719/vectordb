@@ -668,6 +668,35 @@ mod tests {
     }
 
     #[test]
+    fn simd_kernels_match_scalar_within_tolerance() {
+        // Validate that arch-specific SIMD kernels (AVX2/NEON) stay numerically close to the
+        // scalar reference implementation. This catches accidental UB or logic drift.
+        let dim = 256;
+        let trials = 200;
+
+        for seed in 0..trials {
+            let query = gen_vec(seed as u32, dim);
+            let vec = gen_vec((seed as u32).wrapping_add(10_000), dim);
+
+            let dot_ref = dot_scalar(&query, &vec);
+            let dot_fast = dot_product(&query, &vec);
+            let dot_err = (dot_ref - dot_fast).abs();
+            assert!(
+                dot_err <= 1e-3,
+                "dot mismatch seed={seed}: ref={dot_ref} fast={dot_fast} err={dot_err}"
+            );
+
+            let l2_ref = l2_scalar(&query, &vec);
+            let l2_fast = l2_squared(&query, &vec);
+            let l2_err = (l2_ref - l2_fast).abs();
+            assert!(
+                l2_err <= 1e-3,
+                "l2 mismatch seed={seed}: ref={l2_ref} fast={l2_fast} err={l2_err}"
+            );
+        }
+    }
+
+    #[test]
     #[ignore]
     fn bench_fast_score_kernel() {
         let dim = env::var("VECTORDB_KERNEL_DIM")

@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::BufWriter;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 pub(crate) const VERBOSE: bool = false;
@@ -17,12 +18,12 @@ static FILTER_SEARCH_LOG: OnceLock<Option<Mutex<BufWriter<File>>>> = OnceLock::n
 static FILTER_EXPANSION_CAP: OnceLock<Option<usize>> = OnceLock::new();
 static FILTER_PASSING_BUDGET: OnceLock<Option<usize>> = OnceLock::new();
 static FILTER_FAILING_BUDGET: OnceLock<Option<usize>> = OnceLock::new();
-static FILTER_SEARCH_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
+static FILTER_SEARCH_SEQ: AtomicU64 = AtomicU64::new(0);
 static SEARCH_TRACE_LOG: OnceLock<Option<Mutex<BufWriter<File>>>> = OnceLock::new();
 static INSERT_TRACE_LOG: OnceLock<Option<Mutex<BufWriter<File>>>> = OnceLock::new();
 static TRACE_EVERY: OnceLock<usize> = OnceLock::new();
-static SEARCH_TRACE_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
-static INSERT_TRACE_SEQ: OnceLock<Mutex<u64>> = OnceLock::new();
+static SEARCH_TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
+static INSERT_TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
 static EXACT_FALLBACK_ENABLED: OnceLock<Option<bool>> = OnceLock::new();
 static EXACT_FALLBACK_THRESHOLD: OnceLock<Option<usize>> = OnceLock::new();
 static FILTER_ENTRY_CANDIDATES: OnceLock<Option<usize>> = OnceLock::new();
@@ -158,10 +159,7 @@ pub(crate) fn filter_search_logger() -> Option<&'static Mutex<BufWriter<File>>> 
 }
 
 pub(crate) fn next_filter_search_seq() -> u64 {
-    let lock = FILTER_SEARCH_SEQ.get_or_init(|| Mutex::new(0));
-    let mut guard = lock.lock().unwrap();
-    *guard += 1;
-    *guard
+    FILTER_SEARCH_SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 pub(crate) fn search_trace_logger() -> Option<&'static Mutex<BufWriter<File>>> {
@@ -197,17 +195,11 @@ pub(crate) fn trace_every() -> usize {
 }
 
 pub(crate) fn next_search_trace_seq() -> u64 {
-    let lock = SEARCH_TRACE_SEQ.get_or_init(|| Mutex::new(0));
-    let mut guard = lock.lock().unwrap();
-    *guard += 1;
-    *guard
+    SEARCH_TRACE_SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 pub(crate) fn next_insert_trace_seq() -> u64 {
-    let lock = INSERT_TRACE_SEQ.get_or_init(|| Mutex::new(0));
-    let mut guard = lock.lock().unwrap();
-    *guard += 1;
-    *guard
+    INSERT_TRACE_SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 pub(crate) fn exact_fallback_enabled_override() -> Option<bool> {

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::utils::types::PointId;
 use std::io;
 use thiserror::Error;

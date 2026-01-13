@@ -24,6 +24,84 @@ fn vecf(v: &[f32]) -> Vector {
 }
 
 #[test]
+#[ignore]
+fn segment_build_and_persist_synthetic_snapshot() -> Result<(), DBError> {
+    fn env_usize(key: &str) -> Option<usize> {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+    }
+
+    fn env_bool(key: &str) -> Option<bool> {
+        std::env::var(key)
+            .ok()
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+    }
+
+    let size = env_usize("VECTORDB_SEGMENT_SIZE").unwrap_or(20_000) as u64;
+    let dim = env_usize("VECTORDB_SEGMENT_DIM").unwrap_or(4);
+    let with_payloads = env_bool("VECTORDB_WITH_PAYLOADS").unwrap_or(false);
+    let keep_snapshot = env_bool("VECTORDB_KEEP_SNAPSHOT").unwrap_or(true);
+
+    let path = std::env::var("VECTORDB_PERSIST_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| tmp_path("segment_snapshot_synth"));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut seg = Segment::new(HNSWIndex::new(DistanceMetric::Euclidean, 16, 64, 16, dim));
+    seg.hnsw_mut().set_ef_construct(100);
+    seg.hnsw_mut().set_ef_search(128);
+
+    println!(
+        "[segment-synth] building segment size={} dim={} payloads={} -> {:?}",
+        size, dim, with_payloads, path
+    );
+    let t_insert = Instant::now();
+    for i in 0..size {
+        let vec = (0..dim)
+            .map(|j| (i as f32) + (j as f32 * 0.01))
+            .collect::<Vec<_>>();
+        let payload = if with_payloads {
+            let mut p = Payload(HashMap::new());
+            p.set(
+                "group",
+                PayloadValue::Str(if i % 2 == 0 { "even" } else { "odd" }.to_string()),
+            );
+            Some(p)
+        } else {
+            None
+        };
+        seg.insert_with_id(i, vec, payload)?;
+    }
+    println!("[segment-synth] inserted in {:?}", t_insert.elapsed());
+
+    println!("[segment-synth] saving snapshot ...");
+    seg.save_to_path(&path)?;
+    println!(
+        "[segment-synth] saved snapshot bytes={} points={} payloads={}",
+        fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+        seg.hnsw().len(),
+        seg.payloads().len()
+    );
+
+    // Optional immediate load (also exercises VECTORDB_LOG_SNAPSHOT_LOAD_TIMING).
+    let t_load = Instant::now();
+    let restored = Segment::load_from_path(&path)?;
+    println!(
+        "[segment-synth] loaded in {:?} points={}",
+        t_load.elapsed(),
+        restored.hnsw().len()
+    );
+
+    if !keep_snapshot {
+        let _ = fs::remove_file(&path);
+    }
+    Ok(())
+}
+
+#[test]
 fn hnsw_round_trip_preserves_results() -> Result<(), DBError> {
     let mut hnsw = HNSWIndex::new(DistanceMetric::Euclidean, 16, 32, 8, 3);
     for i in 0..50u64 {
