@@ -34,7 +34,6 @@ Snapshot defaults (shared):
   - `VECTORDB_INSERT_TRACE_LOG` -> JSONL path for insert traversal trace
   - `VECTORDB_TRACE_EVERY` -> sample interval for trace logs (default `100`)
   - `VECTORDB_FILTER_SEARCH_LOG` -> JSONL with per-query expansions/visited/filter hit rates/seeds/stop_reason.
-  - Parse filter logs with `python scripts/parse_filter_search_log.py <log.jsonl>`.
 
 - WAL:
   - `VECTORDB_WAL_PATH` (auto-enable WAL for new segments when set)

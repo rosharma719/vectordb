@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::convert::TryInto;
-use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::Instant;
@@ -11,43 +10,31 @@ use serde_json;
 
 use vectordb::payload_storage::filters::Filter;
 use vectordb::segment::segment::Segment;
+use vectordb::utils::env::{
+    env_bool_first as shared_env_bool_first, env_string,
+    env_string_first as shared_env_string_first, env_usize,
+    env_usize_first as shared_env_usize_first, env_usize_list_first as shared_env_usize_list_first,
+};
 use vectordb::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::vector::hnsw::HNSWIndex;
 
 /// Return the first present env var (by key) parsed as usize.
 pub fn env_usize_first(keys: &[&str]) -> Option<usize> {
-    keys.iter().find_map(|k| {
-        env::var(k)
-            .ok()
-            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-    })
+    shared_env_usize_first(keys)
 }
 
 /// Return the first present env var (by key) parsed as a comma list of usize.
 pub fn env_usize_list_first(keys: &[&str]) -> Option<Vec<usize>> {
-    keys.iter().find_map(|k| {
-        env::var(k)
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .filter_map(|s| s.trim().replace('_', "").parse::<usize>().ok())
-                    .collect::<Vec<_>>()
-            })
-            .filter(|v| !v.is_empty())
-    })
+    shared_env_usize_list_first(keys)
 }
 
 pub fn env_string_first(keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|k| env::var(k).ok())
+    shared_env_string_first(keys)
 }
 
 pub fn env_bool_first(keys: &[&str]) -> Option<bool> {
-    keys.iter().find_map(|k| {
-        env::var(k)
-            .ok()
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-    })
+    shared_env_bool_first(keys)
 }
 
 #[cfg(unix)]
@@ -90,7 +77,7 @@ pub enum TestLogLevel {
 
 impl TestLogLevel {
     pub fn from_env() -> Self {
-        let raw = env::var("VECTORDB_TEST_LOG").unwrap_or_else(|_| "info".to_string());
+        let raw = env_string("VECTORDB_TEST_LOG").unwrap_or_else(|| "info".to_string());
         match raw.trim().to_ascii_lowercase().as_str() {
             "quiet" | "silent" | "off" => TestLogLevel::Quiet,
             "debug" | "trace" => TestLogLevel::Debug,
@@ -119,19 +106,12 @@ pub struct TestLogConfig {
 impl TestLogConfig {
     pub fn from_env() -> Self {
         let level = TestLogLevel::from_env();
-        let progress_every = env::var("VECTORDB_PROGRESS_EVERY")
-            .ok()
-            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+        let progress_every = env_usize("VECTORDB_PROGRESS_EVERY")
             .filter(|&v| v > 0)
             .unwrap_or(100);
-        let insert_progress_every = env::var("VECTORDB_INSERT_PROGRESS_EVERY")
-            .ok()
-            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-            .unwrap_or(1000);
-        let query_log_path = env::var("VECTORDB_QUERY_LOG").ok();
-        let query_log_every = env::var("VECTORDB_QUERY_LOG_EVERY")
-            .ok()
-            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
+        let insert_progress_every = env_usize("VECTORDB_INSERT_PROGRESS_EVERY").unwrap_or(1000);
+        let query_log_path = env_string("VECTORDB_QUERY_LOG");
+        let query_log_every = env_usize("VECTORDB_QUERY_LOG_EVERY")
             .filter(|&v| v > 0)
             .unwrap_or(1);
         Self {
@@ -152,6 +132,55 @@ impl TestLogConfig {
     pub fn log_debug(&self, msg: &str) {
         if self.level.allows_debug() {
             println!("{}", msg);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DatasetBuildConfig {
+    pub m: usize,
+    pub m0: usize,
+    pub max_level: usize,
+}
+
+impl DatasetBuildConfig {
+    pub fn from_env(prefix: &str, default_m: usize, default_max_level: usize) -> Self {
+        let m =
+            env_usize_first(&["VECTORDB_M", &format!("VECTORDB_{prefix}_M")]).unwrap_or(default_m);
+        let m0 = env_usize_first(&["VECTORDB_M0", &format!("VECTORDB_{prefix}_M0")]).unwrap_or(m);
+        let max_level = env_usize_first(&[
+            "VECTORDB_MAX_LEVEL",
+            &format!("VECTORDB_{prefix}_MAX_LEVEL"),
+        ])
+        .unwrap_or(default_max_level);
+        Self { m, m0, max_level }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DatasetHarnessConfig {
+    pub data_dir: String,
+    pub search: SearchConfig,
+    pub snapshot: SnapshotConfig,
+    pub build: DatasetBuildConfig,
+}
+
+impl DatasetHarnessConfig {
+    pub fn from_env(
+        prefix: &str,
+        default_data_dir: &str,
+        default_snapshot_path: &str,
+        default_ef_values: &[usize],
+        default_queries: usize,
+        default_m: usize,
+        default_max_level: usize,
+    ) -> Self {
+        Self {
+            data_dir: env_string(&format!("VECTORDB_{prefix}_DATA_DIR"))
+                .unwrap_or_else(|| default_data_dir.to_string()),
+            search: SearchConfig::from_env(prefix, default_ef_values, default_queries),
+            snapshot: SnapshotConfig::from_env(prefix, default_snapshot_path),
+            build: DatasetBuildConfig::from_env(prefix, default_m, default_max_level),
         }
     }
 }

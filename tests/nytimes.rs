@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::env;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
@@ -11,16 +10,16 @@ use serde_json::from_slice;
 
 mod common;
 use common::{
-    MissStats, QueryLogWriter, QueryStatsAgg, SearchConfig, SnapshotConfig, TestLogConfig,
-    env_usize_first, log_peak_rss, summarize_f64, summarize_usize,
+    DatasetHarnessConfig, MissStats, QueryLogWriter, QueryStatsAgg, TestLogConfig, log_peak_rss,
+    summarize_f64, summarize_usize,
 };
 
 use vectordb::segment::segment::Segment;
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::vector::hnsw::HNSWIndex;
 use vectordb::vector::hnsw::config::{
-    neighbor_scan_cap, neighbor_scan_rotate_enabled, neighbor_scan_stride_enabled,
-    search_expansion_multiplier,
+    disable_early_exit, early_exit_patience, neighbor_scan_cap, neighbor_scan_rotate_enabled,
+    neighbor_scan_stride_enabled, search_expansion_cap_override, search_expansion_multiplier,
 };
 
 fn load_vectors(path: &Path) -> Vec<Vector> {
@@ -87,23 +86,14 @@ fn ensure_exists(path: &Path) {
 }
 
 fn read_search_caps_from_env() -> (bool, usize, Option<usize>) {
-    let disable_early_exit = env::var("VECTORDB_DISABLE_EARLY_EXIT")
-        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-        .unwrap_or(false);
     let expansion_mult = search_expansion_multiplier();
-    let expansion_cap = env::var("VECTORDB_SEARCH_EXPANSION_CAP")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-        .and_then(|v| if v == 0 { None } else { Some(v) });
-    (disable_early_exit, expansion_mult, expansion_cap)
+    let expansion_cap = search_expansion_cap_override();
+    (disable_early_exit(), expansion_mult, expansion_cap)
 }
 
 fn log_search_caps(logs: &TestLogConfig) {
     let (disable_early_exit, expansion_mult, expansion_cap) = read_search_caps_from_env();
-    let patience = env::var("VECTORDB_EARLY_EXIT_PATIENCE")
-        .ok()
-        .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-        .unwrap_or(0);
+    let patience = early_exit_patience();
     let cap = neighbor_scan_cap(0);
     let rotation = neighbor_scan_rotate_enabled();
     let stride = neighbor_scan_stride_enabled();
@@ -176,21 +166,25 @@ enum TestMode {
 fn run_nytimes_perf_and_recall(mode: TestMode) {
     let t0 = Instant::now();
     let logs = TestLogConfig::from_env();
-    let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
-        .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
-    let search = SearchConfig::from_env("NYT", &[32, 64, 128, 256, 512], 1000);
-    let mut snapshot =
-        SnapshotConfig::from_env("NYT", "data/nytimes-256-angular/index_m16_m0_32_efc100.bin");
+    let mut harness = DatasetHarnessConfig::from_env(
+        "NYT",
+        "data/nytimes-256-angular",
+        "data/nytimes-256-angular/index_m16_m0_32_efc100.bin",
+        &[32, 64, 128, 256, 512],
+        1000,
+        16,
+        16,
+    );
     if matches!(mode, TestMode::BuildOnly) {
-        snapshot.use_snapshot = false;
-        snapshot.allow_build = true;
-        snapshot.save_snapshot = true;
+        harness.snapshot.use_snapshot = false;
+        harness.snapshot.allow_build = true;
+        harness.snapshot.save_snapshot = true;
     }
-    let top_k = search.top_k.unwrap_or(20);
+    let top_k = harness.search.top_k.unwrap_or(20);
 
-    let base_path = Path::new(&data_dir).join("base.npy");
-    let queries_path = Path::new(&data_dir).join("queries.npy");
-    let truth_path = Path::new(&data_dir).join("ground_truth.json");
+    let base_path = Path::new(&harness.data_dir).join("base.npy");
+    let queries_path = Path::new(&harness.data_dir).join("queries.npy");
+    let truth_path = Path::new(&harness.data_dir).join("ground_truth.json");
     ensure_exists(&base_path);
     ensure_exists(&queries_path);
     ensure_exists(&truth_path);
@@ -198,13 +192,18 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
 
     logs.log_info(&format!(
         "\n📚 Loading NYTimes dataset from {} (top_k={}, ef_search_list={:?}, max_queries={}, base_cap={:?}, ef_construct={})",
-        data_dir, top_k, search.ef_values, search.queries_cap, search.base_cap, search.ef_construct
+        harness.data_dir,
+        top_k,
+        harness.search.ef_values,
+        harness.search.queries_cap,
+        harness.search.base_cap,
+        harness.search.ef_construct
     ));
 
     let mut base = Vec::new();
-    if !snapshot.use_snapshot || snapshot.allow_build {
+    if !harness.snapshot.use_snapshot || harness.snapshot.allow_build {
         base = load_vectors(&base_path);
-        if let Some(cap) = search.base_cap {
+        if let Some(cap) = harness.search.base_cap {
             if cap < base.len() {
                 base.truncate(cap);
             }
@@ -219,50 +218,50 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
     );
     logs.log_info(&format!("⏱️  Data loaded in {:?}", t0.elapsed()));
 
-    let mut segment = if snapshot.use_snapshot {
-        if !Path::new(&snapshot.persist_path).exists() {
-            if snapshot.allow_build {
+    let mut segment = if harness.snapshot.use_snapshot {
+        if !Path::new(&harness.snapshot.persist_path).exists() {
+            if harness.snapshot.allow_build {
                 logs.log_info("💾 Snapshot missing; building a fresh segment...");
                 let dim = base.first().map(|v| v.len()).unwrap_or(0);
                 assert_eq!(dim, 256, "expected 256-d vectors");
                 let metric = DistanceMetric::Cosine;
-                let m = env_usize_first(&["VECTORDB_M", "VECTORDB_NYT_M"]).unwrap_or(16);
-                let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_NYT_M0"]).unwrap_or(m);
-                let max_level = env_usize_first(&["VECTORDB_MAX_LEVEL", "VECTORDB_NYT_MAX_LEVEL"])
-                    .unwrap_or(16);
                 let mut segment = Segment::new(HNSWIndex::new(
                     metric,
-                    m,
-                    search
+                    harness.build.m,
+                    harness
+                        .search
                         .ef_values
                         .iter()
                         .copied()
                         .max()
                         .unwrap_or(1)
                         .max(top_k),
-                    max_level,
+                    harness.build.max_level,
                     dim,
                 ));
-                segment.hnsw_mut().set_m0(m0);
-                segment.hnsw_mut().set_ef_construct(search.ef_construct);
+                segment.hnsw_mut().set_m0(harness.build.m0);
+                segment
+                    .hnsw_mut()
+                    .set_ef_construct(harness.search.ef_construct);
                 build_nytimes_segment(&mut segment, &base, &logs);
-                if snapshot.save_snapshot {
-                    persist_segment(&segment, &snapshot.persist_path, &logs);
+                if harness.snapshot.save_snapshot {
+                    persist_segment(&segment, &harness.snapshot.persist_path, &logs);
                 }
                 segment
             } else {
                 panic!(
                     "missing snapshot at {} (set VECTORDB_NYT_ALLOW_BUILD=1 or VECTORDB_ALLOW_BUILD=1 to build)",
-                    snapshot.persist_path
+                    harness.snapshot.persist_path
                 );
             }
         } else {
             logs.log_info(&format!(
                 "💾 Loading persisted NYTimes segment from {} ...",
-                snapshot.persist_path
+                harness.snapshot.persist_path
             ));
-            let (segment, metadata) = Segment::load_from_path_with_metadata(&snapshot.persist_path)
-                .expect("failed to load persisted NYTimes segment");
+            let (segment, metadata) =
+                Segment::load_from_path_with_metadata(&harness.snapshot.persist_path)
+                    .expect("failed to load persisted NYTimes segment");
             if let Some(meta) = metadata {
                 logs.log_info(&format!(
                     "🧾 Snapshot metadata: created_at_ms={} points={} payloads={}",
@@ -275,41 +274,40 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
         let dim = base.first().map(|v| v.len()).unwrap_or(0);
         assert_eq!(dim, 256, "expected 256-d vectors");
         let metric = DistanceMetric::Cosine;
-        let m = env_usize_first(&["VECTORDB_M", "VECTORDB_NYT_M"]).unwrap_or(16);
-        let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_NYT_M0"]).unwrap_or(m);
-        let max_level =
-            env_usize_first(&["VECTORDB_MAX_LEVEL", "VECTORDB_NYT_MAX_LEVEL"]).unwrap_or(16);
         let mut segment = Segment::new(HNSWIndex::new(
             metric,
-            m,
-            search
+            harness.build.m,
+            harness
+                .search
                 .ef_values
                 .iter()
                 .copied()
                 .max()
                 .unwrap_or(1)
                 .max(top_k),
-            max_level,
+            harness.build.max_level,
             dim,
         ));
-        segment.hnsw_mut().set_m0(m0);
-        segment.hnsw_mut().set_ef_construct(search.ef_construct);
+        segment.hnsw_mut().set_m0(harness.build.m0);
+        segment
+            .hnsw_mut()
+            .set_ef_construct(harness.search.ef_construct);
         build_nytimes_segment(&mut segment, &base, &logs);
-        if snapshot.save_snapshot {
-            persist_segment(&segment, &snapshot.persist_path, &logs);
+        if harness.snapshot.save_snapshot {
+            persist_segment(&segment, &harness.snapshot.persist_path, &logs);
         }
         segment
     };
 
-    let num_queries = queries.len().min(search.queries_cap);
+    let num_queries = queries.len().min(harness.search.queries_cap);
     let mut query_logger = QueryLogWriter::new(logs.query_log_path.clone(), logs.query_log_every);
     logs.log_info(&format!(
         "🔍 Sweeping ef_search over {:?} for {} queries (top_k={})...",
-        search.ef_values, num_queries, top_k
+        harness.search.ef_values, num_queries, top_k
     ));
 
     let mut summary: Vec<(usize, f64, f64)> = Vec::new();
-    for &ef in &search.ef_values {
+    for &ef in &harness.search.ef_values {
         let ef_search = ef.max(top_k);
         segment.hnsw_mut().set_ef_search(ef_search);
         let mut hits = 0usize;
@@ -433,15 +431,19 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
 fn run_nytimes_recall_only() {
     let t0 = Instant::now();
     let logs = TestLogConfig::from_env();
-    let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
-        .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
-    let search = SearchConfig::from_env("NYT", &[32, 64, 128, 256, 512], 1000);
-    let snapshot =
-        SnapshotConfig::from_env("NYT", "data/nytimes-256-angular/index_m16_m0_32_efc100.bin");
-    let top_k = search.top_k.unwrap_or(20);
+    let harness = DatasetHarnessConfig::from_env(
+        "NYT",
+        "data/nytimes-256-angular",
+        "data/nytimes-256-angular/index_m16_m0_32_efc100.bin",
+        &[32, 64, 128, 256, 512],
+        1000,
+        16,
+        16,
+    );
+    let top_k = harness.search.top_k.unwrap_or(20);
 
-    let queries_path = Path::new(&data_dir).join("queries.npy");
-    let truth_path = Path::new(&data_dir).join("ground_truth.json");
+    let queries_path = Path::new(&harness.data_dir).join("queries.npy");
+    let truth_path = Path::new(&harness.data_dir).join("ground_truth.json");
     ensure_exists(&queries_path);
     ensure_exists(&truth_path);
     log_search_caps(&logs);
@@ -460,21 +462,22 @@ fn run_nytimes_recall_only() {
     log_peak_rss("nytimes_qps_loaded_queries");
     log_peak_rss("nytimes_loaded_queries");
 
-    if !snapshot.use_snapshot {
+    if !harness.snapshot.use_snapshot {
         panic!("nytimes_recall_from_snapshot requires VECTORDB_USE_SNAPSHOT=1");
     }
-    if !Path::new(&snapshot.persist_path).exists() {
+    if !Path::new(&harness.snapshot.persist_path).exists() {
         panic!(
             "missing snapshot at {} (run nytimes_build_and_persist_snapshot_only first)",
-            snapshot.persist_path
+            harness.snapshot.persist_path
         );
     }
     logs.log_info(&format!(
         "💾 Loading persisted NYTimes segment from {} ...",
-        snapshot.persist_path
+        harness.snapshot.persist_path
     ));
-    let (mut segment, metadata) = Segment::load_from_path_with_metadata(&snapshot.persist_path)
-        .expect("failed to load persisted NYTimes segment");
+    let (mut segment, metadata) =
+        Segment::load_from_path_with_metadata(&harness.snapshot.persist_path)
+            .expect("failed to load persisted NYTimes segment");
     let cfg = segment.hnsw().config_summary();
     logs.log_info(&format!(
         "✅ Loaded persisted segment with {} vectors (payloads={})",
@@ -504,17 +507,17 @@ fn run_nytimes_recall_only() {
         ));
     }
 
-    let num_queries = queries.len().min(search.queries_cap);
+    let num_queries = queries.len().min(harness.search.queries_cap);
     let mut query_logger = QueryLogWriter::new(logs.query_log_path.clone(), logs.query_log_every);
     logs.log_info(&format!(
         "🔍 Sweeping ef_search over {:?} for {} queries (top_k={})...",
-        search.ef_values, num_queries, top_k
+        harness.search.ef_values, num_queries, top_k
     ));
     log_peak_rss("nytimes_qps_before_sweep");
     log_peak_rss("nytimes_before_sweep");
 
     let mut summary: Vec<(usize, f64, f64)> = Vec::new();
-    for &ef in &search.ef_values {
+    for &ef in &harness.search.ef_values {
         let ef_search = ef.max(top_k);
         segment.hnsw_mut().set_ef_search(ef_search);
         let mut hits = 0usize;
@@ -637,15 +640,19 @@ fn run_nytimes_recall_only() {
 fn run_nytimes_qps_latency_curve() {
     let t0 = Instant::now();
     let logs = TestLogConfig::from_env();
-    let data_dir = env::var("VECTORDB_NYT_DATA_DIR")
-        .unwrap_or_else(|_| "data/nytimes-256-angular".to_string());
-    let search = SearchConfig::from_env("NYT", &[32, 64, 128, 256, 512], 1000);
-    let snapshot =
-        SnapshotConfig::from_env("NYT", "data/nytimes-256-angular/index_m16_m0_32_efc100.bin");
-    let top_k = search.top_k.unwrap_or(20);
+    let harness = DatasetHarnessConfig::from_env(
+        "NYT",
+        "data/nytimes-256-angular",
+        "data/nytimes-256-angular/index_m16_m0_32_efc100.bin",
+        &[32, 64, 128, 256, 512],
+        1000,
+        16,
+        16,
+    );
+    let top_k = harness.search.top_k.unwrap_or(20);
 
-    let queries_path = Path::new(&data_dir).join("queries.npy");
-    let truth_path = Path::new(&data_dir).join("ground_truth.json");
+    let queries_path = Path::new(&harness.data_dir).join("queries.npy");
+    let truth_path = Path::new(&harness.data_dir).join("ground_truth.json");
     ensure_exists(&queries_path);
     ensure_exists(&truth_path);
     log_search_caps(&logs);
@@ -662,21 +669,22 @@ fn run_nytimes_qps_latency_curve() {
         t0.elapsed()
     ));
 
-    if !snapshot.use_snapshot {
+    if !harness.snapshot.use_snapshot {
         panic!("nytimes_qps_latency_curve requires VECTORDB_USE_SNAPSHOT=1");
     }
-    if !Path::new(&snapshot.persist_path).exists() {
+    if !Path::new(&harness.snapshot.persist_path).exists() {
         panic!(
             "missing snapshot at {} (run nytimes_build_and_persist_snapshot_only first)",
-            snapshot.persist_path
+            harness.snapshot.persist_path
         );
     }
     logs.log_info(&format!(
         "💾 Loading persisted NYTimes segment from {} ...",
-        snapshot.persist_path
+        harness.snapshot.persist_path
     ));
-    let (mut segment, metadata) = Segment::load_from_path_with_metadata(&snapshot.persist_path)
-        .expect("failed to load persisted NYTimes segment");
+    let (mut segment, metadata) =
+        Segment::load_from_path_with_metadata(&harness.snapshot.persist_path)
+            .expect("failed to load persisted NYTimes segment");
     let cfg = segment.hnsw().config_summary();
     logs.log_info(&format!(
         "✅ Loaded persisted segment with {} vectors (payloads={})",
@@ -704,15 +712,15 @@ fn run_nytimes_qps_latency_curve() {
         ));
     }
 
-    let num_queries = queries.len().min(search.queries_cap);
+    let num_queries = queries.len().min(harness.search.queries_cap);
     let mut query_logger = QueryLogWriter::new(logs.query_log_path.clone(), logs.query_log_every);
     logs.log_info(&format!(
         "🔍 Sweeping ef_search over {:?} for {} queries (top_k={})...",
-        search.ef_values, num_queries, top_k
+        harness.search.ef_values, num_queries, top_k
     ));
 
     let mut summary: Vec<(usize, f64, f64, f64)> = Vec::new();
-    for &ef in &search.ef_values {
+    for &ef in &harness.search.ef_values {
         let ef_search = ef.max(top_k);
         segment.hnsw_mut().set_ef_search(ef_search);
         let mut hits = 0usize;

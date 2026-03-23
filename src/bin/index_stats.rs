@@ -36,7 +36,8 @@ impl Cli {
                 }
                 "--snapshots-file" => {
                     cli.snapshots_file = Some(PathBuf::from(
-                        args.next().context("expected path after --snapshots-file")?,
+                        args.next()
+                            .context("expected path after --snapshots-file")?,
                     ));
                 }
                 "--pair-samples" => {
@@ -168,8 +169,7 @@ fn compute_stats(snapshot_path: &Path, pair_samples: usize) -> Result<IndexStats
     let (level_avg, level_p50, level_p90, level_p99) = level_stats(&active_levels);
 
     let l0_degrees = level_degrees(hnsw, 0);
-    let (l0_deg_avg, l0_deg_p50, l0_deg_p90, l0_deg_p99, l0_deg_max) =
-        degree_stats(&l0_degrees);
+    let (l0_deg_avg, l0_deg_p50, l0_deg_p90, l0_deg_p99, l0_deg_max) = degree_stats(&l0_degrees);
     let l0_deg_tail_over_32 = tail_ratio(&l0_degrees, 32);
     let l0_deg_tail_over_64 = tail_ratio(&l0_degrees, 64);
 

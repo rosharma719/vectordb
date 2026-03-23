@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 
+use crate::utils::env::{env_bool, env_u64, env_usize};
 use crate::utils::errors::DBError;
 use crate::utils::io::adler32;
 use crate::utils::payload::Payload;
@@ -34,18 +35,14 @@ impl WalConfig {
 
     pub fn from_env<P: Into<PathBuf>>(path: P) -> Self {
         let mut cfg = Self::new(path);
-        if let Ok(v) = std::env::var("VECTORDB_WAL_FSYNC") {
-            cfg.fsync = v != "0" && !v.eq_ignore_ascii_case("false");
+        if let Some(value) = env_bool("VECTORDB_WAL_FSYNC") {
+            cfg.fsync = value;
         }
-        if let Ok(v) = std::env::var("VECTORDB_WAL_FSYNC_EVERY") {
-            if let Ok(n) = v.replace('_', "").parse::<usize>() {
-                cfg.fsync_every = n.max(1);
-            }
+        if let Some(value) = env_usize("VECTORDB_WAL_FSYNC_EVERY") {
+            cfg.fsync_every = value.max(1);
         }
-        if let Ok(v) = std::env::var("VECTORDB_WAL_FSYNC_MS") {
-            if let Ok(ms) = v.replace('_', "").parse::<u64>() {
-                cfg.fsync_interval = Duration::from_millis(ms);
-            }
+        if let Some(value) = env_u64("VECTORDB_WAL_FSYNC_MS") {
+            cfg.fsync_interval = Duration::from_millis(value);
         }
         cfg
     }

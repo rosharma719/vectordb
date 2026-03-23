@@ -1,9 +1,10 @@
 /target
-# Local datasets (NYTimes benchmark)
-data/nytimes-256-angular/
 # All datasets
 data/
 # Local logs
 logs/
+.DS_Store
+__pycache__/
 *.log
 *.pyc
+*.pyo

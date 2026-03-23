@@ -204,8 +204,7 @@ impl HNSWIndex {
             let mut worst_score = scratch.result_set.peek().unwrap().0.sort_key;
             let allow_early_exit = self.metric != DistanceMetric::Dot && !disable_early_exit();
             let patience_limit = if allow_early_exit {
-                opts.early_exit_patience
-                    .unwrap_or_else(early_exit_patience)
+                opts.early_exit_patience.unwrap_or_else(early_exit_patience)
             } else {
                 0
             };

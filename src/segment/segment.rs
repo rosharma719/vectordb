@@ -448,7 +448,9 @@ impl Segment {
             ));
         }
 
-        let (candidates, stats) = self.hnsw.search_with_stats_with_options(query, top_k, opts)?;
+        let (candidates, stats) = self
+            .hnsw
+            .search_with_stats_with_options(query, top_k, opts)?;
         let filtered = candidates
             .into_iter()
             .filter(|sp| !self.deleted.contains(&sp.id))

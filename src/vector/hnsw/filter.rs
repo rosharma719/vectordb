@@ -17,7 +17,9 @@ use super::config::{
 };
 use super::scratch::SEARCH_SCRATCH;
 use super::stats::{FILTER_SEED_COUNT, FilterSearchLogEntry};
-use super::types::{NodeCandidate, NodeResult, NodeRoutingEntry, ScoredPoint, SearchRuntimeOptions};
+use super::types::{
+    NodeCandidate, NodeResult, NodeRoutingEntry, ScoredPoint, SearchRuntimeOptions,
+};
 
 impl HNSWIndex {
     fn best_entry_in_mask(mask: &[bool], levels: &[usize], deleted: &[bool]) -> Option<usize> {

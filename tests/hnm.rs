@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -20,8 +19,8 @@ use vectordb::vector::hnsw::HNSWIndex;
 
 mod common;
 use common::{
-    MissStats, QueryLogWriter, QueryStatsAgg, SearchConfig, SnapshotConfig, TestLogConfig,
-    env_usize_first, log_peak_rss, summarize_f64, summarize_usize,
+    DatasetHarnessConfig, MissStats, QueryLogWriter, QueryStatsAgg, TestLogConfig, log_peak_rss,
+    summarize_f64, summarize_usize,
 };
 
 fn load_vectors(path: &Path) -> Vec<Vector> {
@@ -304,18 +303,24 @@ enum TestMode {
 fn run_hnm_filtered_cosine_recall(mode: TestMode) {
     let t0 = Instant::now();
     let logs = TestLogConfig::from_env();
-    let data_dir = env::var("VECTORDB_HNM_DATA_DIR").unwrap_or_else(|_| "data/hnm".to_string());
-    let search = SearchConfig::from_env("HNM", &[32, 64, 128, 256, 512], 1000);
-    let mut snapshot = SnapshotConfig::from_env("HNM", "data/hnm/index_filtered.bin");
+    let mut harness = DatasetHarnessConfig::from_env(
+        "HNM",
+        "data/hnm",
+        "data/hnm/index_filtered.bin",
+        &[32, 64, 128, 256, 512],
+        1000,
+        16,
+        16,
+    );
     if matches!(mode, TestMode::BuildOnly) {
-        snapshot.use_snapshot = false;
-        snapshot.allow_build = true;
-        snapshot.save_snapshot = true;
+        harness.snapshot.use_snapshot = false;
+        harness.snapshot.allow_build = true;
+        harness.snapshot.save_snapshot = true;
     }
 
-    let vectors_path = Path::new(&data_dir).join("vectors.npy");
-    let payloads_path = Path::new(&data_dir).join("payloads.jsonl");
-    let tests_path = Path::new(&data_dir).join("tests.jsonl");
+    let vectors_path = Path::new(&harness.data_dir).join("vectors.npy");
+    let payloads_path = Path::new(&harness.data_dir).join("payloads.jsonl");
+    let tests_path = Path::new(&harness.data_dir).join("tests.jsonl");
     assert!(vectors_path.exists(), "missing {}", vectors_path.display());
     assert!(
         payloads_path.exists(),
@@ -326,14 +331,18 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
 
     logs.log_info(&format!(
         "\n🧪 H&M filtered recall: dir={}, ef_search={:?}, ef_construct={}, base_cap={:?}, queries_cap={}",
-        data_dir, search.ef_values, search.ef_construct, search.base_cap, search.queries_cap
+        harness.data_dir,
+        harness.search.ef_values,
+        harness.search.ef_construct,
+        harness.search.base_cap,
+        harness.search.queries_cap
     ));
 
     let mut base = Vec::new();
     let mut payloads = Vec::new();
-    if !snapshot.use_snapshot || snapshot.allow_build {
+    if !harness.snapshot.use_snapshot || harness.snapshot.allow_build {
         base = load_vectors(&vectors_path);
-        if let Some(cap) = search.base_cap {
+        if let Some(cap) = harness.search.base_cap {
             if cap < base.len() {
                 base.truncate(cap);
             }
@@ -352,11 +361,11 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
     logs.log_info(&format!("⏱️  Data loaded in {:?}", t0.elapsed()));
 
     let default_topk = raw_tests.first().map(|c| c.closest_ids.len()).unwrap_or(10);
-    let top_k = search.top_k.unwrap_or(default_topk);
+    let top_k = harness.search.top_k.unwrap_or(default_topk);
 
     let prepared_cases: Vec<PreparedCase> = raw_tests
         .into_iter()
-        .take(search.queries_cap)
+        .take(harness.search.queries_cap)
         .map(|raw| {
             let filter = if raw.conditions.is_null() {
                 None
@@ -377,63 +386,77 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
         })
         .collect();
 
-    let mut segment = if snapshot.use_snapshot {
-        if !Path::new(&snapshot.persist_path).exists() {
-            if snapshot.allow_build {
+    let mut segment = if harness.snapshot.use_snapshot {
+        if !Path::new(&harness.snapshot.persist_path).exists() {
+            if harness.snapshot.allow_build {
                 logs.log_info("💾 Snapshot missing; building a fresh segment...");
                 let dim = base.first().map(|v| v.len()).unwrap_or(0);
                 assert_eq!(dim, 2048, "expected 2048-d vectors");
                 let metric = DistanceMetric::Cosine;
-                let m = env_usize_first(&["VECTORDB_M", "VECTORDB_HNM_M"]).unwrap_or(16);
-                let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_HNM_M0"]).unwrap_or(m);
-                let max_ef = search
+                let max_ef = harness
+                    .search
                     .ef_values
                     .iter()
                     .copied()
                     .max()
                     .unwrap_or(1)
                     .max(top_k);
-                let mut segment = Segment::new(HNSWIndex::new(metric, m, max_ef, 16, dim));
-                segment.hnsw_mut().set_m0(m0);
-                segment.hnsw_mut().set_ef_construct(search.ef_construct);
+                let mut segment = Segment::new(HNSWIndex::new(
+                    metric,
+                    harness.build.m,
+                    max_ef,
+                    harness.build.max_level,
+                    dim,
+                ));
+                segment.hnsw_mut().set_m0(harness.build.m0);
+                segment
+                    .hnsw_mut()
+                    .set_ef_construct(harness.search.ef_construct);
                 build_hnm_segment(&mut segment, &base, &payloads, &logs);
-                if snapshot.save_snapshot {
-                    persist_hnm_segment(&segment, &snapshot.persist_path, &logs);
+                if harness.snapshot.save_snapshot {
+                    persist_hnm_segment(&segment, &harness.snapshot.persist_path, &logs);
                 }
                 segment
             } else {
                 panic!(
                     "missing snapshot at {} (set VECTORDB_HNM_ALLOW_BUILD=1 or VECTORDB_ALLOW_BUILD=1 to build)",
-                    snapshot.persist_path
+                    harness.snapshot.persist_path
                 );
             }
         } else {
             logs.log_info(&format!(
                 "💾 Loading persisted H&M segment from {} ...",
-                snapshot.persist_path
+                harness.snapshot.persist_path
             ));
-            Segment::load_from_path(&snapshot.persist_path)
+            Segment::load_from_path(&harness.snapshot.persist_path)
                 .expect("failed to load persisted H&M segment")
         }
     } else {
         let dim = base.first().map(|v| v.len()).unwrap_or(0);
         assert_eq!(dim, 2048, "expected 2048-d vectors");
         let metric = DistanceMetric::Cosine;
-        let m = env_usize_first(&["VECTORDB_M", "VECTORDB_HNM_M"]).unwrap_or(16);
-        let m0 = env_usize_first(&["VECTORDB_M0", "VECTORDB_HNM_M0"]).unwrap_or(m);
-        let max_ef = search
+        let max_ef = harness
+            .search
             .ef_values
             .iter()
             .copied()
             .max()
             .unwrap_or(1)
             .max(top_k);
-        let mut segment = Segment::new(HNSWIndex::new(metric, m, max_ef, 16, dim));
-        segment.hnsw_mut().set_m0(m0);
-        segment.hnsw_mut().set_ef_construct(search.ef_construct);
+        let mut segment = Segment::new(HNSWIndex::new(
+            metric,
+            harness.build.m,
+            max_ef,
+            harness.build.max_level,
+            dim,
+        ));
+        segment.hnsw_mut().set_m0(harness.build.m0);
+        segment
+            .hnsw_mut()
+            .set_ef_construct(harness.search.ef_construct);
         build_hnm_segment(&mut segment, &base, &payloads, &logs);
-        if snapshot.save_snapshot {
-            persist_hnm_segment(&segment, &snapshot.persist_path, &logs);
+        if harness.snapshot.save_snapshot {
+            persist_hnm_segment(&segment, &harness.snapshot.persist_path, &logs);
         }
         segment
     };
@@ -443,11 +466,11 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
     let mut query_logger = QueryLogWriter::new(logs.query_log_path.clone(), logs.query_log_every);
     logs.log_info(&format!(
         "🔍 Sweeping ef_search over {:?} for {} queries (top_k={})...",
-        search.ef_values, num_queries, top_k
+        harness.search.ef_values, num_queries, top_k
     ));
 
     let mut summary: Vec<(usize, f64, f64)> = Vec::new();
-    for &ef in &search.ef_values {
+    for &ef in &harness.search.ef_values {
         let ef_search = ef.max(top_k);
         segment.hnsw_mut().set_ef_search(ef_search);
         let mut hits = 0usize;
@@ -588,11 +611,17 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
 fn run_hnm_recall_only() {
     let t0 = Instant::now();
     let logs = TestLogConfig::from_env();
-    let data_dir = env::var("VECTORDB_HNM_DATA_DIR").unwrap_or_else(|_| "data/hnm".to_string());
-    let search = SearchConfig::from_env("HNM", &[32, 64, 128, 256, 512], 1000);
-    let snapshot = SnapshotConfig::from_env("HNM", "data/hnm/index_filtered.bin");
+    let harness = DatasetHarnessConfig::from_env(
+        "HNM",
+        "data/hnm",
+        "data/hnm/index_filtered.bin",
+        &[32, 64, 128, 256, 512],
+        1000,
+        16,
+        16,
+    );
 
-    let tests_path = Path::new(&data_dir).join("tests.jsonl");
+    let tests_path = Path::new(&harness.data_dir).join("tests.jsonl");
     assert!(tests_path.exists(), "missing {}", tests_path.display());
 
     // Load only the test cases; vectors/payloads come from the persisted segment.
@@ -601,11 +630,11 @@ fn run_hnm_recall_only() {
     log_peak_rss("hnm_loaded_tests");
 
     let default_topk = raw_tests.first().map(|c| c.closest_ids.len()).unwrap_or(10);
-    let top_k = search.top_k.unwrap_or(default_topk);
+    let top_k = harness.search.top_k.unwrap_or(default_topk);
 
     let prepared_cases: Vec<PreparedCase> = raw_tests
         .into_iter()
-        .take(search.queries_cap)
+        .take(harness.search.queries_cap)
         .map(|raw| {
             let filter = if raw.conditions.is_null() {
                 None
@@ -626,21 +655,22 @@ fn run_hnm_recall_only() {
         })
         .collect();
 
-    if !snapshot.use_snapshot {
+    if !harness.snapshot.use_snapshot {
         panic!("hnm_recall_from_snapshot requires VECTORDB_USE_SNAPSHOT=1");
     }
-    if !Path::new(&snapshot.persist_path).exists() {
+    if !Path::new(&harness.snapshot.persist_path).exists() {
         panic!(
             "missing snapshot at {} (run hnm_build_and_persist_snapshot_only first)",
-            snapshot.persist_path
+            harness.snapshot.persist_path
         );
     }
     logs.log_info(&format!(
         "💾 Loading persisted H&M segment from {} ...",
-        snapshot.persist_path
+        harness.snapshot.persist_path
     ));
-    let (mut segment, metadata) = Segment::load_from_path_with_metadata(&snapshot.persist_path)
-        .expect("failed to load persisted H&M segment");
+    let (mut segment, metadata) =
+        Segment::load_from_path_with_metadata(&harness.snapshot.persist_path)
+            .expect("failed to load persisted H&M segment");
     logs.log_info(&format!(
         "✅ Loaded persisted segment with {} payloads, ef_search={}",
         segment.payloads().len(),
@@ -674,7 +704,7 @@ fn run_hnm_recall_only() {
     let mut summary: Vec<(usize, f64, f64)> = Vec::new();
     let mut query_logger = QueryLogWriter::new(logs.query_log_path.clone(), logs.query_log_every);
     log_peak_rss("hnm_before_sweep");
-    for &ef in &search.ef_values {
+    for &ef in &harness.search.ef_values {
         let ef_search = ef.max(top_k);
         segment.hnsw_mut().set_ef_search(ef_search);
         let mut hits = 0usize;

@@ -3,6 +3,8 @@ use std::io::BufWriter;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::utils::env::{env_bool, env_f32, env_string, env_usize, env_usize_nonzero};
+
 pub(crate) const VERBOSE: bool = false;
 pub(crate) const DEFAULT_EXACT_FALLBACK_THRESHOLD: usize = 256;
 pub(crate) const FILTER_EDGE_LOG_CHUNK: usize = 10_000;
@@ -39,9 +41,7 @@ static DIVERSITY_PRUNE_FLOOR: OnceLock<Option<usize>> = OnceLock::new();
 
 pub(crate) fn log_unfiltered_enabled() -> bool {
     *LOG_UNFILTERED_SEARCH.get_or_init(|| {
-        let enabled = std::env::var("VECTORDB_LOG_UNFILTERED_SEARCH")
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(false);
+        let enabled = env_bool("VECTORDB_LOG_UNFILTERED_SEARCH").unwrap_or(false);
         if enabled {
             let chunk = unfiltered_log_chunk();
             log::info!(
@@ -55,94 +55,57 @@ pub(crate) fn log_unfiltered_enabled() -> bool {
 }
 
 pub(crate) fn unfiltered_log_chunk() -> usize {
-    *UNFILTERED_LOG_CHUNK.get_or_init(|| {
-        std::env::var("VECTORDB_LOG_UNFILTERED_EVERY")
-            .ok()
-            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(1000)
-    })
+    *UNFILTERED_LOG_CHUNK
+        .get_or_init(|| env_usize_nonzero("VECTORDB_LOG_UNFILTERED_EVERY").unwrap_or(1000))
 }
 
 pub(crate) fn filter_seed_log_chunk() -> usize {
-    *FILTER_SEED_LOG_CHUNK.get_or_init(|| {
-        std::env::var("VECTORDB_LOG_FILTER_SEED_EVERY")
-            .ok()
-            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(100)
-    })
+    *FILTER_SEED_LOG_CHUNK
+        .get_or_init(|| env_usize_nonzero("VECTORDB_LOG_FILTER_SEED_EVERY").unwrap_or(100))
 }
 
-pub(crate) fn disable_early_exit() -> bool {
-    *DISABLE_EARLY_EXIT.get_or_init(|| {
-        std::env::var("VECTORDB_DISABLE_EARLY_EXIT")
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(false)
-    })
+pub fn disable_early_exit() -> bool {
+    *DISABLE_EARLY_EXIT.get_or_init(|| env_bool("VECTORDB_DISABLE_EARLY_EXIT").unwrap_or(false))
 }
 
 pub fn search_expansion_multiplier() -> usize {
-    *SEARCH_EXPANSION_MULT.get_or_init(|| {
-        std::env::var("VECTORDB_SEARCH_EXPANSION_MULT")
-            .ok()
-            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(1)
-    })
+    *SEARCH_EXPANSION_MULT
+        .get_or_init(|| env_usize_nonzero("VECTORDB_SEARCH_EXPANSION_MULT").unwrap_or(1))
 }
 
-pub(crate) fn search_expansion_cap_override() -> Option<usize> {
+pub fn search_expansion_cap_override() -> Option<usize> {
     SEARCH_EXPANSION_CAP
         .get_or_init(|| {
-            std::env::var("VECTORDB_SEARCH_EXPANSION_CAP")
-                .ok()
-                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-                // Treat 0 as "no cap" to allow unbounded expansion for experiments.
-                .and_then(|v| if v == 0 { None } else { Some(v) })
+            env_usize("VECTORDB_SEARCH_EXPANSION_CAP")
+                .and_then(|value| if value == 0 { None } else { Some(value) })
         })
         .clone()
 }
 
-pub(crate) fn early_exit_patience() -> usize {
-    *EARLY_EXIT_PATIENCE.get_or_init(|| {
-        std::env::var("VECTORDB_EARLY_EXIT_PATIENCE")
-            .ok()
-            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-            .unwrap_or(2)
-    })
+pub fn early_exit_patience() -> usize {
+    *EARLY_EXIT_PATIENCE.get_or_init(|| env_usize("VECTORDB_EARLY_EXIT_PATIENCE").unwrap_or(2))
 }
 
 pub(crate) fn filter_expansion_cap() -> Option<usize> {
     // Specific cap for filtered search; 0 means unbounded.
     FILTER_EXPANSION_CAP
         .get_or_init(|| {
-            std::env::var("VECTORDB_FILTER_EXPANSION_CAP")
-                .ok()
-                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-                .map(|v| if v == 0 { usize::MAX } else { v })
+            env_usize("VECTORDB_FILTER_EXPANSION_CAP")
+                .map(|value| if value == 0 { usize::MAX } else { value })
         })
         .clone()
 }
 
 pub(crate) fn filter_passing_budget(m: usize) -> usize {
     FILTER_PASSING_BUDGET
-        .get_or_init(|| {
-            std::env::var("VECTORDB_FILTER_PASSING_BUDGET")
-                .ok()
-                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-        })
+        .get_or_init(|| env_usize("VECTORDB_FILTER_PASSING_BUDGET"))
         .clone()
         .unwrap_or_else(|| std::cmp::max(8, m.saturating_mul(2)))
 }
 
 pub(crate) fn filter_failing_budget(m: usize) -> usize {
     FILTER_FAILING_BUDGET
-        .get_or_init(|| {
-            std::env::var("VECTORDB_FILTER_FAILING_BUDGET")
-                .ok()
-                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-        })
+        .get_or_init(|| env_usize("VECTORDB_FILTER_FAILING_BUDGET"))
         .clone()
         .unwrap_or_else(|| std::cmp::max(1, m / 8))
 }
@@ -150,8 +113,7 @@ pub(crate) fn filter_failing_budget(m: usize) -> usize {
 pub(crate) fn filter_search_logger() -> Option<&'static Mutex<BufWriter<File>>> {
     FILTER_SEARCH_LOG
         .get_or_init(|| {
-            std::env::var("VECTORDB_FILTER_SEARCH_LOG")
-                .ok()
+            env_string("VECTORDB_FILTER_SEARCH_LOG")
                 .and_then(|path| File::create(path).ok())
                 .map(|f| Mutex::new(BufWriter::new(f)))
         })
@@ -165,8 +127,7 @@ pub(crate) fn next_filter_search_seq() -> u64 {
 pub(crate) fn search_trace_logger() -> Option<&'static Mutex<BufWriter<File>>> {
     SEARCH_TRACE_LOG
         .get_or_init(|| {
-            std::env::var("VECTORDB_SEARCH_TRACE_LOG")
-                .ok()
+            env_string("VECTORDB_SEARCH_TRACE_LOG")
                 .and_then(|path| File::create(path).ok())
                 .map(|f| Mutex::new(BufWriter::new(f)))
         })
@@ -176,8 +137,7 @@ pub(crate) fn search_trace_logger() -> Option<&'static Mutex<BufWriter<File>>> {
 pub(crate) fn insert_trace_logger() -> Option<&'static Mutex<BufWriter<File>>> {
     INSERT_TRACE_LOG
         .get_or_init(|| {
-            std::env::var("VECTORDB_INSERT_TRACE_LOG")
-                .ok()
+            env_string("VECTORDB_INSERT_TRACE_LOG")
                 .and_then(|path| File::create(path).ok())
                 .map(|f| Mutex::new(BufWriter::new(f)))
         })
@@ -185,13 +145,7 @@ pub(crate) fn insert_trace_logger() -> Option<&'static Mutex<BufWriter<File>>> {
 }
 
 pub(crate) fn trace_every() -> usize {
-    *TRACE_EVERY.get_or_init(|| {
-        std::env::var("VECTORDB_TRACE_EVERY")
-            .ok()
-            .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(100)
-    })
+    *TRACE_EVERY.get_or_init(|| env_usize_nonzero("VECTORDB_TRACE_EVERY").unwrap_or(100))
 }
 
 pub(crate) fn next_search_trace_seq() -> u64 {
@@ -203,31 +157,18 @@ pub(crate) fn next_insert_trace_seq() -> u64 {
 }
 
 pub(crate) fn exact_fallback_enabled_override() -> Option<bool> {
-    *EXACT_FALLBACK_ENABLED.get_or_init(|| {
-        std::env::var("VECTORDB_EXACT_FALLBACK_ENABLED")
-            .ok()
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-    })
+    *EXACT_FALLBACK_ENABLED.get_or_init(|| env_bool("VECTORDB_EXACT_FALLBACK_ENABLED"))
 }
 
 pub(crate) fn exact_fallback_threshold_override() -> Option<usize> {
     EXACT_FALLBACK_THRESHOLD
-        .get_or_init(|| {
-            std::env::var("VECTORDB_EXACT_FALLBACK_THRESHOLD")
-                .ok()
-                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-        })
+        .get_or_init(|| env_usize("VECTORDB_EXACT_FALLBACK_THRESHOLD"))
         .clone()
 }
 
 pub(crate) fn filter_entry_candidates() -> Option<usize> {
     FILTER_ENTRY_CANDIDATES
-        .get_or_init(|| {
-            std::env::var("VECTORDB_FILTER_ENTRY_CANDIDATES")
-                .ok()
-                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-                .filter(|v| *v > 0)
-        })
+        .get_or_init(|| env_usize_nonzero("VECTORDB_FILTER_ENTRY_CANDIDATES"))
         .clone()
 }
 
@@ -235,10 +176,8 @@ pub fn neighbor_scan_cap(level: usize) -> usize {
     if level == 0 {
         NEIGHBOR_SCAN_CAP_LEVEL0
             .get_or_init(|| {
-                std::env::var("VECTORDB_NEIGHBOR_SCAN_CAP_LEVEL0")
-                    .ok()
-                    .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-                    .map(|v| if v == 0 { usize::MAX } else { v })
+                env_usize("VECTORDB_NEIGHBOR_SCAN_CAP_LEVEL0")
+                    .map(|value| if value == 0 { usize::MAX } else { value })
             })
             .unwrap_or(64)
     } else {
@@ -248,33 +187,20 @@ pub fn neighbor_scan_cap(level: usize) -> usize {
 
 pub fn neighbor_scan_patience() -> usize {
     NEIGHBOR_SCAN_PATIENCE
-        .get_or_init(|| {
-            std::env::var("VECTORDB_NEIGHBOR_SCAN_PATIENCE")
-                .ok()
-                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-                .filter(|&v| v > 0)
-        })
+        .get_or_init(|| env_usize_nonzero("VECTORDB_NEIGHBOR_SCAN_PATIENCE"))
         .clone()
         .unwrap_or(0)
 }
 
 pub fn neighbor_scan_rotate_enabled() -> bool {
     NEIGHBOR_SCAN_ROTATE
-        .get_or_init(|| {
-            std::env::var("VECTORDB_NEIGHBOR_SCAN_ROTATE")
-                .ok()
-                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-        })
+        .get_or_init(|| env_bool("VECTORDB_NEIGHBOR_SCAN_ROTATE"))
         .unwrap_or(false)
 }
 
 pub fn neighbor_scan_stride_enabled() -> bool {
     NEIGHBOR_SCAN_STRIDE
-        .get_or_init(|| {
-            std::env::var("VECTORDB_NEIGHBOR_SCAN_STRIDE")
-                .ok()
-                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-        })
+        .get_or_init(|| env_bool("VECTORDB_NEIGHBOR_SCAN_STRIDE"))
         .unwrap_or(false)
 }
 
@@ -297,27 +223,20 @@ pub(crate) fn log_neighbor_scan_state(expansion_mult: usize, expansion_cap: Opti
 
 pub(crate) fn diversity_alpha_for_level(level: usize) -> f32 {
     if let Some(alpha) = DIVERSITY_ALPHA.get_or_init(|| {
-        std::env::var("VECTORDB_DIVERSITY_ALPHA")
-            .ok()
-            .and_then(|v| v.replace('_', "").parse::<f32>().ok())
-            .filter(|v| v.is_finite() && *v > 0.0)
+        env_f32("VECTORDB_DIVERSITY_ALPHA").filter(|value| value.is_finite() && *value > 0.0)
     }) {
         return *alpha;
     }
     let low = DIVERSITY_ALPHA_LOW
         .get_or_init(|| {
-            std::env::var("VECTORDB_DIVERSITY_ALPHA_LOW")
-                .ok()
-                .and_then(|v| v.replace('_', "").parse::<f32>().ok())
-                .filter(|v| v.is_finite() && *v > 0.0)
+            env_f32("VECTORDB_DIVERSITY_ALPHA_LOW")
+                .filter(|value| value.is_finite() && *value > 0.0)
         })
         .unwrap_or(1.0);
     let high = DIVERSITY_ALPHA_HIGH
         .get_or_init(|| {
-            std::env::var("VECTORDB_DIVERSITY_ALPHA_HIGH")
-                .ok()
-                .and_then(|v| v.replace('_', "").parse::<f32>().ok())
-                .filter(|v| v.is_finite() && *v > 0.0)
+            env_f32("VECTORDB_DIVERSITY_ALPHA_HIGH")
+                .filter(|value| value.is_finite() && *value > 0.0)
         })
         .unwrap_or(1.2);
     if level == 0 { low } else { high }
@@ -325,11 +244,6 @@ pub(crate) fn diversity_alpha_for_level(level: usize) -> f32 {
 
 pub(crate) fn diversity_prune_floor() -> usize {
     DIVERSITY_PRUNE_FLOOR
-        .get_or_init(|| {
-            std::env::var("VECTORDB_DIVERSITY_PRUNE_FLOOR")
-                .ok()
-                .and_then(|v| v.replace('_', "").parse::<usize>().ok())
-                .filter(|v| *v > 0)
-        })
+        .get_or_init(|| env_usize_nonzero("VECTORDB_DIVERSITY_PRUNE_FLOOR"))
         .unwrap_or(4)
 }
