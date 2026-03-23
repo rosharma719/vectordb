@@ -29,9 +29,9 @@ impl PayloadIndex {
 
             self.index
                 .entry(key.clone())
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .entry(value.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(point_id);
         }
         self.revision = self.revision.wrapping_add(1);
@@ -119,10 +119,10 @@ impl PayloadIndex {
                 let rest = &sets[1..];
                 let mut mask = vec![false; len];
                 for id in smallest {
-                    if rest.iter().all(|s| s.contains(id)) {
-                        if let Some(&idx) = point_to_idx.get(id) {
-                            mask[idx] = true;
-                        }
+                    if rest.iter().all(|s| s.contains(id))
+                        && let Some(&idx) = point_to_idx.get(id)
+                    {
+                        mask[idx] = true;
                     }
                 }
                 Some(mask)
@@ -130,9 +130,7 @@ impl PayloadIndex {
             Filter::Or(conds) => {
                 let mut mask = vec![false; len];
                 for cond in conds {
-                    let Some(ids) = self.query_filter_ids(cond) else {
-                        return None;
-                    };
+                    let ids = self.query_filter_ids(cond)?;
                     for id in ids {
                         if let Some(&idx) = point_to_idx.get(&id) {
                             mask[idx] = true;
@@ -199,9 +197,7 @@ impl PayloadIndex {
             Filter::Or(conds) => {
                 let mut acc = HashSet::new();
                 for cond in conds {
-                    let Some(set) = self.query_filter_ids(cond) else {
-                        return None;
-                    };
+                    let set = self.query_filter_ids(cond)?;
                     acc.extend(set);
                 }
                 Some(acc)

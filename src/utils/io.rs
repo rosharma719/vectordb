@@ -29,10 +29,10 @@ where
     }
     std::fs::rename(&tmp_path, path)?;
 
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = File::open(parent)
+    {
+        let _ = dir.sync_all();
     }
 
     Ok(())

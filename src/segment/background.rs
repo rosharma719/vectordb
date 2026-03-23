@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
@@ -129,12 +129,11 @@ pub fn start_background_snapshots(
                         log::warn!(target: "segment::snapshot", "snapshot write failed: {}", err);
                     }
                 }
-                if res.is_err() {
-                    if let Ok(Some(rotated_path)) = rotated {
-                        if !config.path.exists() {
-                            let _ = std::fs::rename(rotated_path, &config.path);
-                        }
-                    }
+                if res.is_err()
+                    && let Ok(Some(rotated_path)) = rotated
+                    && !config.path.exists()
+                {
+                    let _ = std::fs::rename(rotated_path, &config.path);
                 }
             }
 
@@ -166,7 +165,7 @@ fn rotate_snapshot(path: &PathBuf, retain_last: usize) -> Result<Option<PathBuf>
     Ok(Some(rotated_path))
 }
 
-fn prune_snapshots(path: &PathBuf, retain_last: usize) -> Result<(), DBError> {
+fn prune_snapshots(path: &Path, retain_last: usize) -> Result<(), DBError> {
     if retain_last == 0 {
         return Ok(());
     }

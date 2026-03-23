@@ -181,61 +181,60 @@ impl HNSWIndex {
             }) {
                 allowed_mask = Some(mask);
             }
-            if self.exact_fallback_enabled {
-                if let Some(candidate_ids) = payload_index.query_filter_ids(f) {
-                    if candidate_ids.is_empty() {
-                        return Ok(vec![]);
-                    }
-                    if candidate_ids.len() <= self.exact_fallback_threshold {
-                        let mut out = Vec::with_capacity(candidate_ids.len().min(top_k));
-                        for id in candidate_ids {
-                            let Some(idx) = self.idx_of(id) else {
-                                continue;
-                            };
-                            if self.deleted.get(idx).copied().unwrap_or(false) {
-                                continue;
-                            }
-                            let Some(payload) = payloads.get(&id) else {
-                                continue;
-                            };
-                            if !evaluate_filter(f, payload)? {
-                                continue;
-                            }
-                            let Some(vec) = self.get_vector_by_idx(idx) else {
-                                continue;
-                            };
-                            let raw = self.fast_score(query_for_search, vec);
-                            let sk = if use_normalize_score {
-                                self.normalize_score(raw)
-                            } else {
-                                raw
-                            };
-                            out.push(ScoredPoint {
-                                id,
-                                raw_score: raw,
-                                sort_key: sk,
-                            });
+            if self.exact_fallback_enabled
+                && let Some(candidate_ids) = payload_index.query_filter_ids(f)
+            {
+                if candidate_ids.is_empty() {
+                    return Ok(vec![]);
+                }
+                if candidate_ids.len() <= self.exact_fallback_threshold {
+                    let mut out = Vec::with_capacity(candidate_ids.len().min(top_k));
+                    for id in candidate_ids {
+                        let Some(idx) = self.idx_of(id) else {
+                            continue;
+                        };
+                        if self.deleted.get(idx).copied().unwrap_or(false) {
+                            continue;
                         }
-                        out.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
-                        out.truncate(top_k);
-                        return Ok(out);
+                        let Some(payload) = payloads.get(&id) else {
+                            continue;
+                        };
+                        if !evaluate_filter(f, payload)? {
+                            continue;
+                        }
+                        let Some(vec) = self.get_vector_by_idx(idx) else {
+                            continue;
+                        };
+                        let raw = self.fast_score(query_for_search, vec);
+                        let sk = if use_normalize_score {
+                            self.normalize_score(raw)
+                        } else {
+                            raw
+                        };
+                        out.push(ScoredPoint {
+                            id,
+                            raw_score: raw,
+                            sort_key: sk,
+                        });
                     }
+                    out.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
+                    out.truncate(top_k);
+                    return Ok(out);
                 }
             }
-            if allowed_mask.is_none() {
-                if let Some(mask) =
+            if allowed_mask.is_none()
+                && let Some(mask) =
                     payload_index.build_filter_mask(f, &self.point_to_idx, self.point_to_idx.len())
-                {
-                    if !mask.iter().any(|v| *v) {
-                        return Ok(vec![]);
-                    }
-                    let arc = Arc::new(mask);
-                    SEARCH_SCRATCH.with(|cell| {
-                        let mut scratch = cell.borrow_mut();
-                        scratch.put_filter_mask(mask_key, Arc::clone(&arc));
-                    });
-                    allowed_mask = Some(arc);
+            {
+                if !mask.iter().any(|v| *v) {
+                    return Ok(vec![]);
                 }
+                let arc = Arc::new(mask);
+                SEARCH_SCRATCH.with(|cell| {
+                    let mut scratch = cell.borrow_mut();
+                    scratch.put_filter_mask(mask_key, Arc::clone(&arc));
+                });
+                allowed_mask = Some(arc);
             }
         }
 
@@ -344,12 +343,12 @@ impl HNSWIndex {
             let passing_budget = filter_passing_budget(self.m);
             let failing_budget = filter_failing_budget(self.m);
 
-            let entry_passes = full_filter.map_or(true, |f| {
+            let entry_passes = full_filter.is_none_or(|f| {
                 filter_checked += 1;
                 let entry_id = self.point_id(entry);
                 let ok = payloads
                     .get(&entry_id)
-                    .map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+                    .is_some_and(|p| evaluate_filter(f, p).unwrap_or(false));
                 if ok {
                     filter_passed += 1;
                 }
@@ -388,12 +387,12 @@ impl HNSWIndex {
                         raw_score: d,
                         sort_key: sk,
                     };
-                    let passes = full_filter.map_or(true, |f| {
+                    let passes = full_filter.is_none_or(|f| {
                         filter_checked += 1;
                         let id = self.point_id(idx);
                         let ok = payloads
                             .get(&id)
-                            .map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+                            .is_some_and(|p| evaluate_filter(f, p).unwrap_or(false));
                         if ok {
                             filter_passed += 1;
                         }
@@ -433,8 +432,8 @@ impl HNSWIndex {
                 match filter {
                     Filter::Match { key, value } => {
                         if let Some(ids) = idx.query_exact(key, value) {
-                            for id in ids.iter().copied() {
-                                if let Some(&node_idx) = map.get(&id) {
+                            for id in ids {
+                                if let Some(&node_idx) = map.get(id) {
                                     if primary {
                                         scratch.mark_seed(node_idx);
                                     } else {
@@ -503,12 +502,12 @@ impl HNSWIndex {
             let use_seeds = std::env::var("VECTORDB_DISABLE_FILTER_SEEDS")
                 .map(|v| v == "0" || v.to_lowercase() == "false")
                 .unwrap_or(false);
-            if use_seeds {
-                if let Some(f) = full_filter {
-                    scratch.reset_seed(seed_len);
-                    scratch.reset_temp(seed_len);
-                    collect_match_ids(f, payload_index, &mut scratch, &self.point_to_idx, seed_len, true);
-                }
+            if use_seeds
+                && let Some(f) = full_filter
+            {
+                scratch.reset_seed(seed_len);
+                scratch.reset_temp(seed_len);
+                collect_match_ids(f, payload_index, &mut scratch, &self.point_to_idx, seed_len, true);
             }
             let seed_pool_size = scratch.seed_list.len();
             let mut seeds_added = 0usize;
@@ -519,7 +518,10 @@ impl HNSWIndex {
                     if seeds_added >= seed_limit {
                         break;
                     }
-                    if allowed_mask.as_ref().map_or(false, |mask| !mask.get(idx).copied().unwrap_or(false)) {
+                    if allowed_mask
+                        .as_ref()
+                        .is_some_and(|mask| !mask.get(idx).copied().unwrap_or(false))
+                    {
                         continue;
                     }
                     if self.deleted.get(idx).copied().unwrap_or(false) || !scratch.mark_visited(idx) {
@@ -534,12 +536,12 @@ impl HNSWIndex {
                         raw_score: d,
                         sort_key: sk,
                     };
-                    let passes = full_filter.map_or(true, |f| {
+                    let passes = full_filter.is_none_or(|f| {
                         filter_checked += 1;
                         let id = self.point_id(idx);
                         let ok = payloads
                             .get(&id)
-                            .map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+                            .is_some_and(|p| evaluate_filter(f, p).unwrap_or(false));
                         if ok {
                             filter_passed += 1;
                         }
@@ -603,7 +605,10 @@ impl HNSWIndex {
 
                 if let Some(neighs) = self.layer_neighbors(0, curr.node.idx) {
                     for &nb in neighs {
-                        if allowed_mask.as_ref().map_or(false, |mask| !mask.get(nb).copied().unwrap_or(false)) {
+                        if allowed_mask
+                            .as_ref()
+                            .is_some_and(|mask| !mask.get(nb).copied().unwrap_or(false))
+                        {
                             continue;
                         }
                         if self.deleted.get(nb).copied().unwrap_or(false) || !scratch.mark_visited(nb) {
@@ -619,12 +624,12 @@ impl HNSWIndex {
                             sort_key: sk,
                         };
 
-                        let passes = full_filter.map_or(true, |f| {
+                        let passes = full_filter.is_none_or(|f| {
                             filter_checked += 1;
                             let id = self.point_id(nb);
                             let ok = payloads
                                 .get(&id)
-                                .map_or(false, |p| evaluate_filter(f, p).unwrap_or(false));
+                                .is_some_and(|p| evaluate_filter(f, p).unwrap_or(false));
                             if ok {
                                 filter_passed += 1;
                             }
@@ -668,7 +673,7 @@ impl HNSWIndex {
 
             let seeds_in_results = out
                 .iter()
-                .filter(|sp| self.idx_of(sp.id).map_or(false, |idx| scratch.is_seed(idx)))
+                .filter(|sp| self.idx_of(sp.id).is_some_and(|idx| scratch.is_seed(idx)))
                 .count();
 
             if log_seed && full_filter.is_some() {
@@ -725,10 +730,10 @@ impl HNSWIndex {
                     best_routing_dist_at_exit,
                     elapsed_ms: search_start.elapsed().as_secs_f64() * 1000.0,
                 };
-                if let Ok(mut writer) = log.lock() {
-                    if serde_json::to_writer(&mut *writer, &entry).is_ok() {
-                        let _ = writer.write_all(b"\n");
-                    }
+                if let Ok(mut writer) = log.lock()
+                    && serde_json::to_writer(&mut *writer, &entry).is_ok()
+                {
+                    let _ = writer.write_all(b"\n");
                 }
             }
 

@@ -74,12 +74,11 @@ pub fn search_expansion_multiplier() -> usize {
 }
 
 pub fn search_expansion_cap_override() -> Option<usize> {
-    SEARCH_EXPANSION_CAP
+    *SEARCH_EXPANSION_CAP
         .get_or_init(|| {
             env_usize("VECTORDB_SEARCH_EXPANSION_CAP")
                 .and_then(|value| if value == 0 { None } else { Some(value) })
         })
-        .clone()
 }
 
 pub fn early_exit_patience() -> usize {
@@ -88,26 +87,25 @@ pub fn early_exit_patience() -> usize {
 
 pub(crate) fn filter_expansion_cap() -> Option<usize> {
     // Specific cap for filtered search; 0 means unbounded.
-    FILTER_EXPANSION_CAP
+    *FILTER_EXPANSION_CAP
         .get_or_init(|| {
             env_usize("VECTORDB_FILTER_EXPANSION_CAP")
                 .map(|value| if value == 0 { usize::MAX } else { value })
         })
-        .clone()
 }
 
 pub(crate) fn filter_passing_budget(m: usize) -> usize {
-    FILTER_PASSING_BUDGET
+    (*FILTER_PASSING_BUDGET
         .get_or_init(|| env_usize("VECTORDB_FILTER_PASSING_BUDGET"))
-        .clone()
-        .unwrap_or_else(|| std::cmp::max(8, m.saturating_mul(2)))
+        )
+    .unwrap_or_else(|| std::cmp::max(8, m.saturating_mul(2)))
 }
 
 pub(crate) fn filter_failing_budget(m: usize) -> usize {
-    FILTER_FAILING_BUDGET
+    (*FILTER_FAILING_BUDGET
         .get_or_init(|| env_usize("VECTORDB_FILTER_FAILING_BUDGET"))
-        .clone()
-        .unwrap_or_else(|| std::cmp::max(1, m / 8))
+        )
+    .unwrap_or_else(|| std::cmp::max(1, m / 8))
 }
 
 pub(crate) fn filter_search_logger() -> Option<&'static Mutex<BufWriter<File>>> {
@@ -161,15 +159,13 @@ pub(crate) fn exact_fallback_enabled_override() -> Option<bool> {
 }
 
 pub(crate) fn exact_fallback_threshold_override() -> Option<usize> {
-    EXACT_FALLBACK_THRESHOLD
+    *EXACT_FALLBACK_THRESHOLD
         .get_or_init(|| env_usize("VECTORDB_EXACT_FALLBACK_THRESHOLD"))
-        .clone()
 }
 
 pub(crate) fn filter_entry_candidates() -> Option<usize> {
-    FILTER_ENTRY_CANDIDATES
+    *FILTER_ENTRY_CANDIDATES
         .get_or_init(|| env_usize_nonzero("VECTORDB_FILTER_ENTRY_CANDIDATES"))
-        .clone()
 }
 
 pub fn neighbor_scan_cap(level: usize) -> usize {
@@ -186,10 +182,10 @@ pub fn neighbor_scan_cap(level: usize) -> usize {
 }
 
 pub fn neighbor_scan_patience() -> usize {
-    NEIGHBOR_SCAN_PATIENCE
+    (*NEIGHBOR_SCAN_PATIENCE
         .get_or_init(|| env_usize_nonzero("VECTORDB_NEIGHBOR_SCAN_PATIENCE"))
-        .clone()
-        .unwrap_or(0)
+        )
+    .unwrap_or(0)
 }
 
 pub fn neighbor_scan_rotate_enabled() -> bool {

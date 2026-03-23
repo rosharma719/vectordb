@@ -854,16 +854,16 @@ impl Segment {
         &mut self,
         default_dir: Option<PathBuf>,
     ) -> Result<(), DBError> {
-        if let Ok(path) = env::var("VECTORDB_WAL_PATH") {
-            if !path.is_empty() {
-                return self.enable_wal(path);
-            }
+        if let Ok(path) = env::var("VECTORDB_WAL_PATH")
+            && !path.is_empty()
+        {
+            return self.enable_wal(path);
         }
-        if let Ok(dir) = env::var("VECTORDB_WAL_DIR") {
-            if !dir.is_empty() {
-                let wal_path = Path::new(&dir).join("segment.wal");
-                return self.enable_wal(wal_path);
-            }
+        if let Ok(dir) = env::var("VECTORDB_WAL_DIR")
+            && !dir.is_empty()
+        {
+            let wal_path = Path::new(&dir).join("segment.wal");
+            return self.enable_wal(wal_path);
         }
         if let Some(dir) = default_dir {
             let wal_path = dir.join("segment.wal");
@@ -952,9 +952,9 @@ impl Segment {
         })
     }
 
-    fn parse_snapshot_metadata<'a>(
-        payload: &'a [u8],
-    ) -> Result<(&'a [u8], Option<SnapshotMetadata>), DBError> {
+    fn parse_snapshot_metadata(
+        payload: &[u8],
+    ) -> Result<(&[u8], Option<SnapshotMetadata>), DBError> {
         if payload.len() < 12 || payload[payload.len() - 4..] != SEGMENT_SNAPSHOT_META_MAGIC {
             return Ok((payload, None));
         }
@@ -1060,7 +1060,7 @@ impl Segment {
                         | PayloadValue::Float(_)
                         | PayloadValue::Str(_)
                         | PayloadValue::Bool(_)
-                ) && allow.map_or(true, |set| set.contains(k))
+                ) && allow.is_none_or(|set| set.contains(k))
                 {
                     Some((type_rank(v), k.clone()))
                 } else {
@@ -1070,7 +1070,7 @@ impl Segment {
             .collect();
 
         // Prefer cheaper/more selective types first, then deterministic key order.
-        keys_with_rank.sort_by(|a, b| a.cmp(b));
+        keys_with_rank.sort();
         if let Some(cap) = max_keys {
             keys_with_rank.truncate(cap);
         }

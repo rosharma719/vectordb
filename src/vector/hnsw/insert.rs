@@ -40,11 +40,11 @@ fn log_insert_trace(entry: &InsertTraceEntry) {
     let Some(logger) = insert_trace_logger() else {
         return;
     };
-    if let Ok(mut guard) = logger.lock() {
-        if serde_json::to_writer(&mut *guard, entry).is_ok() {
-            let _ = guard.write_all(b"\n");
-            let _ = guard.flush();
-        }
+    if let Ok(mut guard) = logger.lock()
+        && serde_json::to_writer(&mut *guard, entry).is_ok()
+    {
+        let _ = guard.write_all(b"\n");
+        let _ = guard.flush();
     }
 }
 
@@ -61,7 +61,7 @@ impl HNSWIndex {
 
         let trace_id = next_insert_trace_seq();
         let trace_mod = trace_every() as u64;
-        let trace_enabled = insert_trace_logger().is_some() && trace_id % trace_mod == 0;
+        let trace_enabled = insert_trace_logger().is_some() && trace_id.is_multiple_of(trace_mod);
         let trace_start = if trace_enabled {
             Some(Instant::now())
         } else {

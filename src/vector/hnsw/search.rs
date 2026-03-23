@@ -64,11 +64,11 @@ fn log_search_trace(entry: &SearchTraceEntry) {
     let Some(logger) = search_trace_logger() else {
         return;
     };
-    if let Ok(mut guard) = logger.lock() {
-        if serde_json::to_writer(&mut *guard, entry).is_ok() {
-            let _ = guard.write_all(b"\n");
-            let _ = guard.flush();
-        }
+    if let Ok(mut guard) = logger.lock()
+        && serde_json::to_writer(&mut *guard, entry).is_ok()
+    {
+        let _ = guard.write_all(b"\n");
+        let _ = guard.flush();
     }
 }
 
@@ -241,8 +241,8 @@ impl HNSWIndex {
                         };
                         let window = degree.min(cap);
                         if window > 0 {
-                            let need_seed = (rotate_neighbor_scans && window < degree)
-                                || (stride_enabled && window < degree);
+                            let need_seed =
+                                (stride_enabled || rotate_neighbor_scans) && window < degree;
                             let seed = if need_seed {
                                 query_signature
                                     .wrapping_add(current.idx as u64)
@@ -280,8 +280,7 @@ impl HNSWIndex {
                                 batch[batch_len] = neighbor;
                                 batch_len += 1;
                                 if batch_len == BATCH {
-                                    for i in 0..batch_len {
-                                        let idx = batch[i];
+                                    for &idx in batch.iter().take(batch_len) {
                                         distance_computations += 1;
                                         let raw = self.fast_score(query, &self.vectors[idx]);
                                         let score_val = if normalize {
@@ -335,8 +334,7 @@ impl HNSWIndex {
                                 cap_breaks += 1;
                             }
                             if !patience_triggered && batch_len > 0 {
-                                for i in 0..batch_len {
-                                    let idx = batch[i];
+                                for &idx in batch.iter().take(batch_len) {
                                     distance_computations += 1;
                                     let raw = self.fast_score(query, &self.vectors[idx]);
                                     let score_val = if normalize {
@@ -385,13 +383,12 @@ impl HNSWIndex {
                     }
                 }
 
-                if self.metric != DistanceMetric::Dot {
-                    if let Some(cap) = expansion_cap {
-                        if expanded >= cap {
-                            stop_reason = "expansion_cap";
-                            break;
-                        }
-                    }
+                if self.metric != DistanceMetric::Dot
+                    && let Some(cap) = expansion_cap
+                    && expanded >= cap
+                {
+                    stop_reason = "expansion_cap";
+                    break;
                 }
 
                 if let Some(ctx) = trace.as_mut() {

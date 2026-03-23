@@ -126,9 +126,7 @@ impl SearchScratch {
     }
 
     pub(crate) fn get_filter_mask(&mut self, key: u64, len: usize) -> Option<Arc<Vec<bool>>> {
-        let Some(mask) = self.filter_mask_cache.get(&key) else {
-            return None;
-        };
+        let mask = self.filter_mask_cache.get(&key)?;
         if mask.len() != len {
             self.filter_mask_cache.remove(&key);
             self.filter_mask_lru.retain(|k| *k != key);
@@ -145,10 +143,10 @@ impl SearchScratch {
         }
         if self.filter_mask_cache.contains_key(&key) {
             self.filter_mask_lru.retain(|k| *k != key);
-        } else if self.filter_mask_cache.len() >= self.filter_mask_cap {
-            if let Some(oldest) = self.filter_mask_lru.pop_front() {
-                self.filter_mask_cache.remove(&oldest);
-            }
+        } else if self.filter_mask_cache.len() >= self.filter_mask_cap
+            && let Some(oldest) = self.filter_mask_lru.pop_front()
+        {
+            self.filter_mask_cache.remove(&oldest);
         }
         self.filter_mask_cache.insert(key, Arc::clone(&mask));
         self.filter_mask_lru.push_back(key);
