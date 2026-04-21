@@ -35,6 +35,16 @@ from typing import Any, Iterable, Iterator
 import numpy as np
 import pandas as pd
 
+QUERY_KNOB_COLS = ["ef_search", "neighbor_cap", "patience"]
+RUNTIME_KNOB_COLS = [
+    "search_expansion_mult",
+    "search_expansion_cap",
+    "disable_early_exit",
+    "neighbor_rotate",
+    "neighbor_stride",
+    "neighbor_scan_patience",
+]
+RUN_ID_COLS = ["snapshot", *QUERY_KNOB_COLS, *RUNTIME_KNOB_COLS, "top_k", "num_queries"]
 
 SNAPSHOT_PATTERN = re.compile(
     r"(?:m(?P<m>\d+))|(?:m0_(?P<m0>\d+))|(?:efc(?P<efc>\d+))|(?:alow(?P<alow>[\d\.p]+))"
@@ -112,8 +122,32 @@ class RunKey:
     ef_search: int
     neighbor_cap: int
     patience: int
+    search_expansion_mult: int | None
+    search_expansion_cap: int | None
+    disable_early_exit: int | None
+    neighbor_rotate: int | None
+    neighbor_stride: int | None
+    neighbor_scan_patience: int | None
     top_k: int
     num_queries: int
+
+
+def maybe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def runtime_knob_values(obj: dict[str, Any]) -> dict[str, int | None]:
+    return {col: maybe_int(obj.get(col)) for col in RUNTIME_KNOB_COLS}
+
+
+def present_runtime_knob_cols(df: pd.DataFrame) -> list[str]:
+    return [col for col in RUNTIME_KNOB_COLS if col in df.columns and not df[col].isna().all()]
+
+
+def present_run_id_cols(df: pd.DataFrame) -> list[str]:
+    return [col for col in RUN_ID_COLS if col in df.columns]
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -135,6 +169,12 @@ def aggregate_runs_from_queries(path: Path) -> pd.DataFrame:
             ef_search=int(obj["ef_search"]),
             neighbor_cap=int(obj["neighbor_cap"]),
             patience=int(obj["patience"]),
+            search_expansion_mult=maybe_int(obj.get("search_expansion_mult")),
+            search_expansion_cap=maybe_int(obj.get("search_expansion_cap")),
+            disable_early_exit=maybe_int(obj.get("disable_early_exit")),
+            neighbor_rotate=maybe_int(obj.get("neighbor_rotate")),
+            neighbor_stride=maybe_int(obj.get("neighbor_stride")),
+            neighbor_scan_patience=maybe_int(obj.get("neighbor_scan_patience")),
             top_k=int(obj["top_k"]),
             num_queries=int(obj["num_queries"]),
         )
@@ -169,6 +209,12 @@ def aggregate_runs_from_queries(path: Path) -> pd.DataFrame:
                 "ef_search": key.ef_search,
                 "neighbor_cap": key.neighbor_cap,
                 "patience": key.patience,
+                "search_expansion_mult": key.search_expansion_mult,
+                "search_expansion_cap": key.search_expansion_cap,
+                "disable_early_exit": key.disable_early_exit,
+                "neighbor_rotate": key.neighbor_rotate,
+                "neighbor_stride": key.neighbor_stride,
+                "neighbor_scan_patience": key.neighbor_scan_patience,
                 "top_k": key.top_k,
                 "num_queries": key.num_queries,
                 "query_count": len(elapsed),
@@ -208,7 +254,7 @@ def load_query_rows(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.DataFrame(rows).reset_index(drop=True)
     # normalize types
-    for col in ["ef_search", "neighbor_cap", "patience", "top_k", "num_queries", "query_idx"]:
+    for col in [*QUERY_KNOB_COLS, *RUNTIME_KNOB_COLS, "top_k", "num_queries", "query_idx"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
     for col in ["elapsed_ms", "recall", "visited", "expanded", "misses"]:
@@ -261,7 +307,7 @@ def query_knob_effects(
         return pd.DataFrame()
 
     # Focus on query-time knobs only; build knobs create huge interaction space and we already model them in policy_table.
-    feature_cols = ["ef_search", "neighbor_cap", "patience"]
+    feature_cols = QUERY_KNOB_COLS + present_runtime_knob_cols(query_df)
     for col in feature_cols:
         if col not in query_df.columns:
             return pd.DataFrame()
@@ -322,9 +368,9 @@ def build_policy_table(path: Path) -> pd.DataFrame:
     parsed = pd.DataFrame([parse_snapshot(s) for s in df["snapshot"].astype(str)])
     df = pd.concat([df, parsed], axis=1)
     # normalize types
-    for col in ["ef_search", "neighbor_cap", "patience", "top_k", "num_queries"]:
+    for col in [*QUERY_KNOB_COLS, *RUNTIME_KNOB_COLS, "top_k", "num_queries"]:
         if col in df.columns:
-            df[col] = df[col].astype(int)
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
     for col in ["m", "m0", "efc", "alow", "ahigh", "prunefloor"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -353,6 +399,11 @@ def compute_frontiers(
                     "ef_search": int(best_row["ef_search"]),
                     "neighbor_cap": int(best_row["neighbor_cap"]),
                     "patience": int(best_row["patience"]),
+                    **{
+                        col: int(best_row[col])
+                        for col in present_runtime_knob_cols(group)
+                        if pd.notna(best_row[col])
+                    },
                 }
             )
     frontier_df = pd.DataFrame(rows)
@@ -612,7 +663,7 @@ def paired_knob_effects(
     latency_metric: str,
     recall_metric: str = "recall_avg",
 ) -> pd.DataFrame:
-    need = {"snapshot", "ef_search", "neighbor_cap", "patience", latency_metric, recall_metric}
+    need = {"snapshot", *QUERY_KNOB_COLS, latency_metric, recall_metric}
     missing = [c for c in need if c not in df.columns]
     if missing:
         return pd.DataFrame()
@@ -623,8 +674,11 @@ def paired_knob_effects(
 
     rows: list[dict[str, Any]] = []
 
+    runtime_cols = present_runtime_knob_cols(df)
+
     def emit_pairs(knob: str, fixed_cols: list[str]) -> None:
-        for (snapshot, *fixed), group in df.groupby(["snapshot"] + fixed_cols, sort=False):
+        group_cols = ["snapshot"] + fixed_cols + runtime_cols
+        for (snapshot, *fixed), group in df.groupby(group_cols, sort=False):
             group = group.dropna(subset=[knob, latency_metric, recall_metric])
             if group.empty:
                 continue
@@ -637,7 +691,7 @@ def paired_knob_effects(
                     {
                         "snapshot": snapshot,
                         "knob": knob,
-                        "fixed": ",".join(f"{c}={int(ra[c])}" for c in fixed_cols),
+                        "fixed": ",".join(f"{c}={int(ra[c])}" for c in fixed_cols + runtime_cols),
                         "from": int(a),
                         "to": int(b),
                         "latency_metric": latency_metric,
@@ -652,6 +706,11 @@ def paired_knob_effects(
                         "visited_to": float(rb["visited_avg"]) if "visited_avg" in rb else float("nan"),
                         "expanded_from": float(ra["expanded_avg"]) if "expanded_avg" in ra else float("nan"),
                         "expanded_to": float(rb["expanded_avg"]) if "expanded_avg" in rb else float("nan"),
+                        **{
+                            col: int(ra[col])
+                            for col in runtime_cols
+                            if pd.notna(ra[col])
+                        },
                     }
                 )
 
@@ -665,7 +724,7 @@ def paired_knob_effects(
 def frontier_winners(frontier_df: pd.DataFrame) -> pd.DataFrame:
     if frontier_df.empty:
         return pd.DataFrame()
-    cols = ["recall_threshold", "ef_search", "neighbor_cap", "patience"]
+    cols = ["recall_threshold", *QUERY_KNOB_COLS, *present_runtime_knob_cols(frontier_df)]
     for c in cols:
         if c not in frontier_df.columns:
             return pd.DataFrame()
@@ -679,7 +738,7 @@ def frontier_winners(frontier_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def marginal_returns_table(policy_df: pd.DataFrame, latency_metric: str) -> pd.DataFrame:
-    need = {"snapshot", "ef_search", "neighbor_cap", "patience", "recall_avg", latency_metric}
+    need = {"snapshot", *QUERY_KNOB_COLS, "recall_avg", latency_metric}
     missing = [c for c in need if c not in policy_df.columns]
     if missing:
         return pd.DataFrame()
@@ -687,13 +746,19 @@ def marginal_returns_table(policy_df: pd.DataFrame, latency_metric: str) -> pd.D
     df["ef_search"] = pd.to_numeric(df["ef_search"], errors="coerce")
     df["neighbor_cap"] = pd.to_numeric(df["neighbor_cap"], errors="coerce")
     df["patience"] = pd.to_numeric(df["patience"], errors="coerce")
+    for col in present_runtime_knob_cols(df):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     df["recall_avg"] = pd.to_numeric(df["recall_avg"], errors="coerce")
     df[latency_metric] = pd.to_numeric(df[latency_metric], errors="coerce")
     df = df.dropna(subset=["ef_search", "neighbor_cap", "patience", "recall_avg", latency_metric])
 
     rows: list[dict[str, Any]] = []
-    group_cols = ["snapshot", "neighbor_cap", "patience"]
-    for (snapshot, cap, pat), group in df.groupby(group_cols, sort=False):
+    runtime_cols = present_runtime_knob_cols(df)
+    group_cols = ["snapshot", "neighbor_cap", "patience", *runtime_cols]
+    for keys, group in df.groupby(group_cols, sort=False):
+        snapshot = keys[0]
+        cap = keys[1]
+        pat = keys[2]
         group = group.sort_values("ef_search")
         efs = group["ef_search"].astype(int).tolist()
         for a, b in zip(efs, efs[1:]):
@@ -708,6 +773,11 @@ def marginal_returns_table(policy_df: pd.DataFrame, latency_metric: str) -> pd.D
                     "snapshot": snapshot,
                     "neighbor_cap": int(cap),
                     "patience": int(pat),
+                    **{
+                        col: int(ra[col])
+                        for col in runtime_cols
+                        if pd.notna(ra[col])
+                    },
                     "ef_from": int(a),
                     "ef_to": int(b),
                     "recall_delta": d_recall,
@@ -853,7 +923,7 @@ def main() -> None:
             runs_out = args.out_dir / "run_summaries.csv"
             runs.to_csv(runs_out, index=False)
             # Prefer recomputed run summaries for analysis if they cover this run.
-            key_cols = ["snapshot", "ef_search", "neighbor_cap", "patience", "top_k", "num_queries"]
+            key_cols = [col for col in RUN_ID_COLS if col in runs.columns and col in policy.columns]
             policy = policy.drop(
                 columns=[c for c in runs.columns if c in policy.columns and c not in key_cols],
                 errors="ignore",
@@ -891,9 +961,8 @@ def main() -> None:
     # Effect modeling: build knobs + query knobs -> dependent variables
     feature_cols = [
         # query knobs
-        "ef_search",
-        "neighbor_cap",
-        "patience",
+        *QUERY_KNOB_COLS,
+        *present_runtime_knob_cols(policy),
         # build knobs (parsed from snapshot name)
         "m",
         "m0",
@@ -906,7 +975,7 @@ def main() -> None:
         if col not in policy.columns:
             policy[col] = np.nan
     # drop rows missing key query knobs
-    policy = policy.dropna(subset=["ef_search", "neighbor_cap", "patience"])
+    policy = policy.dropna(subset=QUERY_KNOB_COLS)
     weights = choose_weights(policy, args.weights)
     targets = [
         "recall_avg",

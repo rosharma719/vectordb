@@ -24,6 +24,80 @@ import os
 import subprocess
 from pathlib import Path
 
+RUNTIME_KNOB_COLS = [
+    "search_expansion_mult",
+    "search_expansion_cap",
+    "disable_early_exit",
+    "neighbor_rotate",
+    "neighbor_stride",
+    "neighbor_scan_patience",
+]
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value.replace("_", ""))
+    except ValueError as exc:
+        raise SystemExit(f"invalid integer for {name}: {value}") from exc
+
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value != "0" and value.lower() != "false"
+
+
+def git_commit() -> str:
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+
+
+def git_dirty() -> bool:
+    result = subprocess.run(
+        ["git", "diff", "--quiet", "--ignore-submodules", "HEAD", "--"],
+        check=False,
+    )
+    return result.returncode != 0
+
+
+def run_key(snapshot_name: str, ef: int, cap: int, patience: int, args: argparse.Namespace) -> tuple:
+    return (
+        snapshot_name,
+        ef,
+        cap,
+        patience,
+        args.search_expansion_mult,
+        args.search_expansion_cap,
+        args.disable_early_exit,
+        args.neighbor_rotate,
+        args.neighbor_stride,
+        args.neighbor_scan_patience,
+        args.top_k,
+        args.num_queries,
+    )
+
+
+def run_meta(snapshot: Path, ef: int, cap: int, patience: int, args: argparse.Namespace) -> dict:
+    return {
+        "snapshot": snapshot.name,
+        "ef_search": ef,
+        "neighbor_cap": cap,
+        "patience": patience,
+        "search_expansion_mult": args.search_expansion_mult,
+        "search_expansion_cap": args.search_expansion_cap,
+        "disable_early_exit": args.disable_early_exit,
+        "neighbor_rotate": args.neighbor_rotate,
+        "neighbor_stride": args.neighbor_stride,
+        "neighbor_scan_patience": args.neighbor_scan_patience,
+        "top_k": args.top_k,
+        "num_queries": args.num_queries,
+        "git_commit": args.git_commit,
+        "git_dirty": args.git_dirty,
+    }
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -69,13 +143,55 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--num-queries", type=int, default=10)
     parser.add_argument("--workers", type=int, default=1, help="Not used (API compatibility).")
+    parser.add_argument(
+        "--search-expansion-mult",
+        type=int,
+        default=env_int("VECTORDB_SEARCH_EXPANSION_MULT", 1),
+        help="Pins VECTORDB_SEARCH_EXPANSION_MULT for every run.",
+    )
+    parser.add_argument(
+        "--search-expansion-cap",
+        type=int,
+        default=env_int("VECTORDB_SEARCH_EXPANSION_CAP", 0),
+        help="Pins VECTORDB_SEARCH_EXPANSION_CAP; 0 means unbounded/no override.",
+    )
+    parser.add_argument(
+        "--disable-early-exit",
+        type=int,
+        choices=[0, 1],
+        default=1 if env_bool("VECTORDB_DISABLE_EARLY_EXIT", False) else 0,
+        help="Pins VECTORDB_DISABLE_EARLY_EXIT for every run.",
+    )
+    parser.add_argument(
+        "--neighbor-rotate",
+        type=int,
+        choices=[0, 1],
+        default=1 if env_bool("VECTORDB_NEIGHBOR_SCAN_ROTATE", False) else 0,
+        help="Pins VECTORDB_NEIGHBOR_SCAN_ROTATE for every run.",
+    )
+    parser.add_argument(
+        "--neighbor-stride",
+        type=int,
+        choices=[0, 1],
+        default=1 if env_bool("VECTORDB_NEIGHBOR_SCAN_STRIDE", False) else 0,
+        help="Pins VECTORDB_NEIGHBOR_SCAN_STRIDE for every run.",
+    )
+    parser.add_argument(
+        "--neighbor-scan-patience",
+        type=int,
+        default=env_int("VECTORDB_NEIGHBOR_SCAN_PATIENCE", 0),
+        help="Pins VECTORDB_NEIGHBOR_SCAN_PATIENCE for every run.",
+    )
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument(
         "--keep-work",
         action="store_true",
         help="Keep per-run work files in --work-dir (default deletes them).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.git_commit = git_commit()
+    args.git_dirty = git_dirty()
+    return args
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -139,10 +255,10 @@ def summarize_query_log(path: Path) -> tuple[dict, list[dict]]:
     )
 
 
-def load_completed_runs(path: Path) -> set[tuple[str, int, int, int]]:
+def load_completed_runs(path: Path) -> set[tuple]:
     if not path.exists():
         return set()
-    completed: set[tuple[str, int, int, int]] = set()
+    completed: set[tuple] = set()
     with path.open() as fh:
         for line in fh:
             line = line.strip()
@@ -157,6 +273,14 @@ def load_completed_runs(path: Path) -> set[tuple[str, int, int, int]]:
                     int(obj.get("ef_search")),
                     int(obj.get("neighbor_cap")),
                     int(obj.get("patience")),
+                    obj.get("search_expansion_mult"),
+                    obj.get("search_expansion_cap"),
+                    obj.get("disable_early_exit"),
+                    obj.get("neighbor_rotate"),
+                    obj.get("neighbor_stride"),
+                    obj.get("neighbor_scan_patience"),
+                    int(obj.get("top_k")),
+                    int(obj.get("num_queries")),
                 )
             )
     return completed
@@ -176,12 +300,24 @@ def run_sweep(
     args: argparse.Namespace,
 ) -> dict:
     args.work_dir.mkdir(parents=True, exist_ok=True)
-    query_log = args.work_dir / f"{snapshot.stem}_ef{ef}_cap{cap}_pat{patience}_query_log.jsonl"
+    query_log = args.work_dir / (
+        f"{snapshot.stem}_ef{ef}_cap{cap}_pat{patience}"
+        f"_em{args.search_expansion_mult}_ec{args.search_expansion_cap}"
+        f"_dee{args.disable_early_exit}_rot{args.neighbor_rotate}"
+        f"_str{args.neighbor_stride}_nsp{args.neighbor_scan_patience}"
+        f"_topk{args.top_k}_q{args.num_queries}_query_log.jsonl"
+    )
 
     env = os.environ.copy()
     env["VECTORDB_EF_SEARCH_LIST"] = str(ef)
     env["VECTORDB_NEIGHBOR_SCAN_CAP_LEVEL0"] = str(cap)
     env["VECTORDB_EARLY_EXIT_PATIENCE"] = str(patience)
+    env["VECTORDB_SEARCH_EXPANSION_MULT"] = str(args.search_expansion_mult)
+    env["VECTORDB_SEARCH_EXPANSION_CAP"] = str(args.search_expansion_cap)
+    env["VECTORDB_DISABLE_EARLY_EXIT"] = str(args.disable_early_exit)
+    env["VECTORDB_NEIGHBOR_SCAN_ROTATE"] = str(args.neighbor_rotate)
+    env["VECTORDB_NEIGHBOR_SCAN_STRIDE"] = str(args.neighbor_stride)
+    env["VECTORDB_NEIGHBOR_SCAN_PATIENCE"] = str(args.neighbor_scan_patience)
     env["VECTORDB_TEST_LOG"] = env.get("VECTORDB_TEST_LOG", "info")
     env["VECTORDB_QUERY_LOG"] = str(query_log)
     env["VECTORDB_QUERY_LOG_EVERY"] = "1"
@@ -205,7 +341,13 @@ def run_sweep(
         print(f"⏭️  skipping {snapshot.name} ef{ef} cap{cap} pat{patience} (work exists)")
         return {"query_log": query_log}
 
-    print(f"▶️  snapshot={snapshot.name} ef={ef} cap={cap} pat={patience}")
+    print(
+        "▶️  "
+        f"snapshot={snapshot.name} ef={ef} cap={cap} pat={patience} "
+        f"em={args.search_expansion_mult} ec={args.search_expansion_cap} "
+        f"dee={args.disable_early_exit} rot={args.neighbor_rotate} "
+        f"str={args.neighbor_stride} nsp={args.neighbor_scan_patience}"
+    )
     subprocess.run(cmd, check=True, env=env)
     return {"query_log": query_log}
 
@@ -220,23 +362,20 @@ def main() -> None:
         for ef in args.ef_search:
             for cap in args.neighbor_cap:
                 for patience in args.patience:
-                    key = (snapshot.name, ef, cap, patience)
+                    key = run_key(snapshot.name, ef, cap, patience, args)
                     if args.skip_existing and key in completed:
-                        print(f"⏭️  skipping {snapshot.name} ef{ef} cap{cap} pat{patience} (already recorded)")
+                        print(
+                            "⏭️  skipping "
+                            f"{snapshot.name} ef{ef} cap{cap} pat{patience} "
+                            "(already recorded)"
+                        )
                         continue
                     result = run_sweep(snapshot, ef, cap, patience, args)
-                    run_meta = {
-                        "snapshot": snapshot.name,
-                        "ef_search": ef,
-                        "neighbor_cap": cap,
-                        "patience": patience,
-                        "top_k": args.top_k,
-                        "num_queries": args.num_queries,
-                    }
+                    meta = run_meta(snapshot, ef, cap, patience, args)
                     summary, entries = summarize_query_log(result["query_log"])
                     for entry in entries:
-                        append_jsonl(args.out_jsonl, {"type": "query", **run_meta, **entry})
-                    append_jsonl(args.out_jsonl, {"type": "summary", **run_meta, **summary})
+                        append_jsonl(args.out_jsonl, {"type": "query", **meta, **entry})
+                    append_jsonl(args.out_jsonl, {"type": "summary", **meta, **summary})
                     if not args.keep_work and result["query_log"].exists():
                         result["query_log"].unlink()
                     completed.add(key)

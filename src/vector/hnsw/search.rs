@@ -148,9 +148,13 @@ impl HNSWIndex {
         self.validate_dim(query)?;
 
         let mut trace = trace;
-        let query_signature = hash_query(query);
         let rotate_neighbor_scans = neighbor_scan_rotate_enabled();
         let stride_enabled = neighbor_scan_stride_enabled();
+        let query_signature = if rotate_neighbor_scans || stride_enabled {
+            Some(hash_query(query))
+        } else {
+            None
+        };
         let expansion_mult = search_expansion_multiplier();
         let expansion_cap_override = search_expansion_cap_override();
         let expansion_cap_value =
@@ -162,6 +166,7 @@ impl HNSWIndex {
             scratch.candidate_queue.clear();
             scratch.result_set.clear();
 
+            let collect_counters = stats.is_some();
             let mut visited_count = 0usize;
             let mut expanded = 0usize;
             let expansion_cap = expansion_cap_value;
@@ -239,12 +244,100 @@ impl HNSWIndex {
                         } else {
                             neighbor_scan_cap(level)
                         };
-                        let window = degree.min(cap);
-                        if window > 0 {
+                        let use_simple_scan = !collect_counters
+                            && cap == usize::MAX
+                            && neighbor_patience == 0
+                            && !rotate_neighbor_scans
+                            && !stride_enabled;
+                        if use_simple_scan {
+                            for &neighbor in neighbors {
+                                if self.deleted.get(neighbor).copied().unwrap_or(false)
+                                    || !scratch.mark_visited(neighbor)
+                                {
+                                    continue;
+                                }
+                                visited_count += 1;
+
+                                batch[batch_len] = neighbor;
+                                batch_len += 1;
+                                if batch_len == BATCH {
+                                    for &idx in batch.iter().take(batch_len) {
+                                        let raw = self.fast_score(query, &self.vectors[idx]);
+                                        let score_val = if normalize {
+                                            self.normalize_score(raw)
+                                        } else {
+                                            raw
+                                        };
+
+                                        let improves_result_set = scratch.result_set.len() < ef
+                                            || score_val < worst_score;
+                                        let push_candidate =
+                                            self.metric == DistanceMetric::Dot || improves_result_set;
+
+                                        if push_candidate {
+                                            let sp = NodeCandidate {
+                                                idx,
+                                                raw_score: raw,
+                                                sort_key: score_val,
+                                            };
+                                            scratch.candidate_queue.push(sp.clone());
+
+                                            if improves_result_set {
+                                                scratch.result_set.push(NodeResult(sp));
+                                                if scratch.result_set.len() > ef {
+                                                    scratch.result_set.pop();
+                                                }
+                                                if let Some(rp) = scratch.result_set.peek() {
+                                                    worst_score = rp.0.sort_key;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    batch_len = 0;
+                                }
+                            }
+                            if batch_len > 0 {
+                                for &idx in batch.iter().take(batch_len) {
+                                    let raw = self.fast_score(query, &self.vectors[idx]);
+                                    let score_val = if normalize {
+                                        self.normalize_score(raw)
+                                    } else {
+                                        raw
+                                    };
+
+                                    let improves_result_set =
+                                        scratch.result_set.len() < ef || score_val < worst_score;
+                                    let push_candidate =
+                                        self.metric == DistanceMetric::Dot || improves_result_set;
+
+                                    if push_candidate {
+                                        let sp = NodeCandidate {
+                                            idx,
+                                            raw_score: raw,
+                                            sort_key: score_val,
+                                        };
+                                        scratch.candidate_queue.push(sp.clone());
+
+                                        if improves_result_set {
+                                            scratch.result_set.push(NodeResult(sp));
+                                            if scratch.result_set.len() > ef {
+                                                scratch.result_set.pop();
+                                            }
+                                            if let Some(rp) = scratch.result_set.peek() {
+                                                worst_score = rp.0.sort_key;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            let window = degree.min(cap);
+                            if window > 0 {
                             let need_seed =
                                 (stride_enabled || rotate_neighbor_scans) && window < degree;
                             let seed = if need_seed {
                                 query_signature
+                                    .unwrap_or_default()
                                     .wrapping_add(current.idx as u64)
                                     .wrapping_mul(0x9e3779b97f4a7c15)
                             } else {
@@ -269,7 +362,9 @@ impl HNSWIndex {
                                 let neighbor = neighbors[offset];
                                 neighbors_examined += 1;
                                 offset = (offset + stride) % degree;
-                                adjacency_reads += 1;
+                                if collect_counters {
+                                    adjacency_reads += 1;
+                                }
                                 if self.deleted.get(neighbor).copied().unwrap_or(false)
                                     || !scratch.mark_visited(neighbor)
                                 {
@@ -281,7 +376,9 @@ impl HNSWIndex {
                                 batch_len += 1;
                                 if batch_len == BATCH {
                                     for &idx in batch.iter().take(batch_len) {
-                                        distance_computations += 1;
+                                        if collect_counters {
+                                            distance_computations += 1;
+                                        }
                                         let raw = self.fast_score(query, &self.vectors[idx]);
                                         let score_val = if normalize {
                                             self.normalize_score(raw)
@@ -331,11 +428,15 @@ impl HNSWIndex {
                                 }
                             }
                             if cap_hit && !patience_triggered && neighbors_examined >= window {
-                                cap_breaks += 1;
+                                if collect_counters {
+                                    cap_breaks += 1;
+                                }
                             }
                             if !patience_triggered && batch_len > 0 {
                                 for &idx in batch.iter().take(batch_len) {
-                                    distance_computations += 1;
+                                    if collect_counters {
+                                        distance_computations += 1;
+                                    }
                                     let raw = self.fast_score(query, &self.vectors[idx]);
                                     let score_val = if normalize {
                                         self.normalize_score(raw)
@@ -372,12 +473,15 @@ impl HNSWIndex {
                                         } else {
                                             neighbor_no_improve += 1;
                                             if neighbor_no_improve >= neighbor_patience {
-                                                patience_breaks += 1;
+                                                if collect_counters {
+                                                    patience_breaks += 1;
+                                                }
                                                 break;
                                             }
                                         }
                                     }
                                 }
+                            }
                             }
                         }
                     }

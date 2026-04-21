@@ -337,6 +337,10 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
                 elapsed_ms,
                 Some(qstats.visited),
                 Some(qstats.expanded),
+                Some(qstats.adjacency_reads),
+                Some(qstats.distance_computations),
+                Some(qstats.cap_breaks),
+                Some(qstats.patience_breaks),
                 recall,
             );
             for miss_id in truth_set
@@ -386,8 +390,12 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
         let latency = summarize_f64(&stats.elapsed_ms);
         let visited = summarize_usize(&stats.visited);
         let expanded = summarize_usize(&stats.expanded);
+        let adjacency_reads = summarize_usize(&stats.adjacency_reads);
+        let distance_computations = summarize_usize(&stats.distance_computations);
+        let cap_breaks = summarize_usize(&stats.cap_breaks);
+        let patience_breaks = summarize_usize(&stats.patience_breaks);
         logs.log_info(&format!(
-            "[query_stats] ef_search={} ms(p50/p90/p99)={:.3}/{:.3}/{:.3} visited(p50/p90/p99)={:.0}/{:.0}/{:.0} expanded(p50/p90/p99)={:.0}/{:.0}/{:.0}",
+            "[query_stats] ef_search={} ms(p50/p90/p99)={:.3}/{:.3}/{:.3} visited(p50/p90/p99)={:.0}/{:.0}/{:.0} expanded(p50/p90/p99)={:.0}/{:.0}/{:.0} adjacency_reads(p50/p90/p99)={:.0}/{:.0}/{:.0} distance_computations(p50/p90/p99)={:.0}/{:.0}/{:.0} cap_breaks(p50/p90/p99)={:.0}/{:.0}/{:.0} patience_breaks(p50/p90/p99)={:.0}/{:.0}/{:.0}",
             ef_search,
             latency.p50,
             latency.p90,
@@ -397,7 +405,19 @@ fn run_nytimes_perf_and_recall(mode: TestMode) {
             visited.p99,
             expanded.p50,
             expanded.p90,
-            expanded.p99
+            expanded.p99,
+            adjacency_reads.p50,
+            adjacency_reads.p90,
+            adjacency_reads.p99,
+            distance_computations.p50,
+            distance_computations.p90,
+            distance_computations.p99,
+            cap_breaks.p50,
+            cap_breaks.p90,
+            cap_breaks.p99,
+            patience_breaks.p50,
+            patience_breaks.p90,
+            patience_breaks.p99
         ));
         if miss_stats.total > 0 {
             let degree = summarize_usize(&miss_stats.degree_samples);
@@ -546,6 +566,10 @@ fn run_nytimes_recall_only() {
                 elapsed_ms,
                 Some(qstats.visited),
                 Some(qstats.expanded),
+                Some(qstats.adjacency_reads),
+                Some(qstats.distance_computations),
+                Some(qstats.cap_breaks),
+                Some(qstats.patience_breaks),
                 recall,
             );
             for miss_id in truth_set
@@ -595,8 +619,12 @@ fn run_nytimes_recall_only() {
         let latency = summarize_f64(&stats.elapsed_ms);
         let visited = summarize_usize(&stats.visited);
         let expanded = summarize_usize(&stats.expanded);
+        let adjacency_reads = summarize_usize(&stats.adjacency_reads);
+        let distance_computations = summarize_usize(&stats.distance_computations);
+        let cap_breaks = summarize_usize(&stats.cap_breaks);
+        let patience_breaks = summarize_usize(&stats.patience_breaks);
         logs.log_info(&format!(
-            "[query_stats] ef_search={} ms(p50/p90/p99)={:.3}/{:.3}/{:.3} visited(p50/p90/p99)={:.0}/{:.0}/{:.0} expanded(p50/p90/p99)={:.0}/{:.0}/{:.0}",
+            "[query_stats] ef_search={} ms(p50/p90/p99)={:.3}/{:.3}/{:.3} visited(p50/p90/p99)={:.0}/{:.0}/{:.0} expanded(p50/p90/p99)={:.0}/{:.0}/{:.0} adjacency_reads(p50/p90/p99)={:.0}/{:.0}/{:.0} distance_computations(p50/p90/p99)={:.0}/{:.0}/{:.0} cap_breaks(p50/p90/p99)={:.0}/{:.0}/{:.0} patience_breaks(p50/p90/p99)={:.0}/{:.0}/{:.0}",
             ef_search,
             latency.p50,
             latency.p90,
@@ -606,7 +634,19 @@ fn run_nytimes_recall_only() {
             visited.p99,
             expanded.p50,
             expanded.p90,
-            expanded.p99
+            expanded.p99,
+            adjacency_reads.p50,
+            adjacency_reads.p90,
+            adjacency_reads.p99,
+            distance_computations.p50,
+            distance_computations.p90,
+            distance_computations.p99,
+            cap_breaks.p50,
+            cap_breaks.p90,
+            cap_breaks.p99,
+            patience_breaks.p50,
+            patience_breaks.p90,
+            patience_breaks.p99
         ));
         if miss_stats.total > 0 {
             let degree = summarize_usize(&miss_stats.degree_samples);
@@ -742,6 +782,10 @@ fn run_nytimes_qps_latency_curve() {
                 elapsed_ms,
                 Some(qstats.visited),
                 Some(qstats.expanded),
+                Some(qstats.adjacency_reads),
+                Some(qstats.distance_computations),
+                Some(qstats.cap_breaks),
+                Some(qstats.patience_breaks),
                 recall,
             );
             query_logger.write(

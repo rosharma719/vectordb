@@ -80,8 +80,7 @@ impl HNSWIndex {
         // Touch the flag early so the enable banner shows up before long inserts.
         let _ = log_unfiltered_enabled();
         let base_level_scale = 1.0 / (m as f64).ln();
-        let level_scale =
-            Self::level_scale_from_env(base_level_scale).unwrap_or(base_level_scale * 1.15);
+        let level_scale = Self::level_scale_from_env(base_level_scale).unwrap_or(base_level_scale);
         let max_level_cap = Self::max_level_cap_from_env(max_level_cap);
         if VERBOSE {
             log::debug!(

@@ -12,10 +12,11 @@ use vectordb::payload_storage::filters::Filter;
 use vectordb::segment::segment::Segment;
 use vectordb::utils::env::{
     env_bool_first as shared_env_bool_first, env_string,
-    env_string_first as shared_env_string_first, env_usize,
+    env_string_first as shared_env_string_first,
     env_usize_first as shared_env_usize_first, env_usize_list_first as shared_env_usize_list_first,
 };
 use vectordb::utils::payload::{Payload, PayloadValue, ScalarComparisonOp};
+use vectordb::utils::telemetry::{HarnessTelemetryConfig, HumanLogLevel};
 use vectordb::utils::types::{DistanceMetric, Vector};
 use vectordb::vector::hnsw::HNSWIndex;
 
@@ -77,11 +78,10 @@ pub enum TestLogLevel {
 
 impl TestLogLevel {
     pub fn from_env() -> Self {
-        let raw = env_string("VECTORDB_TEST_LOG").unwrap_or_else(|| "info".to_string());
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "quiet" | "silent" | "off" => TestLogLevel::Quiet,
-            "debug" | "trace" => TestLogLevel::Debug,
-            _ => TestLogLevel::Info,
+        match HumanLogLevel::from_env_var("VECTORDB_TEST_LOG", "info") {
+            HumanLogLevel::Quiet => TestLogLevel::Quiet,
+            HumanLogLevel::Info => TestLogLevel::Info,
+            HumanLogLevel::Debug => TestLogLevel::Debug,
         }
     }
 
@@ -105,21 +105,18 @@ pub struct TestLogConfig {
 
 impl TestLogConfig {
     pub fn from_env() -> Self {
-        let level = TestLogLevel::from_env();
-        let progress_every = env_usize("VECTORDB_PROGRESS_EVERY")
-            .filter(|&v| v > 0)
-            .unwrap_or(100);
-        let insert_progress_every = env_usize("VECTORDB_INSERT_PROGRESS_EVERY").unwrap_or(1000);
-        let query_log_path = env_string("VECTORDB_QUERY_LOG");
-        let query_log_every = env_usize("VECTORDB_QUERY_LOG_EVERY")
-            .filter(|&v| v > 0)
-            .unwrap_or(1);
+        let telemetry = HarnessTelemetryConfig::from_env();
+        let level = match telemetry.level {
+            HumanLogLevel::Quiet => TestLogLevel::Quiet,
+            HumanLogLevel::Info => TestLogLevel::Info,
+            HumanLogLevel::Debug => TestLogLevel::Debug,
+        };
         Self {
             level,
-            progress_every,
-            insert_progress_every,
-            query_log_path,
-            query_log_every,
+            progress_every: telemetry.progress_every,
+            insert_progress_every: telemetry.insert_progress_every,
+            query_log_path: telemetry.query_log_path,
+            query_log_every: telemetry.query_log_every,
         }
     }
 
@@ -317,6 +314,10 @@ pub struct QueryStatsAgg {
     pub elapsed_ms: Vec<f64>,
     pub visited: Vec<usize>,
     pub expanded: Vec<usize>,
+    pub adjacency_reads: Vec<usize>,
+    pub distance_computations: Vec<usize>,
+    pub cap_breaks: Vec<usize>,
+    pub patience_breaks: Vec<usize>,
     pub recall: Vec<f64>,
 }
 
@@ -326,6 +327,10 @@ impl QueryStatsAgg {
             elapsed_ms: Vec::with_capacity(capacity),
             visited: Vec::with_capacity(capacity),
             expanded: Vec::with_capacity(capacity),
+            adjacency_reads: Vec::with_capacity(capacity),
+            distance_computations: Vec::with_capacity(capacity),
+            cap_breaks: Vec::with_capacity(capacity),
+            patience_breaks: Vec::with_capacity(capacity),
             recall: Vec::with_capacity(capacity),
         }
     }
@@ -335,6 +340,10 @@ impl QueryStatsAgg {
         elapsed_ms: f64,
         visited: Option<usize>,
         expanded: Option<usize>,
+        adjacency_reads: Option<usize>,
+        distance_computations: Option<usize>,
+        cap_breaks: Option<usize>,
+        patience_breaks: Option<usize>,
         recall: f64,
     ) {
         self.elapsed_ms.push(elapsed_ms);
@@ -343,6 +352,18 @@ impl QueryStatsAgg {
         }
         if let Some(e) = expanded {
             self.expanded.push(e);
+        }
+        if let Some(value) = adjacency_reads {
+            self.adjacency_reads.push(value);
+        }
+        if let Some(value) = distance_computations {
+            self.distance_computations.push(value);
+        }
+        if let Some(value) = cap_breaks {
+            self.cap_breaks.push(value);
+        }
+        if let Some(value) = patience_breaks {
+            self.patience_breaks.push(value);
         }
         self.recall.push(recall);
     }

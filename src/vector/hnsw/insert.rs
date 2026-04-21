@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 use super::HNSWIndex;
 use super::config::{
     FILTER_EDGE_LOG_CHUNK, VERBOSE, diversity_alpha_for_level, diversity_prune_floor,
-    insert_trace_logger, next_insert_trace_seq, trace_every,
+    enforce_neighbor_caps, insert_trace_logger, next_insert_trace_seq, trace_every,
 };
 use super::stats::{FILTER_EDGE_STATS, FILTER_EDGE_TOTAL_KEYS, FilterEdgeAgg};
 use super::types::{NodeCandidate, SearchRuntimeOptions};
@@ -58,7 +58,6 @@ impl HNSWIndex {
         }
 
         self.validate_dim(&vector)?;
-
         let trace_id = next_insert_trace_seq();
         let trace_mod = trace_every() as u64;
         let trace_enabled = insert_trace_logger().is_some() && trace_id.is_multiple_of(trace_mod);
@@ -125,7 +124,6 @@ impl HNSWIndex {
             let m_for_layer = if l == 0 { self.m0 } else { self.m };
             let neighbors: Vec<usize> =
                 self.select_diverse_neighbors(&candidates, m_for_layer, use_norm, l);
-
             {
                 let layer = self.layers.get_mut(l).unwrap();
                 let mut linked = neighbors.clone();
@@ -135,6 +133,9 @@ impl HNSWIndex {
                 layer[idx] = linked;
             }
             self.sort_layer_neighbors(l, idx);
+            if enforce_neighbor_caps() {
+                self.cap_layer_neighbors(l, idx);
+            }
 
             for &n in &neighbors {
                 {
@@ -145,6 +146,9 @@ impl HNSWIndex {
                     }
                 }
                 self.sort_layer_neighbors(l, n);
+                if enforce_neighbor_caps() {
+                    self.cap_layer_neighbors(l, n);
+                }
             }
 
             if let Some(&best) = neighbors.first() {
@@ -380,6 +384,12 @@ impl HNSWIndex {
         self.extend_layers_for_new_node(nodes_len);
         Self::push_unique(&mut self.layers[level][a_idx], b_idx);
         Self::push_unique(&mut self.layers[level][b_idx], a_idx);
+        self.sort_layer_neighbors(level, a_idx);
+        self.sort_layer_neighbors(level, b_idx);
+        if enforce_neighbor_caps() {
+            self.cap_layer_neighbors(level, a_idx);
+            self.cap_layer_neighbors(level, b_idx);
+        }
     }
 
     pub fn add_one_way_edge(&mut self, level: usize, from: PointId, to: PointId) {
@@ -390,6 +400,10 @@ impl HNSWIndex {
         self.ensure_level_capacity(level, nodes_len);
         self.extend_layers_for_new_node(nodes_len);
         Self::push_unique(&mut self.layers[level][from_idx], to_idx);
+        self.sort_layer_neighbors(level, from_idx);
+        if enforce_neighbor_caps() {
+            self.cap_layer_neighbors(level, from_idx);
+        }
     }
 
     #[inline]
@@ -525,6 +539,19 @@ impl HNSWIndex {
             .collect();
         scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
         scored.into_iter().map(|(idx, _)| idx).collect()
+    }
+
+    fn cap_layer_neighbors(&mut self, level: usize, node_idx: usize) {
+        if level >= self.layers.len() {
+            return;
+        }
+        let cap = self.neighbor_list_capacity(level);
+        if let Some(layer) = self.layers.get_mut(level)
+            && let Some(neighbors) = layer.get_mut(node_idx)
+            && neighbors.len() > cap
+        {
+            neighbors.truncate(cap);
+        }
     }
 
     fn sort_layer_neighbors(&mut self, level: usize, node_idx: usize) {

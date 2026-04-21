@@ -497,7 +497,7 @@ fn run_hnm_filtered_cosine_recall(mode: TestMode) {
             per_query_recalls.push(recall);
             let misses = truth.len().saturating_sub(query_hits);
             let elapsed_ms = q_start.elapsed().as_secs_f64() * 1000.0;
-            query_stats.record(elapsed_ms, None, None, recall);
+            query_stats.record(elapsed_ms, None, None, None, None, None, None, recall);
             for miss_id in truth.iter().filter(|id| !res.iter().any(|r| r.id == **id)) {
                 if let Some(level) = segment.hnsw().point_level(*miss_id) {
                     let degree = segment.hnsw().point_degree(*miss_id, 0);
@@ -731,7 +731,7 @@ fn run_hnm_recall_only() {
             per_query_recalls.push(recall);
             let misses = truth.len().saturating_sub(query_hits);
             let elapsed_ms = q_start.elapsed().as_secs_f64() * 1000.0;
-            query_stats.record(elapsed_ms, None, None, recall);
+            query_stats.record(elapsed_ms, None, None, None, None, None, None, recall);
             for miss_id in truth.iter().filter(|id| !res.iter().any(|r| r.id == **id)) {
                 if let Some(level) = segment.hnsw().point_level(*miss_id) {
                     let degree = segment.hnsw().point_degree(*miss_id, 0);

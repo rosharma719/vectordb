@@ -5,6 +5,10 @@ This document captures the “build + query + frontier + knob-effects” pipelin
 ## 1. Inputs
 
 1. `logs/nyt_query_suite.jsonl` – produced by `scripts/run_query_grid.py`, contains both per-query entries (`type="query"`) and per-run summaries (`type="summary"`).
+   Each row now records the hidden runtime knobs and repo state that materially affect reproducibility:
+   `search_expansion_mult`, `search_expansion_cap`, `disable_early_exit`,
+   `neighbor_rotate`, `neighbor_stride`, `neighbor_scan_patience`,
+   `git_commit`, and `git_dirty`.
 2. `logs/nyt_query_suite_analysis/` (produced) – derived tables + reports from `scripts/analyze_nyt_query_suite.py`.
 
 ## 2. Script `scripts/analyze_nyt_query_suite.py`
@@ -35,6 +39,7 @@ python scripts/analyze_nyt_query_suite.py \
 ## 3. Workflow
 
 1. Run `scripts/run_query_grid.py` to produce `logs/nyt_query_suite.jsonl`.
+   The runner now pins the hidden runtime knobs explicitly instead of inheriting them silently from ambient env/defaults.
 2. Run `scripts/analyze_nyt_query_suite.py` to emit the frontier tables and knob-effect report.
 
 ## 4. Next steps

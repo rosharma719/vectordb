@@ -3,7 +3,8 @@ use std::io::BufWriter;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use crate::utils::env::{env_bool, env_f32, env_string, env_usize, env_usize_nonzero};
+use crate::utils::env::{env_bool, env_f32, env_usize, env_usize_nonzero};
+use crate::utils::telemetry::{HnswTelemetryConfig, jsonl_sink};
 
 pub(crate) const VERBOSE: bool = false;
 pub(crate) const DEFAULT_EXACT_FALLBACK_THRESHOLD: usize = 256;
@@ -12,6 +13,7 @@ pub(crate) const FILTER_EDGE_LOG_CHUNK: usize = 10_000;
 static LOG_UNFILTERED_SEARCH: OnceLock<bool> = OnceLock::new();
 static UNFILTERED_LOG_CHUNK: OnceLock<usize> = OnceLock::new();
 static FILTER_SEED_LOG_CHUNK: OnceLock<usize> = OnceLock::new();
+static HNSW_TELEMETRY: OnceLock<HnswTelemetryConfig> = OnceLock::new();
 static DISABLE_EARLY_EXIT: OnceLock<bool> = OnceLock::new();
 static SEARCH_EXPANSION_MULT: OnceLock<usize> = OnceLock::new();
 static SEARCH_EXPANSION_CAP: OnceLock<Option<usize>> = OnceLock::new();
@@ -34,14 +36,19 @@ static NEIGHBOR_SCAN_ROTATE: OnceLock<Option<bool>> = OnceLock::new();
 static NEIGHBOR_SCAN_STRIDE: OnceLock<Option<bool>> = OnceLock::new();
 static NEIGHBOR_SCAN_PATIENCE: OnceLock<Option<usize>> = OnceLock::new();
 static NEIGHBOR_SCAN_STATE_LOGGED: OnceLock<()> = OnceLock::new();
+static ENFORCE_NEIGHBOR_CAPS: OnceLock<Option<bool>> = OnceLock::new();
 static DIVERSITY_ALPHA: OnceLock<Option<f32>> = OnceLock::new();
 static DIVERSITY_ALPHA_LOW: OnceLock<Option<f32>> = OnceLock::new();
 static DIVERSITY_ALPHA_HIGH: OnceLock<Option<f32>> = OnceLock::new();
 static DIVERSITY_PRUNE_FLOOR: OnceLock<Option<usize>> = OnceLock::new();
 
+fn hnsw_telemetry() -> &'static HnswTelemetryConfig {
+    HNSW_TELEMETRY.get_or_init(HnswTelemetryConfig::from_env)
+}
+
 pub(crate) fn log_unfiltered_enabled() -> bool {
     *LOG_UNFILTERED_SEARCH.get_or_init(|| {
-        let enabled = env_bool("VECTORDB_LOG_UNFILTERED_SEARCH").unwrap_or(false);
+        let enabled = hnsw_telemetry().log_unfiltered_search;
         if enabled {
             let chunk = unfiltered_log_chunk();
             log::info!(
@@ -55,13 +62,11 @@ pub(crate) fn log_unfiltered_enabled() -> bool {
 }
 
 pub(crate) fn unfiltered_log_chunk() -> usize {
-    *UNFILTERED_LOG_CHUNK
-        .get_or_init(|| env_usize_nonzero("VECTORDB_LOG_UNFILTERED_EVERY").unwrap_or(1000))
+    *UNFILTERED_LOG_CHUNK.get_or_init(|| hnsw_telemetry().unfiltered_log_every)
 }
 
 pub(crate) fn filter_seed_log_chunk() -> usize {
-    *FILTER_SEED_LOG_CHUNK
-        .get_or_init(|| env_usize_nonzero("VECTORDB_LOG_FILTER_SEED_EVERY").unwrap_or(100))
+    *FILTER_SEED_LOG_CHUNK.get_or_init(|| hnsw_telemetry().filter_seed_log_every)
 }
 
 pub fn disable_early_exit() -> bool {
@@ -110,11 +115,7 @@ pub(crate) fn filter_failing_budget(m: usize) -> usize {
 
 pub(crate) fn filter_search_logger() -> Option<&'static Mutex<BufWriter<File>>> {
     FILTER_SEARCH_LOG
-        .get_or_init(|| {
-            env_string("VECTORDB_FILTER_SEARCH_LOG")
-                .and_then(|path| File::create(path).ok())
-                .map(|f| Mutex::new(BufWriter::new(f)))
-        })
+        .get_or_init(|| jsonl_sink(hnsw_telemetry().filter_search_log_path.as_deref()))
         .as_ref()
 }
 
@@ -124,26 +125,18 @@ pub(crate) fn next_filter_search_seq() -> u64 {
 
 pub(crate) fn search_trace_logger() -> Option<&'static Mutex<BufWriter<File>>> {
     SEARCH_TRACE_LOG
-        .get_or_init(|| {
-            env_string("VECTORDB_SEARCH_TRACE_LOG")
-                .and_then(|path| File::create(path).ok())
-                .map(|f| Mutex::new(BufWriter::new(f)))
-        })
+        .get_or_init(|| jsonl_sink(hnsw_telemetry().search_trace_log_path.as_deref()))
         .as_ref()
 }
 
 pub(crate) fn insert_trace_logger() -> Option<&'static Mutex<BufWriter<File>>> {
     INSERT_TRACE_LOG
-        .get_or_init(|| {
-            env_string("VECTORDB_INSERT_TRACE_LOG")
-                .and_then(|path| File::create(path).ok())
-                .map(|f| Mutex::new(BufWriter::new(f)))
-        })
+        .get_or_init(|| jsonl_sink(hnsw_telemetry().insert_trace_log_path.as_deref()))
         .as_ref()
 }
 
 pub(crate) fn trace_every() -> usize {
-    *TRACE_EVERY.get_or_init(|| env_usize_nonzero("VECTORDB_TRACE_EVERY").unwrap_or(100))
+    *TRACE_EVERY.get_or_init(|| hnsw_telemetry().trace_every)
 }
 
 pub(crate) fn next_search_trace_seq() -> u64 {
@@ -175,7 +168,7 @@ pub fn neighbor_scan_cap(level: usize) -> usize {
                 env_usize("VECTORDB_NEIGHBOR_SCAN_CAP_LEVEL0")
                     .map(|value| if value == 0 { usize::MAX } else { value })
             })
-            .unwrap_or(64)
+            .unwrap_or(usize::MAX)
     } else {
         usize::MAX
     }
@@ -200,15 +193,26 @@ pub fn neighbor_scan_stride_enabled() -> bool {
         .unwrap_or(false)
 }
 
+pub fn enforce_neighbor_caps() -> bool {
+    ENFORCE_NEIGHBOR_CAPS
+        .get_or_init(|| env_bool("VECTORDB_ENFORCE_NEIGHBOR_CAPS"))
+        .unwrap_or(false)
+}
+
 pub(crate) fn log_neighbor_scan_state(expansion_mult: usize, expansion_cap: Option<usize>) {
     NEIGHBOR_SCAN_STATE_LOGGED.get_or_init(|| {
         let cap = neighbor_scan_cap(0);
         let rotate = neighbor_scan_rotate_enabled();
         let stride = neighbor_scan_stride_enabled();
+        let cap_display = if cap == usize::MAX {
+            "none".to_string()
+        } else {
+            cap.to_string()
+        };
         log::info!(
             target: "vector::hnsw",
             "Neighbor scan cap L0={} rotation={} rotation_stride={} expansion_mult={} expansion_cap={}",
-            cap,
+            cap_display,
             if rotate { "on" } else { "off" },
             if stride { "enabled" } else { "off" },
             expansion_mult,
@@ -234,12 +238,12 @@ pub(crate) fn diversity_alpha_for_level(level: usize) -> f32 {
             env_f32("VECTORDB_DIVERSITY_ALPHA_HIGH")
                 .filter(|value| value.is_finite() && *value > 0.0)
         })
-        .unwrap_or(1.2);
+        .unwrap_or(1.0);
     if level == 0 { low } else { high }
 }
 
 pub(crate) fn diversity_prune_floor() -> usize {
     DIVERSITY_PRUNE_FLOOR
-        .get_or_init(|| env_usize_nonzero("VECTORDB_DIVERSITY_PRUNE_FLOOR"))
-        .unwrap_or(4)
+        .get_or_init(|| env_usize("VECTORDB_DIVERSITY_PRUNE_FLOOR"))
+        .unwrap_or(0)
 }
