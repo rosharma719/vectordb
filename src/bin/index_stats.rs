@@ -283,7 +283,7 @@ fn l2_norm(v: &[f32]) -> f64 {
     sum.sqrt()
 }
 
-fn sample_pair_scores(vectors: &[&Vec<f32>], metric: DistanceMetric, samples: usize) -> Vec<f64> {
+fn sample_pair_scores(vectors: &[&[f32]], metric: DistanceMetric, samples: usize) -> Vec<f64> {
     if vectors.len() < 2 || samples == 0 {
         return vec![];
     }

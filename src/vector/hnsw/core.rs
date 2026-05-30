@@ -35,7 +35,7 @@ pub struct HnswSnapshot {
 
 pub struct HNSWIndex {
     pub(crate) layers: Vec<Vec<Vec<usize>>>,
-    pub(crate) vectors: Vec<Vector>,
+    pub(crate) vectors: Vec<f32>,
     pub(crate) levels: Vec<usize>,
     pub(crate) entry_point: Option<usize>,
     pub(crate) metric: DistanceMetric,
@@ -94,12 +94,12 @@ impl HNSWIndex {
         }
         Self {
             layers: Vec::new(),
-            vectors: Vec::new(),
+            vectors: Vec::with_capacity(dim * 64),
             levels: Vec::new(),
             entry_point: None,
             metric,
             m,
-            m0: m,
+            m0: m * 2,
             ef,
             ef_construct: ef,
             max_level_cap,
@@ -144,7 +144,12 @@ impl HNSWIndex {
     }
 
     #[inline]
-    pub(crate) fn fast_score(&self, query: &Vector, vec: &Vector) -> f32 {
+    pub(crate) fn vector_slice(&self, idx: usize) -> &[f32] {
+        &self.vectors[idx * self.dim..(idx + 1) * self.dim]
+    }
+
+    #[inline]
+    pub(crate) fn fast_score(&self, query: &[f32], vec: &[f32]) -> f32 {
         match self.metric {
             DistanceMetric::Cosine => {
                 let dot: f32 = dot_product(query, vec);
@@ -194,11 +199,13 @@ impl HNSWIndex {
     }
 
     #[inline]
-    pub(crate) fn get_vector_by_idx(&self, idx: usize) -> Option<&Vector> {
+    pub(crate) fn get_vector_by_idx(&self, idx: usize) -> Option<&[f32]> {
         if self.deleted.get(idx).copied().unwrap_or(false) {
             None
+        } else if (idx + 1) * self.dim <= self.vectors.len() {
+            Some(self.vector_slice(idx))
         } else {
-            self.vectors.get(idx)
+            None
         }
     }
 
@@ -236,7 +243,7 @@ impl HNSWIndex {
     }
 
     pub fn len(&self) -> usize {
-        self.vectors.len()
+        self.idx_to_point.len()
     }
 
     pub fn config_summary(&self) -> HnswConfigSummary {
@@ -259,19 +266,22 @@ impl HNSWIndex {
         self.layers.get(level)?.get(idx)
     }
 
-    pub fn iter_vectors(&self) -> impl Iterator<Item = (&PointId, &Vector)> {
-        self.vectors
-            .iter()
-            .enumerate()
-            .map(|(idx, vec)| (&self.idx_to_point[idx], vec))
+    pub fn iter_vectors(&self) -> impl Iterator<Item = (&PointId, &[f32])> {
+        let dim = self.dim;
+        (0..self.len()).map(move |idx| {
+            let vec = &self.vectors[idx * dim..(idx + 1) * dim];
+            (&self.idx_to_point[idx], vec)
+        })
     }
 
-    pub fn iter_active_vectors(&self) -> impl Iterator<Item = (&PointId, &Vector)> {
-        self.vectors
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| !self.deleted.get(*idx).copied().unwrap_or(false))
-            .map(|(idx, vec)| (&self.idx_to_point[idx], vec))
+    pub fn iter_active_vectors(&self) -> impl Iterator<Item = (&PointId, &[f32])> {
+        let dim = self.dim;
+        (0..self.len())
+            .filter(move |&idx| !self.deleted.get(idx).copied().unwrap_or(false))
+            .map(move |idx| {
+                let vec = &self.vectors[idx * dim..(idx + 1) * dim];
+                (&self.idx_to_point[idx], vec)
+            })
     }
 
     pub fn deleted_count(&self) -> usize {
@@ -279,7 +289,7 @@ impl HNSWIndex {
     }
 
     pub fn deleted_fraction(&self) -> f64 {
-        let n = self.vectors.len();
+        let n = self.len();
         if n == 0 {
             return 0.0;
         }
@@ -349,12 +359,14 @@ impl HNSWIndex {
         self.dim
     }
 
-    pub fn get_vector(&self, point_id: &PointId) -> Option<&Vector> {
+    pub fn get_vector(&self, point_id: &PointId) -> Option<&[f32]> {
         let idx = self.idx_of(*point_id)?;
         if self.deleted.get(idx).copied().unwrap_or(false) {
             None
+        } else if (idx + 1) * self.dim <= self.vectors.len() {
+            Some(self.vector_slice(idx))
         } else {
-            self.vectors.get(idx)
+            None
         }
     }
 
@@ -420,7 +432,7 @@ impl HNSWIndex {
         default_cap
     }
 
-    pub fn maybe_normalize(&self, vec: &Vector) -> Vector {
+    pub fn maybe_normalize(&self, vec: &[f32]) -> Vector {
         match self.metric {
             DistanceMetric::Cosine => {
                 let norm = vec
@@ -429,13 +441,13 @@ impl HNSWIndex {
                     .sum::<f64>()
                     .sqrt();
                 if norm == 0.0 {
-                    vec.clone()
+                    vec.to_vec()
                 } else {
                     let inv = 1.0 / norm;
                     vec.iter().map(|x| (*x as f64 * inv) as f32).collect()
                 }
             }
-            _ => vec.clone(),
+            _ => vec.to_vec(),
         }
     }
 }
@@ -608,8 +620,8 @@ impl HNSWIndex {
         vector: Vector,
         level: usize,
     ) -> usize {
-        let idx = self.vectors.len();
-        self.vectors.push(vector);
+        let idx = self.idx_to_point.len();
+        self.vectors.extend_from_slice(&vector);
         self.levels.push(level);
         self.deleted.push(false);
         self.idx_to_point.push(point_id);
@@ -626,7 +638,7 @@ impl HNSWIndex {
 }
 
 impl HNSWIndex {
-    pub(crate) fn validate_dim(&self, vec: &Vector) -> Result<(), DBError> {
+    pub(crate) fn validate_dim(&self, vec: &[f32]) -> Result<(), DBError> {
         if vec.len() != self.dim {
             return Err(DBError::VectorLengthMismatch {
                 expected: self.dim,

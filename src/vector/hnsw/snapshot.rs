@@ -60,12 +60,12 @@ impl From<HnswSnapshotV1> for HnswSnapshot {
 
 impl HNSWIndex {
     pub fn to_snapshot(&self) -> HnswSnapshot {
-        let mut vectors = HashMap::with_capacity(self.vectors.len());
+        let mut vectors = HashMap::with_capacity(self.len());
         let mut levels = HashMap::with_capacity(self.levels.len());
         let mut deleted = HashSet::new();
-        for (idx, vec) in self.vectors.iter().enumerate() {
+        for idx in 0..self.len() {
             let id = self.point_id(idx);
-            vectors.insert(id, vec.clone());
+            vectors.insert(id, self.vector_slice(idx).to_vec());
             levels.insert(id, self.levels.get(idx).copied().unwrap_or(0));
             if self.deleted.get(idx).copied().unwrap_or(false) {
                 deleted.insert(id);
@@ -113,7 +113,7 @@ impl HNSWIndex {
 
     pub fn from_snapshot(snapshot: HnswSnapshot) -> Self {
         let m0 = if snapshot.m0 == 0 {
-            snapshot.m
+            snapshot.m * 2
         } else {
             snapshot.m0
         };
@@ -123,14 +123,14 @@ impl HNSWIndex {
         for (idx, id) in ids.iter().copied().enumerate() {
             point_to_idx.insert(id, idx);
         }
-        let mut vectors = Vec::with_capacity(ids.len());
+        let mut vectors = Vec::with_capacity(ids.len() * snapshot.dim);
         let mut levels = Vec::with_capacity(ids.len());
         let mut deleted = vec![false; ids.len()];
         for (idx, id) in ids.iter().copied().enumerate() {
             if let Some(vec) = snapshot.vectors.get(&id) {
-                vectors.push(vec.clone());
+                vectors.extend_from_slice(vec);
             } else {
-                vectors.push(Vec::new());
+                vectors.extend(std::iter::repeat(0.0f32).take(snapshot.dim));
             }
             levels.push(snapshot.levels.get(&id).copied().unwrap_or(0));
             if snapshot.deleted.contains(&id) {

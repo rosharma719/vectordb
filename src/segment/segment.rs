@@ -306,7 +306,7 @@ impl Segment {
     }
 
     /// Get the vector for a given point ID, if it exists and is not deleted.
-    pub fn get_vector(&self, point_id: PointId) -> Option<&Vector> {
+    pub fn get_vector(&self, point_id: PointId) -> Option<&[f32]> {
         if self.deleted.contains(&point_id) {
             return None;
         }
@@ -556,7 +556,7 @@ impl Segment {
             }
 
             // Reinsert into HNSW
-            new_hnsw.insert(id, vector.clone())?;
+            new_hnsw.insert(id, vector.to_vec())?;
 
             if let Some(p) = self.payloads.get(&id) {
                 // Reinsert into payload structures

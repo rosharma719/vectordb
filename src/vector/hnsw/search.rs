@@ -72,7 +72,7 @@ fn log_search_trace(entry: &SearchTraceEntry) {
     }
 }
 
-fn hash_query(query: &Vector) -> u64 {
+fn hash_query(query: &[f32]) -> u64 {
     let mut hasher = DefaultHasher::new();
     query.len().hash(&mut hasher);
     for &value in query {
@@ -102,15 +102,14 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
 }
 
 impl HNSWIndex {
-    fn exact_scan(&self, query: &Vector, normalize_scores: bool, top_k: usize) -> Vec<ScoredPoint> {
-        let mut brute: Vec<ScoredPoint> = self
-            .vectors
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, vec)| {
+    fn exact_scan(&self, query: &[f32], normalize_scores: bool, top_k: usize) -> Vec<ScoredPoint> {
+        let dim = self.dim;
+        let mut brute: Vec<ScoredPoint> = (0..self.len())
+            .filter_map(|idx| {
                 if self.deleted.get(idx).copied().unwrap_or(false) {
                     return None;
                 }
+                let vec = &self.vectors[idx * dim..(idx + 1) * dim];
                 let raw = self.fast_score(query, vec);
                 let sort_key = if normalize_scores {
                     self.normalize_score(raw)
@@ -136,7 +135,7 @@ impl HNSWIndex {
 
     pub(crate) fn search_layer_unfiltered(
         &self,
-        query: &Vector,
+        query: &[f32],
         entry: usize,
         level: usize,
         ef: usize,
@@ -162,7 +161,7 @@ impl HNSWIndex {
         log_neighbor_scan_state(expansion_mult, expansion_cap_value);
         SEARCH_SCRATCH.with(|cell| {
             let mut scratch = cell.borrow_mut();
-            scratch.next_epoch(self.vectors.len());
+            scratch.next_epoch(self.len());
             scratch.candidate_queue.clear();
             scratch.result_set.clear();
 
@@ -187,7 +186,7 @@ impl HNSWIndex {
                 entry
             };
 
-            let entry_distance = self.fast_score(query, &self.vectors[start_entry]);
+            let entry_distance = self.fast_score(query, self.vector_slice(start_entry));
             let entry_score = if normalize {
                 self.normalize_score(entry_distance)
             } else {
@@ -262,7 +261,7 @@ impl HNSWIndex {
                                 batch_len += 1;
                                 if batch_len == BATCH {
                                     for &idx in batch.iter().take(batch_len) {
-                                        let raw = self.fast_score(query, &self.vectors[idx]);
+                                        let raw = self.fast_score(query, self.vector_slice(idx));
                                         let score_val = if normalize {
                                             self.normalize_score(raw)
                                         } else {
@@ -298,7 +297,7 @@ impl HNSWIndex {
                             }
                             if batch_len > 0 {
                                 for &idx in batch.iter().take(batch_len) {
-                                    let raw = self.fast_score(query, &self.vectors[idx]);
+                                    let raw = self.fast_score(query, self.vector_slice(idx));
                                     let score_val = if normalize {
                                         self.normalize_score(raw)
                                     } else {
@@ -379,7 +378,7 @@ impl HNSWIndex {
                                         if collect_counters {
                                             distance_computations += 1;
                                         }
-                                        let raw = self.fast_score(query, &self.vectors[idx]);
+                                        let raw = self.fast_score(query, self.vector_slice(idx));
                                         let score_val = if normalize {
                                             self.normalize_score(raw)
                                         } else {
@@ -437,7 +436,7 @@ impl HNSWIndex {
                                     if collect_counters {
                                         distance_computations += 1;
                                     }
-                                    let raw = self.fast_score(query, &self.vectors[idx]);
+                                    let raw = self.fast_score(query, self.vector_slice(idx));
                                     let score_val = if normalize {
                                         self.normalize_score(raw)
                                     } else {
@@ -505,7 +504,7 @@ impl HNSWIndex {
                             ef_search: ef,
                             exact_fallback_enabled: self.exact_fallback_enabled,
                             exact_fallback_threshold: self.exact_fallback_threshold,
-                            collection_size: self.vectors.len(),
+                            collection_size: self.len(),
                             exact_scan: false,
                             top_id: None,
                             top_raw: None,
@@ -542,7 +541,7 @@ impl HNSWIndex {
                     ef_search: ef,
                     exact_fallback_enabled: self.exact_fallback_enabled,
                     exact_fallback_threshold: self.exact_fallback_threshold,
-                    collection_size: self.vectors.len(),
+                    collection_size: self.len(),
                     exact_scan: false,
                     top_id: None,
                     top_raw: None,
@@ -627,7 +626,7 @@ impl HNSWIndex {
         });
 
         let deleted_count = self.deleted.iter().filter(|d| **d).count();
-        let collection_size = self.vectors.len().saturating_sub(deleted_count);
+        let collection_size = self.len().saturating_sub(deleted_count);
         let exact_scan_possible =
             self.exact_fallback_enabled && collection_size <= self.exact_fallback_threshold;
         if let Some(ctx) = trace_ctx.as_mut() {
@@ -714,13 +713,7 @@ impl HNSWIndex {
         }
 
         let final_query = &prepared_query;
-        let ef_search = opts.ef_search.map(|v| v.max(top_k)).unwrap_or_else(|| {
-            if self.metric == DistanceMetric::Dot {
-                self.vectors.len().max(top_k)
-            } else {
-                self.ef.max(top_k)
-            }
-        });
+        let ef_search = opts.ef_search.map(|v| v.max(top_k)).unwrap_or(self.ef.max(top_k));
 
         let mut layer_stats = SearchLayerStats::default();
         let (mut results, _counters) = self.search_layer_unfiltered(
@@ -809,7 +802,7 @@ impl HNSWIndex {
         });
 
         let deleted_count = self.deleted.iter().filter(|d| **d).count();
-        let collection_size = self.vectors.len().saturating_sub(deleted_count);
+        let collection_size = self.len().saturating_sub(deleted_count);
         let exact_scan_possible =
             self.exact_fallback_enabled && collection_size <= self.exact_fallback_threshold;
         if let Some(ctx) = trace_ctx.as_mut() {
@@ -881,13 +874,7 @@ impl HNSWIndex {
         }
 
         let final_query = &prepared_query;
-        let ef_search = opts.ef_search.map(|v| v.max(top_k)).unwrap_or_else(|| {
-            if self.metric == DistanceMetric::Dot {
-                self.vectors.len().max(top_k)
-            } else {
-                self.ef.max(top_k)
-            }
-        });
+        let ef_search = opts.ef_search.map(|v| v.max(top_k)).unwrap_or(self.ef.max(top_k));
 
         let log_enabled = log_unfiltered_enabled();
         let mut layer_stats = SearchLayerStats::default();

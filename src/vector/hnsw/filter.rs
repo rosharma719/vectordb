@@ -172,12 +172,12 @@ impl HNSWIndex {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 f.hash(&mut hasher);
                 payload_index.revision().hash(&mut hasher);
-                self.vectors.len().hash(&mut hasher);
+                self.len().hash(&mut hasher);
                 hasher.finish()
             };
             if let Some(mask) = SEARCH_SCRATCH.with(|cell| {
                 let mut scratch = cell.borrow_mut();
-                scratch.get_filter_mask(mask_key, self.vectors.len())
+                scratch.get_filter_mask(mask_key, self.len())
             }) {
                 allowed_mask = Some(mask);
             }
@@ -301,7 +301,7 @@ impl HNSWIndex {
 
         let result = SEARCH_SCRATCH.with(|cell| {
             let mut scratch = cell.borrow_mut();
-            scratch.next_epoch(self.vectors.len());
+            scratch.next_epoch(self.len());
             scratch.routing_pq.clear();
             scratch.results_pq.clear();
             let mut visited_count = 0usize;
@@ -420,7 +420,7 @@ impl HNSWIndex {
             }
 
             let seed_limit = ef_search;
-            let seed_len = self.vectors.len();
+            let seed_len = self.len();
             fn collect_match_ids(
                 filter: &Filter,
                 idx: &PayloadIndex,

@@ -1,7 +1,7 @@
-use crate::utils::types::{DistanceMetric, Vector};
+use crate::utils::types::DistanceMetric;
 
 /// Main distance dispatcher
-pub fn score(a: &Vector, b: &Vector, metric: DistanceMetric) -> f32 {
+pub fn score(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
     assert_eq!(a.len(), b.len(), "Vectors must be the same length");
 
     match metric {
@@ -12,7 +12,7 @@ pub fn score(a: &Vector, b: &Vector, metric: DistanceMetric) -> f32 {
 }
 
 /// Cosine distance: 1 - cosine similarity
-fn cosine_distance(a: &Vector, b: &Vector) -> f32 {
+fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     let dot = a
         .iter()
         .zip(b.iter())
@@ -47,7 +47,7 @@ fn cosine_distance(a: &Vector, b: &Vector) -> f32 {
 }
 
 /// Dot product similarity (higher is closer)
-fn dot_product_similarity(a: &Vector, b: &Vector) -> f32 {
+fn dot_product_similarity(a: &[f32], b: &[f32]) -> f32 {
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| (*x as f64) * (*y as f64))
@@ -55,7 +55,7 @@ fn dot_product_similarity(a: &Vector, b: &Vector) -> f32 {
 }
 
 /// Euclidean distance
-fn euclidean_distance(a: &Vector, b: &Vector) -> f32 {
+fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     let sum = a
         .iter()
         .zip(b.iter())

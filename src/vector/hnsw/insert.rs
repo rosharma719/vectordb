@@ -70,7 +70,7 @@ impl HNSWIndex {
         let level = self.assign_random_level();
         let vec = self.maybe_normalize(&vector);
         let idx = self.register_node(point_id, vec, level);
-        let nodes_len = self.vectors.len();
+        let nodes_len = self.len();
         self.ensure_level_capacity(level, nodes_len);
         self.extend_layers_for_new_node(nodes_len);
 
@@ -103,7 +103,7 @@ impl HNSWIndex {
 
         for l in ((level + 1)..=self.current_max_level).rev() {
             current_entry =
-                self.greedy_search_layer_unfiltered(&self.vectors[idx], current_entry, l);
+                self.greedy_search_layer_unfiltered(self.vector_slice(idx), current_entry, l);
         }
 
         for l in (0..=level).rev() {
@@ -111,7 +111,7 @@ impl HNSWIndex {
                 self.metric == DistanceMetric::Cosine || self.metric == DistanceMetric::Dot;
             let opts = SearchRuntimeOptions::default();
             let (mut candidates, _) = self.search_layer_unfiltered(
-                &self.vectors[idx],
+                self.vector_slice(idx),
                 current_entry,
                 l,
                 self.ef_construct,
@@ -138,16 +138,11 @@ impl HNSWIndex {
             }
 
             for &n in &neighbors {
-                {
-                    let layer = self.layers.get_mut(l).unwrap();
-                    let e = &mut layer[n];
-                    if !e.contains(&idx) {
-                        e.push(idx);
+                if !self.layers[l][n].contains(&idx) {
+                    self.insert_sorted_neighbor(l, n, idx);
+                    if enforce_neighbor_caps() {
+                        self.cap_layer_neighbors(l, n);
                     }
-                }
-                self.sort_layer_neighbors(l, n);
-                if enforce_neighbor_caps() {
-                    self.cap_layer_neighbors(l, n);
                 }
             }
 
@@ -194,7 +189,7 @@ impl HNSWIndex {
     pub fn build_filter_aware_edges(
         &mut self,
         point_id: PointId,
-        vector: &Vector,
+        vector: &[f32],
         payload: &Payload,
         payload_index: &PayloadIndex,
         _payloads: &std::collections::HashMap<PointId, Payload>,
@@ -206,7 +201,7 @@ impl HNSWIndex {
         let query_vector = if self.metric == DistanceMetric::Cosine {
             self.maybe_normalize(vector)
         } else {
-            vector.clone()
+            vector.to_vec()
         };
 
         let mut extra_neighbors = HashSet::new();
@@ -379,7 +374,7 @@ impl HNSWIndex {
         let (Some(a_idx), Some(b_idx)) = (self.idx_of(a), self.idx_of(b)) else {
             return;
         };
-        let nodes_len = self.vectors.len();
+        let nodes_len = self.len();
         self.ensure_level_capacity(level, nodes_len);
         self.extend_layers_for_new_node(nodes_len);
         Self::push_unique(&mut self.layers[level][a_idx], b_idx);
@@ -396,7 +391,7 @@ impl HNSWIndex {
         let (Some(from_idx), Some(to_idx)) = (self.idx_of(from), self.idx_of(to)) else {
             return;
         };
-        let nodes_len = self.vectors.len();
+        let nodes_len = self.len();
         self.ensure_level_capacity(level, nodes_len);
         self.extend_layers_for_new_node(nodes_len);
         Self::push_unique(&mut self.layers[level][from_idx], to_idx);
@@ -415,7 +410,7 @@ impl HNSWIndex {
 
     pub fn greedy_search_layer_unfiltered(
         &self,
-        query: &Vector,
+        query: &[f32],
         entry: usize,
         level: usize,
     ) -> usize {
@@ -432,8 +427,8 @@ impl HNSWIndex {
                         continue;
                     }
 
-                    let d_current = self.fast_score(query, &self.vectors[current]);
-                    let d_new = self.fast_score(query, &self.vectors[neighbor]);
+                    let d_current = self.fast_score(query, self.vector_slice(current));
+                    let d_new = self.fast_score(query, self.vector_slice(neighbor));
                     let s_current = self.normalize_score(d_current);
                     let s_new = self.normalize_score(d_new);
 
@@ -520,27 +515,6 @@ impl HNSWIndex {
         });
     }
 
-    fn sorted_neighbors_by_node(&self, node_idx: usize, neighbors: &[usize]) -> Vec<usize> {
-        if neighbors.len() <= 1 {
-            return neighbors.to_vec();
-        }
-        let node_vec = match self.get_vector_by_idx(node_idx) {
-            Some(vec) => vec.clone(),
-            None => return neighbors.to_vec(),
-        };
-        let mut scored: Vec<(usize, f32)> = neighbors
-            .iter()
-            .filter_map(|&neighbor_idx| {
-                self.get_vector_by_idx(neighbor_idx).map(|neighbor_vec| {
-                    let raw = self.fast_score(&node_vec, neighbor_vec);
-                    (neighbor_idx, self.normalize_score(raw))
-                })
-            })
-            .collect();
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-        scored.into_iter().map(|(idx, _)| idx).collect()
-    }
-
     fn cap_layer_neighbors(&mut self, level: usize, node_idx: usize) {
         if level >= self.layers.len() {
             return;
@@ -558,24 +532,55 @@ impl HNSWIndex {
         if level >= self.layers.len() {
             return;
         }
-        let neighbors = {
-            let layer = &self.layers[level];
-            layer[node_idx].clone()
-        };
-        if neighbors.len() <= 1 {
+        let neighbors_len = self.layers[level][node_idx].len();
+        if neighbors_len <= 1 {
             return;
         }
-        let sorted = self.sorted_neighbors_by_node(node_idx, &neighbors);
-        if let Some(layer) = self.layers.get_mut(level) {
-            layer[node_idx] = sorted;
-        }
+        let Some(node_vec) = self.get_vector_by_idx(node_idx) else {
+            return;
+        };
+        let node_vec = node_vec.to_vec();
+        let neighbors = self.layers[level][node_idx].clone();
+        let mut scored: Vec<(usize, f32)> = neighbors
+            .into_iter()
+            .filter_map(|nb| {
+                self.get_vector_by_idx(nb).map(|v| {
+                    let raw = self.fast_score(&node_vec, v);
+                    (nb, self.normalize_score(raw))
+                })
+            })
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        self.layers[level][node_idx] = scored.into_iter().map(|(idx, _)| idx).collect();
+    }
+
+    fn insert_sorted_neighbor(&mut self, level: usize, node_idx: usize, new_nb: usize) {
+        let (node_vec, new_score) = {
+            let nv = match self.get_vector_by_idx(node_idx) {
+                Some(v) => v.to_vec(),
+                None => return,
+            };
+            let s = match self.get_vector_by_idx(new_nb) {
+                Some(v) => self.normalize_score(self.fast_score(&nv, v)),
+                None => return,
+            };
+            (nv, s)
+        };
+        // Clone the current neighbor list so we can binary-search it while accessing vectors.
+        let current = self.layers[level][node_idx].clone();
+        let pos = current.partition_point(|&nb| {
+            self.get_vector_by_idx(nb)
+                .map(|v| self.normalize_score(self.fast_score(&node_vec, v)) <= new_score)
+                .unwrap_or(true)
+        });
+        self.layers[level][node_idx].insert(pos, new_nb);
     }
 }
 
 impl HNSWIndex {
     pub fn greedy_search_layer_with_filter(
         &self,
-        query: &Vector,
+        query: &[f32],
         entry: usize,
         level: usize,
         payloads: &std::collections::HashMap<PointId, Payload>,
