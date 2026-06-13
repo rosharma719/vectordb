@@ -8,3 +8,7 @@ __pycache__/
 *.log
 *.pyc
 *.pyo
+
+# Prediction market experiment cache/results
+experiments/prediction_markets/cache/
+experiments/prediction_markets/results/
