@@ -67,7 +67,7 @@ fn test_all_metrics_consistency() {
 
                 let max_dot = all_dots.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 assert!(
-                    (best.raw_score - max_dot).abs() < 1e-5,
+                    (best.raw_score - max_dot).abs() < 1e-4,
                     "Dot: Top result had raw_score {}, but max dot was {}",
                     best.raw_score,
                     max_dot

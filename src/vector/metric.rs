@@ -54,15 +54,13 @@ fn dot_product_similarity(a: &[f32], b: &[f32]) -> f32 {
         .sum::<f64>() as f32
 }
 
-/// Euclidean distance
+/// Euclidean squared distance, matching the raw_score returned by HNSW search.
 fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    let sum = a
-        .iter()
+    a.iter()
         .zip(b.iter())
         .map(|(x, y)| {
             let diff = (*x as f64) - (*y as f64);
             diff * diff
         })
-        .sum::<f64>();
-    sum.sqrt() as f32
+        .sum::<f64>() as f32
 }

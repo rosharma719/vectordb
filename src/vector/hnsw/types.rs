@@ -20,7 +20,7 @@ pub struct SearchRuntimeOptions {
     pub early_exit_patience: Option<usize>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct NodeCandidate {
     pub(crate) idx: usize,
     pub(crate) raw_score: Score,

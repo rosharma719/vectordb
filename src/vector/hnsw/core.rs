@@ -1,3 +1,4 @@
+use parking_lot::{RwLock, RwLockReadGuard};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -34,7 +35,11 @@ pub struct HnswSnapshot {
 }
 
 pub struct HNSWIndex {
-    pub(crate) layers: Vec<Vec<Vec<usize>>>,
+    /// Per-node neighbor lists at each level.
+    /// `layers[level][node]` is protected by a `RwLock` so concurrent
+    /// inserts can modify different nodes simultaneously while searches
+    /// hold shared read locks.
+    pub(crate) layers: Vec<Vec<RwLock<Vec<usize>>>>,
     pub(crate) vectors: Vec<f32>,
     pub(crate) levels: Vec<usize>,
     pub(crate) entry_point: Option<usize>,
@@ -52,6 +57,12 @@ pub struct HNSWIndex {
     pub(crate) idx_to_point: Vec<PointId>,
     pub(crate) exact_fallback_enabled: bool,
     pub(crate) exact_fallback_threshold: usize,
+    /// Global read-write lock for concurrent insert coordination.
+    /// Write: held exclusively during node allocation and entry-point promotion.
+    /// Read: held by concurrent insert threads during their search phase so
+    ///        the vectors/levels/layers vecs cannot reallocate under them.
+    #[allow(dead_code)]
+    pub(crate) alloc_lock: RwLock<()>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -112,6 +123,7 @@ impl HNSWIndex {
             exact_fallback_enabled: exact_fallback_enabled_override().unwrap_or(false),
             exact_fallback_threshold: exact_fallback_threshold_override()
                 .unwrap_or(DEFAULT_EXACT_FALLBACK_THRESHOLD),
+            alloc_lock: RwLock::new(()),
         }
     }
 
@@ -126,7 +138,7 @@ impl HNSWIndex {
         self.layers
             .get(level)
             .and_then(|layer| layer.get(idx))
-            .map(|neighbors| neighbors.len())
+            .map(|rw| rw.read().len())
     }
 
     pub(crate) fn assign_random_level(&self) -> usize {
@@ -220,7 +232,9 @@ impl HNSWIndex {
             for level_idx in start..=level {
                 let mut layer = Vec::with_capacity(nodes_len);
                 for _ in 0..nodes_len {
-                    layer.push(Vec::with_capacity(self.neighbor_list_capacity(level_idx)));
+                    layer.push(RwLock::new(Vec::with_capacity(
+                        self.neighbor_list_capacity(level_idx),
+                    )));
                 }
                 self.layers.push(layer);
             }
@@ -233,7 +247,7 @@ impl HNSWIndex {
         for (level, layer) in self.layers.iter_mut().enumerate() {
             let cap = if level == 0 { m0 + 1 } else { m + 1 };
             if layer.len() < nodes_len {
-                layer.push(Vec::with_capacity(cap));
+                layer.push(RwLock::new(Vec::with_capacity(cap)));
             }
         }
     }
@@ -262,8 +276,8 @@ impl HNSWIndex {
         }
     }
 
-    pub fn layer_neighbors(&self, level: usize, idx: usize) -> Option<&Vec<usize>> {
-        self.layers.get(level)?.get(idx)
+    pub fn layer_neighbors(&self, level: usize, idx: usize) -> Option<RwLockReadGuard<'_, Vec<usize>>> {
+        Some(self.layers.get(level)?.get(idx)?.read())
     }
 
     pub fn iter_vectors(&self) -> impl Iterator<Item = (&PointId, &[f32])> {
@@ -461,7 +475,9 @@ fn dot_product(query: &[f32], vec: &[f32]) -> f32 {
 #[cfg(all(not(target_arch = "aarch64"), target_arch = "x86_64"))]
 #[inline]
 fn dot_product(query: &[f32], vec: &[f32]) -> f32 {
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
+        unsafe { dot_avx2_fma(query, vec) }
+    } else if std::arch::is_x86_feature_detected!("avx2") {
         unsafe { dot_avx2(query, vec) }
     } else {
         dot_scalar(query, vec)
@@ -483,7 +499,9 @@ fn l2_squared(query: &[f32], vec: &[f32]) -> f32 {
 #[cfg(all(not(target_arch = "aarch64"), target_arch = "x86_64"))]
 #[inline]
 fn l2_squared(query: &[f32], vec: &[f32]) -> f32 {
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
+        unsafe { l2_avx2_fma(query, vec) }
+    } else if std::arch::is_x86_feature_detected!("avx2") {
         unsafe { l2_avx2(query, vec) }
     } else {
         l2_scalar(query, vec)
@@ -541,6 +559,31 @@ unsafe fn dot_avx2(query: &[f32], vec: &[f32]) -> f32 {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn dot_avx2_fma(query: &[f32], vec: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let mut sum = _mm256_setzero_ps();
+    let mut i = 0;
+    let len = query.len().min(vec.len());
+    while i + 8 <= len {
+        let q = _mm256_loadu_ps(query.as_ptr().add(i));
+        let v = _mm256_loadu_ps(vec.as_ptr().add(i));
+        sum = _mm256_fmadd_ps(q, v, sum);
+        i += 8;
+    }
+    let sum128 = _mm_add_ps(_mm256_castps256_ps128(sum), _mm256_extractf128_ps(sum, 1));
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let mut acc = _mm_cvtss_f32(sum128);
+    while i < len {
+        acc += query.get_unchecked(i) * vec.get_unchecked(i);
+        i += 1;
+    }
+    acc
+}
+
+#[cfg(target_arch = "x86_64")]
 #[allow(unsafe_op_in_unsafe_fn)]
 #[inline]
 unsafe fn l2_avx2(query: &[f32], vec: &[f32]) -> f32 {
@@ -553,6 +596,33 @@ unsafe fn l2_avx2(query: &[f32], vec: &[f32]) -> f32 {
         let v = _mm256_loadu_ps(vec.as_ptr().add(i));
         let diff = _mm256_sub_ps(q, v);
         sum = _mm256_add_ps(sum, _mm256_mul_ps(diff, diff));
+        i += 8;
+    }
+    let sum128 = _mm_add_ps(_mm256_castps256_ps128(sum), _mm256_extractf128_ps(sum, 1));
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let sum128 = _mm_hadd_ps(sum128, sum128);
+    let mut acc = _mm_cvtss_f32(sum128);
+    while i < len {
+        let diff = query.get_unchecked(i) - vec.get_unchecked(i);
+        acc += diff * diff;
+        i += 1;
+    }
+    acc
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn l2_avx2_fma(query: &[f32], vec: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let mut sum = _mm256_setzero_ps();
+    let mut i = 0;
+    let len = query.len().min(vec.len());
+    while i + 8 <= len {
+        let q = _mm256_loadu_ps(query.as_ptr().add(i));
+        let v = _mm256_loadu_ps(vec.as_ptr().add(i));
+        let diff = _mm256_sub_ps(q, v);
+        sum = _mm256_fmadd_ps(diff, diff, sum);
         i += 8;
     }
     let sum128 = _mm_add_ps(_mm256_castps256_ps128(sum), _mm256_extractf128_ps(sum, 1));

@@ -107,10 +107,7 @@ impl HNSWIndex {
 
                 best.map(|(id, _)| id)
             }
-            Filter::Not(inner) => {
-                self.find_entry_point_matching_filter(inner, payload_index, payloads)
-            }
-            Filter::Compare { .. } => None,
+            Filter::Not(_) | Filter::Compare { .. } => None,
         }
     }
 
@@ -499,8 +496,8 @@ impl HNSWIndex {
                     Filter::Not(_) | Filter::Compare { .. } => {}
                 }
             }
-            let use_seeds = std::env::var("VECTORDB_DISABLE_FILTER_SEEDS")
-                .map(|v| v == "0" || v.to_lowercase() == "false")
+            let use_seeds = std::env::var("VECTORDB_ENABLE_FILTER_SEEDS")
+                .map(|v| v != "0" && v.to_lowercase() != "false")
                 .unwrap_or(false);
             if use_seeds
                 && let Some(f) = full_filter
@@ -604,7 +601,7 @@ impl HNSWIndex {
                 }
 
                 if let Some(neighs) = self.layer_neighbors(0, curr.node.idx) {
-                    for &nb in neighs {
+                    for &nb in neighs.iter() {
                         if allowed_mask
                             .as_ref()
                             .is_some_and(|mask| !mask.get(nb).copied().unwrap_or(false))

@@ -196,7 +196,7 @@ pub fn neighbor_scan_stride_enabled() -> bool {
 pub fn enforce_neighbor_caps() -> bool {
     ENFORCE_NEIGHBOR_CAPS
         .get_or_init(|| env_bool("VECTORDB_ENFORCE_NEIGHBOR_CAPS"))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 pub(crate) fn log_neighbor_scan_state(expansion_mult: usize, expansion_cap: Option<usize>) {

@@ -107,7 +107,7 @@ impl From<HnswSnapshotV1> for HnswSnapshot {
             entry_point: snapshot.entry_point,
             metric: snapshot.metric,
             m: snapshot.m,
-            m0: snapshot.m,
+            m0: snapshot.m * 2,
             ef: snapshot.ef,
             ef_construct: snapshot.ef_construct,
             max_level_cap: snapshot.max_level_cap,
@@ -305,6 +305,28 @@ impl Segment {
         Ok(point_id)
     }
 
+    /// Parallel bulk insert. Internally chunks to `parallelism * 4` entries per
+    /// `par_insert_batch` call so nearby vectors in the same outer chunk can see
+    /// each other's back-edges. No WAL, no payload support — bulk-load only.
+    pub fn bulk_load(&mut self, entries: &[(PointId, Vector)]) -> Result<usize, DBError> {
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let inner = (parallelism * 4).max(1);
+        let mut total = 0usize;
+        for chunk in entries.chunks(inner) {
+            let n = self.hnsw.par_insert_batch(chunk)?;
+            total += n;
+            for &(point_id, _) in chunk {
+                if point_id >= self.next_id {
+                    self.next_id = point_id.saturating_add(1);
+                }
+            }
+            self.op_count = self.op_count.saturating_add(n as u64);
+        }
+        Ok(total)
+    }
+
     /// Get the vector for a given point ID, if it exists and is not deleted.
     pub fn get_vector(&self, point_id: PointId) -> Option<&[f32]> {
         if self.deleted.contains(&point_id) {
@@ -334,6 +356,7 @@ impl Segment {
         if let Some(p) = self.payloads.get(&point_id) {
             self.payload_index.remove(point_id, p);
         }
+        self.payloads.remove(&point_id);
 
         self.deleted.insert(point_id);
         self.hnsw.mark_deleted(point_id);
@@ -407,7 +430,7 @@ impl Segment {
         opts: &SearchRuntimeOptions,
     ) -> Result<Vec<ScoredPoint>, DBError> {
         self.ensure_not_rebuilding()?;
-        let total_non_deleted = self.hnsw.len() - self.deleted.len();
+        let total_non_deleted = self.hnsw.len().saturating_sub(self.deleted.len());
         if total_non_deleted == 0 {
             return Err(DBError::SearchError(
                 "No active points available to search.".into(),
@@ -441,7 +464,7 @@ impl Segment {
         opts: &SearchRuntimeOptions,
     ) -> Result<(Vec<ScoredPoint>, SearchStats), DBError> {
         self.ensure_not_rebuilding()?;
-        let total_non_deleted = self.hnsw.len() - self.deleted.len();
+        let total_non_deleted = self.hnsw.len().saturating_sub(self.deleted.len());
         if total_non_deleted == 0 {
             return Err(DBError::SearchError(
                 "No active points available to search.".into(),
@@ -477,7 +500,7 @@ impl Segment {
         opts: &SearchRuntimeOptions,
     ) -> Result<Vec<ScoredPoint>, DBError> {
         self.ensure_not_rebuilding()?;
-        let total_non_deleted = self.hnsw.len() - self.deleted.len();
+        let total_non_deleted = self.hnsw.len().saturating_sub(self.deleted.len());
         if total_non_deleted == 0 {
             return Err(DBError::SearchError(
                 "No active points available to search.".into(),

@@ -33,26 +33,36 @@ fn load_ground_truth(path: &Path) -> Vec<Vec<usize>> {
 }
 
 fn build_nytimes_segment(segment: &mut Segment, base: &[Vector], logs: &TestLogConfig) {
+    let outer_chunk = logs.insert_progress_every.max(1000);
+
     logs.log_info(&format!(
-        "🚀 Inserting {} vectors with dataset-aligned IDs...",
-        base.len()
+        "🚀 Bulk-loading {} vectors (outer_chunk={})...",
+        base.len(),
+        outer_chunk,
     ));
     let start_insert = Instant::now();
     let mut last_log = start_insert;
-    for (i, v) in base.iter().enumerate() {
-        let dataset_id = i as u64;
-        segment.insert_with_id(dataset_id, v.clone(), None).unwrap();
-        if logs.insert_progress_every > 0 && i != 0 && i % logs.insert_progress_every == 0 {
-            let now = Instant::now();
-            logs.log_info(&format!(
-                "Inserted {} vectors (+{:?}, chunk={:?})",
-                i,
-                now - start_insert,
-                now - last_log
-            ));
-            last_log = now;
-        }
+    let mut inserted = 0usize;
+
+    let entries: Vec<(u64, Vector)> = base
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (i as u64, v.clone()))
+        .collect();
+
+    for chunk in entries.chunks(outer_chunk) {
+        segment.bulk_load(chunk).unwrap();
+        inserted += chunk.len();
+        let now = Instant::now();
+        logs.log_info(&format!(
+            "Inserted {} vectors (+{:?}, chunk={:?})",
+            inserted,
+            now - start_insert,
+            now - last_log,
+        ));
+        last_log = now;
     }
+
     let insert_dur = start_insert.elapsed();
     let insert_ms = insert_dur.as_secs_f64() * 1000.0 / base.len().max(1) as f64;
     logs.log_info(&format!(

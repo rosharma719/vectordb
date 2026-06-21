@@ -144,7 +144,7 @@ impl DatasetBuildConfig {
     pub fn from_env(prefix: &str, default_m: usize, default_max_level: usize) -> Self {
         let m =
             env_usize_first(&["VECTORDB_M", &format!("VECTORDB_{prefix}_M")]).unwrap_or(default_m);
-        let m0 = env_usize_first(&["VECTORDB_M0", &format!("VECTORDB_{prefix}_M0")]).unwrap_or(m);
+        let m0 = env_usize_first(&["VECTORDB_M0", &format!("VECTORDB_{prefix}_M0")]).unwrap_or(m * 2);
         let max_level = env_usize_first(&[
             "VECTORDB_MAX_LEVEL",
             &format!("VECTORDB_{prefix}_MAX_LEVEL"),
@@ -256,7 +256,7 @@ impl SearchConfig {
             "VECTORDB_EF_CONSTRUCT",
             &format!("VECTORDB_{prefix}_EF_CONSTRUCT"),
         ])
-        .unwrap_or(100);
+        .unwrap_or(200);
         Self {
             top_k,
             ef_values,

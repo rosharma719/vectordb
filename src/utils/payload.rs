@@ -106,7 +106,7 @@ impl Payload {
             }
             None => {
                 log::debug!(target: "payload", "Field '{}' is missing from the payload.", field);
-                Err(DBError::InvalidPayload(format!("Missing field: {field}")))
+                Ok(false)
             }
         }
     }

@@ -44,7 +44,7 @@ impl From<HnswSnapshotV1> for HnswSnapshot {
             entry_point: snapshot.entry_point,
             metric: snapshot.metric,
             m: snapshot.m,
-            m0: snapshot.m,
+            m0: snapshot.m * 2,
             ef: snapshot.ef,
             ef_construct: snapshot.ef_construct,
             max_level_cap: snapshot.max_level_cap,
@@ -75,7 +75,8 @@ impl HNSWIndex {
         let mut layers = HashMap::new();
         for (level, layer) in self.layers.iter().enumerate() {
             let mut level_map: HashMap<PointId, Vec<PointId>> = HashMap::new();
-            for (idx, neighbors) in layer.iter().enumerate() {
+            for (idx, neighbors_lock) in layer.iter().enumerate() {
+                let neighbors = neighbors_lock.read();
                 if neighbors.is_empty() {
                     continue;
                 }
@@ -150,7 +151,7 @@ impl HNSWIndex {
             let cap = if level == 0 { m0 + 1 } else { snapshot.m + 1 };
             let mut layer = Vec::with_capacity(ids.len());
             for _ in 0..ids.len() {
-                layer.push(Vec::with_capacity(cap));
+                layer.push(parking_lot::RwLock::new(Vec::with_capacity(cap)));
             }
             layers.push(layer);
         }
@@ -166,7 +167,7 @@ impl HNSWIndex {
                     .iter()
                     .filter_map(|n| point_to_idx.get(n).copied())
                     .collect::<Vec<_>>();
-                layers[*level][idx] = mapped;
+                *layers[*level][idx].write() = mapped;
             }
         }
 
@@ -192,6 +193,7 @@ impl HNSWIndex {
             exact_fallback_enabled: exact_fallback_enabled_override().unwrap_or(false),
             exact_fallback_threshold: exact_fallback_threshold_override()
                 .unwrap_or(snapshot.exact_fallback_threshold),
+            alloc_lock: parking_lot::RwLock::new(()),
         }
     }
 

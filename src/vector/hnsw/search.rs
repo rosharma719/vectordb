@@ -199,8 +199,8 @@ impl HNSWIndex {
                 sort_key: entry_score,
             };
 
-            scratch.candidate_queue.push(initial.clone());
-            scratch.result_set.push(NodeResult(initial.clone()));
+            scratch.candidate_queue.push(initial);
+            scratch.result_set.push(NodeResult(initial));
             if scratch.mark_visited(start_entry) {
                 visited_count += 1;
             }
@@ -230,7 +230,9 @@ impl HNSWIndex {
 
                 let current = scratch.candidate_queue.pop().unwrap();
                 expanded += 1;
-                if let Some(neighbors) = self.layers.get(level).and_then(|l| l.get(current.idx)) {
+                let neighbors_lock_opt = self.layers.get(level).and_then(|l| l.get(current.idx));
+                if let Some(neighbors_lock) = neighbors_lock_opt {
+                    let neighbors = neighbors_lock.read();
                     const BATCH: usize = 16;
                     let mut batch = [0usize; BATCH];
                     let mut batch_len = 0usize;
@@ -249,7 +251,7 @@ impl HNSWIndex {
                             && !rotate_neighbor_scans
                             && !stride_enabled;
                         if use_simple_scan {
-                            for &neighbor in neighbors {
+                            for &neighbor in neighbors.iter() {
                                 if self.deleted.get(neighbor).copied().unwrap_or(false)
                                     || !scratch.mark_visited(neighbor)
                                 {
@@ -279,7 +281,7 @@ impl HNSWIndex {
                                                 raw_score: raw,
                                                 sort_key: score_val,
                                             };
-                                            scratch.candidate_queue.push(sp.clone());
+                                            scratch.candidate_queue.push(sp);
 
                                             if improves_result_set {
                                                 scratch.result_set.push(NodeResult(sp));
@@ -396,7 +398,7 @@ impl HNSWIndex {
                                                 raw_score: raw,
                                                 sort_key: score_val,
                                             };
-                                            scratch.candidate_queue.push(sp.clone());
+                                            scratch.candidate_queue.push(sp);
 
                                             if improves_result_set {
                                                 scratch.result_set.push(NodeResult(sp));
@@ -527,11 +529,11 @@ impl HNSWIndex {
                 }
             }
 
-            let mut results: Vec<NodeCandidate> = std::mem::take(&mut scratch.result_set)
+            let results: Vec<NodeCandidate> = std::mem::take(&mut scratch.result_set)
+                .into_sorted_vec()
                 .into_iter()
                 .map(|rp| rp.0)
                 .collect();
-            results.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap());
 
             if let Some(ctx) = trace.as_mut() {
                 let ctx = &mut **ctx;
